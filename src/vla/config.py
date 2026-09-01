@@ -100,6 +100,20 @@ class LLMClientConfig(BaseModel):
     base_url_env: str
 
 
+class PuppeteerConfig(BaseModel):
+    """Puppeteer CDP 连接配置(SSOT: requirements.md FR-2.10)。
+
+    debugging_port: Chrome 启动时的 --remote-debugging-port。
+    默认 9222(Chrome 默认)。
+    """
+
+    debugging_port: int = 9222
+    cdp_host: str = "localhost"
+
+    def cdp_url(self) -> str:
+        return f"http://{self.cdp_host}:{self.debugging_port}"
+
+
 # ---------------- 顶层 ----------------
 
 
@@ -114,6 +128,7 @@ class VLAConfig(BaseModel):
     history: HistoryConfig
     logging: LoggingConfig
     llm_client: LLMClientConfig
+    puppeteer: PuppeteerConfig = PuppeteerConfig()
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "VLAConfig":
