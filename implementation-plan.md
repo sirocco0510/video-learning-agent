@@ -202,224 +202,458 @@ print(f'mode={src.mode}, size={src.path.stat().st_size}')
 
 ---
 
-## Phase 3:字幕三级策略(4h)
+## Phase 3:字幕平台无关三级策略(6h)
+
+> **重大重写**:从"B站限定"升级为"平台无关"。2026-09-01 spike 已验证 Puppeteer + page.evaluate + context.request 通道。
 
 ### 必读
-- [[requirements#FR-2 字幕提取(三级策略)]]
+- [[requirements#FR-2 字幕提取(平台无关三级策略)]]
 - [[requirements#6.1 subtitle/*]]
 
 ### 文件清单
-- `src/vla/subtitle/bilibili_official.py`
-- `src/vla/subtitle/browser_plugin.py`
-- `src/vla/subtitle/strategy.py`
+- `src/vla/subtitle/platform_adapter.py` **(NEW)** — Protocol + Registry
+- `src/vla/subtitle/bilibili_adapter.py` **(NEW)** — B站 adapter
+- `src/vla/subtitle/internal_site_adapter.py` **(NEW)** — 内部网站 adapter stub
+- `src/vla/subtitle/browser_driver.py` **(NEW)** — Puppeteer + 4 种 JS 探测
+- `src/vla/source/browser_record.py` **(NEW)** — 录屏触发 + 监听 + 抽音
+- `src/vla/subtitle/bilibili_official.py` — 保留,作为 `BilibiliAdapter.fetch_api_subtitle` 内部实现
+- `src/vla/subtitle/browser_plugin.py` — **废弃**,仅保留 `parse()` 方法
+- `src/vla/subtitle/strategy.py` — **重写**,从"扫描 + 弹窗"改为"adapter 三级降级"
+- `config/vla.yaml` — 新增 `puppeteer` 配置块 + `platforms` 段
+
+### 已验证 spike(2026-09-01)
+
+`scripts/spike_browser_subtitle.py` 验证结果:
+
+| 项 | 结果 |
+|---|---|
+| `connect_over_cdp("http://localhost:9222")` | ✅ 通 |
+| `page.goto(B站 URL)` 后台标签页 | ✅ 不抢焦点 |
+| `page.evaluate(fetch player/v2)` | ✅ 拿到 `subtitles count=1` |
+| `context.request.get(subtitle_url)` | ✅ status 200,跨 origin 通过 |
+| body[] | 1143 条中文 AI 字幕(`ai-zh`) |
+| dump 到 `.srt` | ✅ 72947 bytes / 4571 行 |
 
 ### 实现顺序(强依赖)
 
-#### Step 1:`bilibili_official.py`(1.5h)
+#### Step 1:`platform_adapter.py`(0.5h)
 
-**B站 API 调用顺序**(严格遵守):
-```python
-# Step 1: 获取 cid
-GET https://api.bilibili.com/x/web-interface/view?bvid={bvid}
-# Response: data.cid, data.title
-
-# Step 2: 获取字幕列表
-GET https://api.bilibili.com/x/player/v2?bvid={bvid}&cid={cid}
-# Response: data.subtitle.subtitles[]
-
-# Step 3: 下载字幕 JSON
-GET https://{subtitle_url}  # subtitle_url 以 // 开头,补 https:
-# Response: { body: [{ from, to, content }] }
-```
-
-**关键 header**:
-```python
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 ... Chrome/120.0.0.0",
-    "Referer": "https://www.bilibili.com",
-}
-```
-
-**语言优先级**:`["zh-Hans", "zh-CN", "zh-Hant", "en-US", "en"]`,命中第一个。
-
-#### Step 2:`browser_plugin.py`(1.5h)
-
-**目录扫描顺序**(按 `config.browser_plugin.plugin_paths`):
-```python
-PLUGIN_PATHS = [
-    "~/Documents/VideoTrans/subtitles",
-    "~/Downloads",
-]
-```
-
-**匹配规则**:
-1. 精确:`{title}_{bvid}.{srt|vtt|json|ass}`
-2. 模糊:`*{bvid}*` 且后缀匹配
-3. 都找不到 → 返回 None
-
-**格式解析**:
-| 后缀 | 解析方法 |
-|------|----------|
-| `.srt` | `pysrt.open(path)`,`"\n".join(s.text for s in subs)` |
-| `.vtt` | `webvtt.WebVTT().read(path)`,`"\n".join(s.text for s in captions)` |
-| `.json` | 递归提取字符串字段,按时间戳排序 |
-| `.ass` | 解析 `Dialogue:` 行,取第 10 个逗号之后的内容 |
-
-#### Step 3:`strategy.py`(1.5h)
-
-按 [[requirements#6.1 subtitle/strategy.py]] 实现三级调度。
-
-**关键设计**:弹窗是策略 ② 的一部分,**内化进 strategy**,而不是放在主调度。
-
-**降级语义**(严格遵守):
-```
-策略 ① 失败  ──┐
-策略 ② 失败  ──┼──→ 返回 None → 主调度走策略 ③
-策略 ② 超时  ──┤   (注意:不是 transcribe_fail,而是字幕获取失败,主调度接手走下载/录屏)
-用户点"跳过" ──┘
-```
+**Protocol 定义**:
 
 ```python
-from dataclasses import dataclass
-from ..state.plugin_status import PluginStatus  # FR-2.9/2.10
+from typing import Protocol
+from ..models import SubtitleResult
 
-class SubtitleStrategy:
-    def __init__(self, config, log, notifier, plugin_status: PluginStatus):
+class PlatformAdapter(Protocol):
+    @classmethod
+    def match(cls, url: str) -> bool: ...
+
+    def fetch_api_subtitle(self, url: str) -> tuple[str, dict] | None:
+        """策略 ①:平台公开 API(httpx)。"""
+
+    def fetch_browser_subtitle(self, driver, url: str) -> tuple[str, dict] | None:
+        """策略 ②:Puppeteer 通用 JS 探测。"""
+
+    def fetch_via_recording(self, driver, url: str, duration_sec: int) -> tuple[str, dict] | None:
+        """策略 ③:Puppeteer 录屏扩展 + Whisper。"""
+```
+
+**Registry**:
+
+```python
+class PlatformAdapterRegistry:
+    def __init__(self):
+        self._adapters: list[type[PlatformAdapter]] = []
+
+    def register(self, adapter_cls: type[PlatformAdapter]) -> None: ...
+
+    def get_for_url(self, url: str) -> PlatformAdapter | None:
+        for cls in self._adapters:
+            if cls.match(url):
+                return cls(driver=self._driver)
+        return None
+```
+
+**TDD**:测试 register / get_for_url / 域名匹配 / 找不到返回 None。
+
+#### Step 2:`browser_driver.py`(2h,核心模块)
+
+**职责**:Puppeteer 通用驱动 + 4 种 JS 探测 + 跨域处理。
+
+```python
+class BrowserDriver:
+    def __init__(self, config: VLAConfig):
         self.config = config
-        self.log = log
-        self.notifier = notifier
-        self.official = BilibiliOfficialSubtitle()
-        self.plugin = BrowserPluginSubtitle(config)
-        self.plugin_status = plugin_status  # FR-2.10 注入 session 级单例
+        self._browser: playwright.sync_api.Browser | None = None
 
-    def get_subtitle(self, url, bvid, title) -> SubtitleResult | None:
-        """
-        三级调度(含插件状态机,FR-2.9/2.10/2.11):
-          ① B站官方 CC → SubtitleResult(source="official")
-          ② 浏览器插件(状态机控制)
-              - unavailable → 直接降级,不再尝试
-              - unknown/available → 扫描 + 弹窗
-          ③ 返回 None,主调度走下载/录屏 + Whisper
-        """
-        # ===== 策略 ① B站官方 CC =====
+    def connect(self) -> playwright.sync_api.Browser:
+        """connect_over_cdp 到用户 Chrome。"""
+        url = f"http://localhost:{self.config.puppeteer.debugging_port}"
+        self._browser = playwright.sync_api.sync_playwright().start().chromium.connect_over_cdp(url)
+        return self._browser
+
+    def new_background_page(self, browser=None):
+        """context.new_page(),后台标签页,不抢用户焦点。"""
+        ctx = browser.contexts[0] if browser else self._browser.contexts[0]
+        return ctx.new_page()
+
+    def fetch_subtitle_via_browser(
+        self, page, url: str
+    ) -> tuple[str, dict] | None:
+        """4 种 JS 探测,首个命中即返回。"""
+        page.goto(url, wait_until="domcontentloaded")
+        page.wait_for_timeout(3000)  # 等播放器初始化
+
+        # 1. <track> 标签
+        track = page.evaluate("""() => {
+            const t = document.querySelector('video track[kind="subtitles"], video track[kind="captions"]');
+            return t ? {src: t.src, lang: t.srclang} : null;
+        }""")
+        if track:
+            text = self._fetch_subtitle_text(page, track["src"])
+            if text:
+                return text, {"source": "browser", "method": "track", "lang": track["lang"]}
+
+        # 2. __INITIAL_STATE__ 找字幕 URL
+        url_found = page.evaluate("""() => {
+            const init = window.__INITIAL_STATE__ || window.__INITIAL_DATA__;
+            if (!init) return null;
+            const urls = [];
+            const walk = (obj) => {
+                if (typeof obj === 'string' && /^https?:\/\//.test(obj) && /subtitle|caption/i.test(obj)) {
+                    urls.push(obj);
+                } else if (typeof obj === 'object' && obj !== null) {
+                    for (const v of Object.values(obj)) walk(v);
+                }
+            };
+            walk(init);
+            return urls[0] || null;
+        }""")
+        if url_found:
+            text = self._fetch_subtitle_text(page, url_found)
+            if text:
+                return text, {"source": "browser", "method": "initial_state"}
+
+        # 3. window.player.getSubtitle()
+        player_sub = page.evaluate("""async () => {
+            if (window.player?.getSubtitle) {
+                return await window.player.getSubtitle();
+            }
+            if (window.player?.subtitle) {
+                return window.player.subtitle;
+            }
+            return null;
+        }""")
+        if player_sub:
+            text = self._extract_text_from_player_subtitle(player_sub)
+            if text:
+                return text, {"source": "browser", "method": "player_object"}
+
+        # 4. DOM 选择器扫描
+        dom_text = page.evaluate("""() => {
+            const sels = ['[class*="subtitle"]', '[class*="caption"]', '[id*="subtitle"]'];
+            for (const sel of sels) {
+                const el = document.querySelector(sel);
+                if (el && el.textContent.trim()) return el.textContent.trim();
+            }
+            return null;
+        }""")
+        if dom_text:
+            return dom_text, {"source": "browser", "method": "dom_selector"}
+
+        return None
+
+    def _fetch_subtitle_text(self, page, url: str) -> str | None:
+        """跨 origin 用 context.request;同 origin 用 page.evaluate fetch。"""
+        if url.startswith("//"):
+            url = "https:" + url
+        ctx = page.context
         try:
-            result = self.official.get_subtitle(url)
+            resp = ctx.request.get(url)
+            if resp.status == 200:
+                # 根据 content-type / url 后缀判断格式
+                return self._parse_response(resp, url)
+        except Exception:
+            pass
+        return None
+```
+
+**TDD**:
+- mock `playwright.sync_api.Browser`,模拟每种探测方法的 page.evaluate 返回
+- 测试 track / initial_state / player / DOM 各路径
+- 测试跨 origin context.request 调用
+- 测试 4 种都 miss 时返回 None
+
+#### Step 3:`browser_record.py`(1.5h)
+
+**职责**:Puppeteer 触发 Screen Recorder 扩展 → 监听下载 → Whisper 直读扩展输出(扩展自带抽音)。
+
+```python
+class BrowserRecorder:
+    def __init__(self, config: VLAConfig, transcriber):
+        self.config = config
+        self.transcriber = transcriber
+        self.download_dir = Path(config.puppeteer.recording_output_dir).expanduser()
+
+    def record_and_transcribe(
+        self, page, url: str, duration_sec: int, title: str = ""
+    ) -> tuple[str, dict] | None:
+        """
+        录屏 + Whisper 转写。返回 (text, metadata)。
+        """
+        page.goto(url, wait_until="domcontentloaded")
+        page.wait_for_timeout(3000)
+
+        # 1. 触发 Screen Recorder 开始(预设快捷键 Control+Shift+R)
+        page.keyboard.press("Control+Shift+R")
+        page.wait_for_timeout(2000)  # 等录屏启动
+
+        # 2. 等视频时长(留 5s 余量)
+        page.wait_for_timeout((duration_sec + 5) * 1000)
+
+        # 3. 触发停止(同款快捷键)
+        page.keyboard.press("Control+Shift+R")
+
+        # 4. 监听下载目录,等 .webm 落地
+        webm_path = self._wait_for_webm(timeout=30)
+
+        # 5. Whisper 转写(扩展自带抽音,直接读 .webm/.ogg)
+        text = self.transcriber.transcribe(webm_path)
+
+        # 6. 清理(成功才删;失败保留)
+        webm_path.unlink()
+
+        return text, {
+            "source": "whisper",
+            "duration_sec": duration_sec,
+            "method": "screen_recorder",
+        }
+```
+
+**TDD**:
+- mock `page.keyboard.press` 验证快捷键触发
+- mock 下载目录监听,验证 WebM 等待逻辑
+- mock Whisper 转写
+- 测试转写失败时 WebM 保留
+
+#### Step 4:`bilibili_adapter.py`(1h)
+
+**实现** `PlatformAdapter`,内部用 spike 已验证的 Puppeteer 流程。
+
+```python
+class BilibiliAdapter:
+    def __init__(self, driver: BrowserDriver):
+        self.driver = driver
+        self.official = BilibiliOfficialSubtitle()  # 复用现有 httpx 实现
+
+    @classmethod
+    def match(cls, url: str) -> bool:
+        from urllib.parse import urlparse
+        host = urlparse(url).hostname or ""
+        return host.endswith("bilibili.com") or host == "b23.tv"
+
+    def fetch_api_subtitle(self, url: str) -> tuple[str, dict] | None:
+        """策略 ①:复用现有 B站官方 httpx 调用。"""
+        return self.official.get_subtitle(url)
+
+    def fetch_browser_subtitle(self, driver, url: str) -> tuple[str, dict] | None:
+        """策略 ②:Puppeteer + page.evaluate fetch player/v2(已 spike 验证)。"""
+        page = driver.new_background_page()
+        try:
+            page.goto(url, wait_until="domcontentloaded")
+            page.wait_for_timeout(3000)
+            bvid = self.official.extract_bv_id(url)
+
+            # 同 origin fetch player/v2
+            player_data = page.evaluate(f"""
+                async () => {{
+                    const cidResp = await fetch('https://api.bilibili.com/x/web-interface/view?bvid={bvid}', {{credentials: 'include'}});
+                    const cidData = await cidResp.json();
+                    const cid = cidData?.data?.cid;
+                    if (!cid) return null;
+                    const subResp = await fetch(`https://api.bilibili.com/x/player/v2?bvid={bvid}&cid=${{cid}}`, {{credentials: 'include'}});
+                    return await subResp.json();
+                }}
+            """)
+            if not player_data:
+                return None
+            subs = (player_data.get("data") or {}).get("subtitle", {}).get("subtitles", [])
+            if not subs:
+                return None
+
+            # 按语言优先级选
+            chosen = next((s for s in subs if s.get("lan") in ("zh-Hans", "zh-CN")), subs[0])
+            sub_url = chosen["subtitle_url"]
+            if sub_url.startswith("//"):
+                sub_url = "https:" + sub_url
+
+            # 跨 origin:context.request
+            ctx = page.context
+            resp = ctx.request.get(sub_url)
+            body_data = resp.json()
+            text = "\n".join(item["content"] for item in body_data.get("body", []))
+            return text, {
+                "source": "browser",
+                "method": "bilibili_player_v2",
+                "language": chosen.get("lan"),
+                "ai_status": chosen.get("ai_status"),
+            }
+        finally:
+            page.close()
+
+    def fetch_via_recording(self, driver, url: str, duration_sec: int) -> tuple[str, dict] | None:
+        """策略 ③:复用 BrowserDriver + BrowserRecorder。"""
+        # 由 Phase 8 主调度直接调用 BrowserRecorder,adapter 这里只标 stub
+        return None
+```
+
+**TDD**:
+- `match`:测试 bilibili.com / b23.tv / 其他域名
+- `fetch_api_subtitle`:Mock BilibiliOfficialSubtitle
+- `fetch_browser_subtitle`:Mock driver + page.evaluate + context.request,验证完整流程
+- `fetch_via_recording`:返回 None(由主调度直接调 recorder)
+
+#### Step 5:`internal_site_adapter.py`(0.25h)
+
+```python
+class InternalSiteAdapter:
+    @classmethod
+    def match(cls, url: str) -> bool:
+        return False  # 等公司下发账号后实现
+
+    def fetch_api_subtitle(self, url: str) -> tuple[str, dict] | None:
+        raise NotImplementedError("等公司下发账号")
+
+    def fetch_browser_subtitle(self, driver, url: str) -> tuple[str, dict] | None:
+        raise NotImplementedError("等公司下发账号")
+
+    def fetch_via_recording(self, driver, url: str, duration_sec: int) -> tuple[str, dict] | None:
+        raise NotImplementedError("等公司下发账号")
+```
+
+**TDD**:测试 `match=False` + 三个方法抛 `NotImplementedError`。
+
+#### Step 6:`strategy.py` 重写(1h)
+
+旧实现:扫描 VideoTrans 目录 + 弹窗。新实现:三级降级 + adapter 注册。
+
+```python
+class SubtitleStrategy:
+    def __init__(self, registry: PlatformAdapterRegistry, driver: BrowserDriver, recorder: BrowserRecorder, log):
+        self.registry = registry
+        self.driver = driver
+        self.recorder = recorder
+        self.log = log
+
+    def get_subtitle(
+        self, url: str, duration_sec: int = 600
+    ) -> SubtitleResult | None:
+        """
+        三级降级(平台无关):
+          ① adapter.fetch_api_subtitle(url)
+          ② adapter.fetch_browser_subtitle(driver, url)
+          ③ recorder.record_and_transcribe(driver, url, duration_sec)
+        任一失败降级到下一级;仅 ③ 失败返回 None。
+        """
+        adapter = self.registry.get_for_url(url)
+        if adapter is None:
+            self.log.warning(f"无匹配 adapter,跳 ①;直接走 ② + ③:{url}")
+            adapter = FallbackAdapter(self.driver, self.recorder)
+
+        # ①
+        try:
+            result = adapter.fetch_api_subtitle(url)
             if result:
-                text, metadata = result
-                self.log.info(f"✓ 策略 ① 命中:B站官方字幕 ({metadata.get('language')})")
-                return SubtitleResult(
-                    text=text, source="official", metadata=metadata
-                )
+                text, meta = result
+                self.log.info(f"✓ 策略 ① 命中(API)")
+                return SubtitleResult(text=text, source="api", metadata=meta)
         except Exception as e:
             self.log.warning(f"策略 ① 失败:{e}")
 
-        # ===== 策略 ② 浏览器插件(FR-2.10 状态机)=====
-        # 2.1.0 先看 session 级状态
-        status = self.plugin_status.get()
-        if status == "unavailable":
-            self.log.info("⏭️ 插件状态=unavailable,跳过整个策略 ②")
-            return None
+        # ②
+        try:
+            browser = self.driver.connect()
+            result = adapter.fetch_browser_subtitle(browser, url)
+            if result:
+                text, meta = result
+                self.log.info(f"✓ 策略 ② 命中(browser:{meta.get('method')})")
+                return SubtitleResult(text=text, source="browser", metadata=meta)
+        except Exception as e:
+            self.log.warning(f"策略 ② 失败:{e}")
 
-        # 2.1.1 状态 = unknown 或 available → 先扫描目录
-        path = self.plugin.find_subtitle(bvid, title)
-        if path:
-            text = self.plugin.parse(path)
-            self.log.info(f"✓ 策略 ② 命中(已有文件):{path}")
-            self.plugin_status.mark_available()
-            return SubtitleResult(
-                text=text, source="plugin",
-                metadata={"file": str(path), "trigger": "scan_hit"},
-            )
+        # ③
+        try:
+            browser = self.driver.connect()
+            result = adapter.fetch_via_recording(browser, url, duration_sec)
+            if result:
+                text, meta = result
+                self.log.info(f"✓ 策略 ③ 命中(whisper)")
+                return SubtitleResult(text=text, source="whisper", metadata=meta)
+        except Exception as e:
+            self.log.error(f"策略 ③ 失败(计入 transcribe_fail):{e}")
 
-        # 2.1.2 扫描无 → 状态机判断:unknown 才弹窗,available 直接降级
-        if status == "available":
-            self.log.info("📭 插件可用但本次扫描无文件,降级到策略 ③")
-            return None
-
-        # 2.2 status=unknown → 弹窗询问用户(FR-2.9 一次启动)
-        timeout = self.config.browser_plugin.remind_timeout_sec
-        self.notifier.info("需要浏览器插件", f"准备转写:{title}")
-        user_choice = self.notifier.ask_open_browser(
-            f"启用 VideoTrans:{title}", url, timeout_sec=timeout
-        )
-
-        if user_choice == "timeout":
-            self.log.info("⌛ 弹窗超时,降级 + 标记 unavailable")
-            self.plugin_status.mark_unavailable(reason="dialog_timeout")
-            return None
-
-        if user_choice == "skip":
-            self.log.info("⏭️ 用户跳过,降级 + 标记 unavailable")
-            self.plugin_status.mark_unavailable(reason="user_skip")
-            return None
-
-        # 2.3 用户"已开启" → 等文件出现
-        path = self.plugin.wait_for_subtitle(bvid, title, timeout=timeout)
-        if path:
-            text = self.plugin.parse(path)
-            self.plugin_status.mark_available()
-            self.log.info(f"✓ 策略 ② 命中(用户开启后):{path}")
-            return SubtitleResult(
-                text=text, source="plugin",
-                metadata={"file": str(path), "trigger": "user_opened"},
-            )
-
-        # 2.4 等文件超时 → 标记 unavailable + 降级
-        self.log.info("⌛ 等文件超时,降级 + 标记 unavailable")
-        self.plugin_status.mark_unavailable(reason="wait_timeout")
         return None
-
-        # ===== 策略 ③ 由主调度器 _process_one 接管 =====
 ```
 
-**`MacOSNotifier.ask_open_browser` 接口扩展**(返回三类):
+**TDD**:
+- Mock adapter,3 个 fetch 方法分别成功 → 测试对应 source
+- ① 失败 / ② 命中 → 验证不会调 ③
+- ① ② 失败 / ③ 命中 → 验证 ③ 调用
+- 全部失败 → 返回 None
+- 无匹配 adapter → FallbackAdapter
 
-```python
-def ask_open_browser(
-    self,
-    title: str,
-    url: str,
-    timeout_sec: int = 30,
-) -> str:
-    """
-    返回:
-      "opened"   用户点击"已开启"(超时前)
-      "skip"     用户点击"跳过该视频"
-      "timeout"  超时未响应(降级到策略 ③)
-    """
-    # osascript display dialog 不直接支持 timeout 异步
-    # 实现思路:subprocess.Popen 异步启动,主线程 sleep(timeout_sec)
-    # 若用户在 timeout 前返回, kill osascript
-    # 否则 kill 并返回 "timeout"
+#### Step 7:`config/vla.yaml` 新增配置(0.25h)
+
+```yaml
+puppeteer:
+  debugging_port: 9222
+  recording_output_dir: "~/Downloads"
+  recording_hotkey: "Control+Shift+R"
+
+platforms:
+  bilibili:
+    enabled: true
+    match_hosts:
+      - "bilibili.com"
+      - "b23.tv"
+  internal_site:
+    enabled: false  # 等账号下发
+    match_hosts: []
 ```
+
+#### Step 8:`browser_plugin.py` 保留 `parse()` 即可(0.25h)
+
+删 `find_subtitle` / `wait_for_subtitle`,只保留 `parse(path) → str`。`BrowserDriver._fetch_subtitle_text` 用它解析 Puppeteer 取回的字幕文件。
+
+#### Step 9:旧代码清理(0.25h)
+
+- `subtitle/strategy.py` 旧逻辑 + `state/plugin_status.py` 状态机 + `ui/macos_notify.py` 的 `ask_open_browser` → **全部删除**
+- `tests/test_subtitle_strategy.py` 旧测试 → **删除**
+- `tests/test_plugin_status.py` → **删除**
+- `tests/test_macos_notify.py` → 保留 info/warning/alert 测试,删 `ask_open_browser` 测试
 
 ### 验收
+
 ```python
-# 测试 1:B站官方字幕(找一个有 CC 的视频)
-url = "https://www.bilibili.com/video/BV1xxxxxxx"
-strategy = SubtitleStrategy(cfg, log, notifier)
-result = strategy.get_subtitle(url, "BV1xxxxxxx", "测试标题")
-assert result.source == "official"
+# 测试 1:Phase 3 单元测试全绿
+uv run pytest tests/test_platform_adapter.py tests/test_browser_driver.py                 tests/test_browser_record.py tests/test_bilibili_adapter.py                 tests/test_internal_site_adapter.py tests/test_subtitle_strategy.py                 tests/test_browser_plugin.py -v
+# 期望:全部 pass(约 35-40 个测试)
 
-# 测试 2:无字幕视频 + 用户点"跳过" → 返回 None(由主调度走兜底)
-result = strategy.get_subtitle(no_sub_url, bvid, title)
-assert result is None  # 不是 transcribe_fail
+# 测试 2:跑现有 spike 脚本,验证 B站端到端通道仍通
+uv run python scripts/spike_browser_subtitle.py
+# 期望:✓ 新建后台标签页 → view API → player/v2 → context.request → .srt dump
 
-# 测试 3:插件目录有文件 → 直接用 plugin
-Path("~/Documents/VideoTrans/subtitles/test_BV1yyy.srt").write_text(srt_content)
-result = strategy.get_subtitle(any_url, "BV1yyy", "test")
-assert result.source == "plugin"
-assert result.metadata["trigger"] == "scan_hit"
+# 测试 3:BilibiliAdapter.fetch_browser_subtitle 端到端(mock driver)
+# - 模拟 page.evaluate 返回 player/v2 响应
+# - 模拟 context.request 返回 body JSON
+# - 期望:返回 (text, metadata) 其中 source="browser", method="bilibili_player_v2"
 
-# 测试 4:弹窗超时 → 返回 None(主调度走兜底)
-mock_notifier = Mock(ask_open_browser=Mock(return_value="timeout"))
-strategy = SubtitleStrategy(cfg, log, mock_notifier)
-result = strategy.get_subtitle(url, bvid, title)
-assert result is None
-assert not log.has_transcribe_fail()  # 关键:不该记为转写失败
+# 测试 4:SubtitleStrategy 三级降级
+# - Mock adapter,① 成功 → 不调 ②③
+# - ① 失败 / ② 成功 → 不调 ③
+# - 全部失败 → 返回 None
+# - ③ 失败 → 不抛异常,返回 None
 ```
-
----
 
 ## Phase 4:流式转写(2h)
 

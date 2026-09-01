@@ -41,94 +41,130 @@ tags:
 | FR-1.5 | 可下载 → 下载;不可下载 → 系统录屏降级                                  | P0  |
 | FR-1.6 | 下载仅取最低画质,节约磁盘                                           | P0  |
 
-### FR-2 字幕提取(三级策略)
+### FR-2 字幕提取(平台无关三级策略)
 
-优先级:**① B站官方 CC → ② 浏览器插件 → ③ 下载/录屏 + Whisper**
+> **设计原则**:项目目标是支持多种视频网站(B站、公司内部学习平台、未来 YouTube 等)。
+> 通过 `PlatformAdapter` 抽象实现**平台无关**,每个平台实现自己的适配器。
+> 三级降级在每个平台内部独立执行。
 
-> **关键降级语义**:策略 ② 失败或超时,**不是跳过**,而是降级到策略 ③。
-> 也就是说,**只要策略 ①② 都拿不到字幕,无论中间发生了什么,最终都要走视频源工厂 + Whisper**。
-> 弹窗只是给用户一个**加速通道**(如果他愿意手动开插件)。
+**三级降级**(每个平台内部):
 
-| ID     | 描述                                                                   | 优先级 |
-| ------ | -------------------------------------------------------------------- | --- |
-| FR-2.1 | 策略 ①:B站官方 CC 字幕 API                                                  | P0  |
-| FR-2.2 | 策略 ②:扫描 VideoTrans 导出目录(`.srt`/`.vtt`/`.json`/`.ass`)                | P0  |
-| FR-2.3 | 策略 ③:本地 faster-whisper 转写(基于视频源工厂)                                   | P0  |
-| FR-2.4 | 策略 ② 触发时**弹窗通知**用户打开浏览器启用插件                                          | P0  |
-| FR-2.5 | 弹窗后等用户响应;**超时 → 降级到策略 ③(走下载/录屏 + Whisper)**,不跳过当前视频                  | P0  |
-| FR-2.6 | 用户在弹窗点"跳过该视频" → 走策略 ③ 兜底(不真正跳过)                                      | P0  |
-| FR-2.7 | 字幕来源记录到日志(metadata.source:`official` / `plugin` / `whisper`)         | P0  |
-| FR-2.8 | 策略 ② 找不到字幕文件时,弹窗后等用户,超时也走策略 ③,**不写入 `transcribe_fail.csv`(这不是转写失败)** | P0  |
-| FR-2.9 | **插件启动语义**:**整个运行期间只需启动一次**(用户预先在浏览器开启 VideoTrans),不每个视频启动;扫描目录即可 | P0  |
-| FR-2.10 | **插件启动失败 / 不可用**:扫描 + 弹窗询问仍无文件,识别为"插件不可用",**整次运行后续视频都跳过弹窗,直接降级到策略 ③** | P0  |
-| FR-2.11 | **插件字幕质量不过关**:插件生成的字幕走质量门控**未通过**,视为这次插件路径失败,降级到策略 ③ 重新走下载/录屏 + Whisper;但保留插件字幕文件供人工修正 | P0  |
+| 优先级 | 名称 | 通道 | 输出 |
+|---|---|---|---|
+| ① | 平台 API | 平台公开 API(httpx) | `SubtitleResult(source="api")` |
+| ② | Puppeteer 通用浏览器 | 用户 Chrome `--remote-debugging-port` | `SubtitleResult(source="browser")` |
+| ③ | 浏览器录屏 + Whisper | Screen Recorder 扩展 + ffmpeg + faster-whisper | `SubtitleResult(source="whisper")` |
 
-**降级路径图(扩展版,含 FR-2.10 / 2.11)**:
+**降级规则**:① miss → ②;② miss → ③;③ fail → `None`(走 transcribe_fail 记录)。
+
+| ID | 描述 | 优先级 |
+|---|---|---|
+| FR-2.0 | **平台适配器抽象**:`PlatformAdapter` Protocol 含 `match(url)` + 3 个 fetch 方法;每个平台实现一个 adapter | P0 |
+| FR-2.1 | **策略 ①**(B站):B站官方 CC 字幕 API,httpx 调 `api.bilibili.com/x/player/v2` | P0 |
+| FR-2.2 | **Puppeteer 连接**:用 playwright `connect_over_cdp("http://localhost:9222")` 连用户 Chrome,**复用用户登录态** | P0 |
+| FR-2.3 | **后台标签页**:`context.new_page()` 创建后台标签页,**不抢用户焦点**;完成即 `page.close()` | P0 |
+| FR-2.4 | **策略 ②**(通用):Puppeteer 通用 JS 探测,**4 种方法按优先级尝试**,首个命中即返回 | P0 |
+| FR-2.5 | **JS 探测方法 1**:HTML5 `<track kind="subtitles" / kind="captions">` 标签,拿 `src` 下载解析 | P0 |
+| FR-2.6 | **JS 探测方法 2**:`window.__INITIAL_STATE__` / `window.__INITIAL_DATA__` 递归找字幕 URL 字段 | P0 |
+| FR-2.7 | **JS 探测方法 3**:`window.player.getSubtitle()` / `window.player.subtitle` / `window.player.on('subtitle_update')` | P1 |
+| FR-2.8 | **JS 探测方法 4**:DOM 选择器扫描字幕文本(`[class*="subtitle"]`、`[class*="caption"]` 等) | P2 |
+| FR-2.9 | **B站语言优先级**:`zh-Hans > zh-CN > zh-Hant > en-US > en > ai-zh`;`ai-zh` 是 B站 AI 实时字幕,质量次于官方 CC | P0 |
+| FR-2.10 | **跨域处理**:`page.evaluate(fetch)` 只用于同 origin(B站 page 取 page 自身 API);跨 origin 字幕 URL 用 `context.request.get()`(走浏览器 network stack,带 cookie,无 CORS 限制) | P0 |
+| FR-2.11 | **字幕格式统一**:无论 API 返回什么,统一 dump 成 `.srt` 后用 `pysrt` 解析;Puppeteer 取数据时已是 `.srt` / `.vtt` / `.json` / `.ass` 之一 | P0 |
+| FR-2.12 | **字幕来源记录**:metadata.source `api` / `browser` / `whisper` | P0 |
+| FR-2.13 | **失败日志区分**:策略 ② miss 不记 transcribe_fail(走下一级);策略 ③ Whisper 失败才记 transcribe_fail.csv | P0 |
+| FR-2.14 | **策略 ③**(录屏触发):Puppeteer 触发 Screen Recorder for Google Chrome 扩展,使用预设快捷键 `Control+Shift+R` | P0 |
+| FR-2.15 | **策略 ③**(录屏停止):视频时长结束或定时器触发,再次模拟同一快捷键停止;等待 WebM 文件落地到 Chrome 下载目录 | P0 |
+| FR-2.16 | **策略 ③**(音频输入):Screen Recorder 扩展自带抽音,输出文件(WebM / OGG / MP3)直接送 `faster-whisper` 转写;**我们不调 ffmpeg** | P0 |
+| FR-2.17 | **BilibiliAdapter**:实现 FR-2.1/2.2/2.4,`match` 域名匹配 `bilibili.com` / `b23.tv` | P0 |
+| FR-2.18 | **InternalSiteAdapter**(占位):接口留 stub,等公司下发账号后实现 `match` 域名 + fetch 方法;当前抛 `NotImplementedError` | P1 |
+| FR-2.19 | **通用 fallback adapter**:未知 URL 域名时,跳过策略 ①,直接走 ② + ③ | P1 |
+| FR-2.20 | **降级路径**:任一策略失败都降级到下一级,不跳过当前视频;仅 ③ 失败才算"字幕提取失败" | P0 |
+| FR-2.21 | **弹窗语义变更**:不再有"启用浏览器插件"弹窗(改成 Puppeteer 自动连用户 Chrome);保留失败日志上限弹窗(FR-6.6) | P0 |
+| FR-2.22 | **录屏文件清理**:Whisper 转写成功后,WebM + WAV 立即删除;失败保留供排查 | P0 |
+
+**架构图**:
 
 ```text
-字幕提取入口
+字幕提取入口 (Phase 8 main scheduler)
   │
-  ├─ ① B站官方 CC
-  │    ├─ 成功 → 返回 SubtitleResult(source="official")
-  │    └─ 失败/无字幕 ──┐
-  │                    ↓
-  ├─ ② 浏览器插件(扫描 + 弹窗)←────────────┐
-  │    │                                  │
-  │    ├─ 已有字幕文件 → 质量门控         │
-  │    │       ├─ PASS → 返回 source="plugin"    │
-  │    │       └─ FAIL → ↓ (FR-2.11 兜底)     │
-  │    │                                  │
-  │    ├─ 无文件 → 弹窗                   │
-  │    │       ├─ 用户"已开启" → 等文件    │
-  │    │       │       ├─ 出现 → 走质量门控(同上)│
-  │    │       │       └─ 超时 → ↓        │
-  │    │       ├─ 用户"跳过该视频" → ↓    │
-  │    │       └─ 弹窗超时未响应 → ↓       │
-  │    │                                  │
-  │    └─ 插件已识别不可用(FR-2.10) → ↓   │
-  │                                       │
-  └────────────────────────────────── ↓
-                                          ↓
-  ③ 走视频源工厂(下载 OR 录屏)+ faster-whisper
-       │
-       └─ 返回 SubtitleResult(source="whisper")
+  ├─ PlatformAdapterRegistry.match(url) → adapter
+  │    ├─ BilibiliAdapter         (P0)
+  │    └─ InternalSiteAdapter     (P1, stub)
+  │
+  ├─ ① adapter.fetch_api_subtitle(url)
+  │    ├─ BilibiliAdapter: httpx → api.bilibili.com
+  │    └─ InternalSiteAdapter: NotImplementedError
+  │    └─ 命中 → SubtitleResult(source="api")
+  │
+  ├─ ② adapter.fetch_browser_subtitle(driver, url)
+  │    ├─ driver.connect_over_cdp(localhost:9222)
+  │    ├─ context.new_page()  # 后台标签页,不抢焦点
+  │    ├─ page.goto(url), wait_for_player_ready()
+  │    ├─ 4 种 JS 探测(按优先级):
+  │    │    1. <track kind="subtitles"> → 拿 src
+  │    │    2. window.__INITIAL_STATE__ 找 subtitle url
+  │    │    3. window.player.getSubtitle() / .subtitle
+  │    │    4. DOM 选择器扫描字幕文本
+  │    ├─ 跨 origin 用 context.request.get(url)
+  │    └─ 命中 → SubtitleResult(source="browser")
+  │
+  └─ ③ adapter.fetch_via_recording(driver, url, duration_sec)
+       ├─ page.goto(url)
+       ├─ page.keyboard.press("Control+Shift+R")  # Screen Recorder 开始
+       ├─ await asyncio.sleep(duration_sec + 5)
+       ├─ page.keyboard.press("Control+Shift+R")  # 停止
+       ├─ 监听 Chrome 下载目录,等 .webm 落地
+       ├─ Screen Recorder 输出文件(WebM/OGG)
+       ├─ faster-whisper 直读(内部 ffmpeg 解码)
+       └─ SubtitleResult(source="whisper")
 ```
 
-**插件可用性状态机**(FR-2.10):
+**PlatformAdapter 接口**(代码契约):
 
-```text
-[unknown] → 第一次需要插件时弹窗询问
-   ├─ 用户"已开启" + 等到文件 → [available]
-   ├─ 用户"已开启" + 超时无文件 → [unavailable](整个 session 后续跳过弹窗)
-   ├─ 用户"跳过该视频" → [unavailable]
-   └─ 弹窗超时未响应 → [unavailable]
+```python
+class PlatformAdapter(Protocol):
+    """所有视频平台字幕适配器都要实现这个接口。"""
 
-[available] → 直接扫描目录
-   ├─ 有文件 → 走质量门控
-   └─ 无文件 → [unavailable](后续跳过弹窗)
+    @classmethod
+    def match(cls, url: str) -> bool: ...
 
-[unavailable] → 整个 session 后续不再弹窗,直接走策略 ③
-   │ (直到下次启动重置)
+    def fetch_api_subtitle(self, url: str) -> tuple[str, dict] | None:
+        """策略 ①:平台公开 API。同 origin httpx 调用。"""
+
+    def fetch_browser_subtitle(self, driver, url: str) -> tuple[str, dict] | None:
+        """策略 ②:Puppeteer 通用 JS 探测。driver 是 playwright Browser 实例。"""
+
+    def fetch_via_recording(self, driver, url: str, duration_sec: int) -> tuple[str, dict] | None:
+        """策略 ③:Puppeteer 触发录屏扩展 + Whisper。"""
 ```
 
-**插件字幕质量不过关(FR-2.11)处理**:
+**已验证 spike**(2026-09-01,`scripts/spike_browser_subtitle.py`):
 
-```text
-策略 ② 命中文件(扫描 / 弹窗后等)
-  ↓
-跑质量门控(FR-4)
-  ├─ PASS → 用 plugin 字幕,进 LLM 总结
-  └─ FAIL → 视同插件路径失败
-       ├─ 把失败字幕存到 quality_fail.csv(failure_source="plugin")
-       ├─ 标记插件状态 → [unavailable](避免后续又踩坑)
-       └─ 降级到策略 ③ 重新转写
-```
+| 项 | 结果 |
+|---|---|
+| `playwright.connect_over_cdp("http://localhost:9222")` | ✅ 通(独立 user-data-dir=`/tmp/vla-chrome-debug`) |
+| `page.goto(B站 URL)` 后台标签页 | ✅ 不抢焦点 |
+| `page.evaluate(fetch player/v2)` | ✅ 拿到 `subtitles count=1` |
+| `context.request.get(subtitle_url)` | ✅ status 200,跨 origin 通过 |
+| body[] 长度 | 1143 条中文 AI 字幕(`ai-zh`) |
+| dump 到 `.srt` | ✅ 72947 bytes / 4571 行 |
+| 独立 profile 没 B站登录 | ⚠️ 字幕是 `ai-zh`(AI 实时字幕)非官方 CC;但 spike 验证了通道 |
 
-**插件"一次启动"语义补充(FR-2.9)**:
-- 用户在浏览器预先开启 VideoTrans,**整个 session 不再重复开启**
-- 弹窗只是给"插件未启动"的用户一个**一次性引导**
-- 一旦用户确认启动 / 拒绝,**整次 session 记住状态**
-- 实现:模块级单例 `plugin_status: dict[run_id, "available" | "unavailable"]`
+**安全性约束**(沿用):
+- 字幕永远本地(策略 ①② 完全本地调用,策略 ③ 完全本地 Whisper)
+- 不引入云端转写
+- 云端 LLM 仅用于:① 字幕质量检查(FR-4) ② 6h 批量总结(FR-5)
+
+**Phase 3 代码改动**:
+- `subtitle/bilibili_official.py`:保留,作为 `BilibiliAdapter.fetch_api_subtitle` 实现
+- `subtitle/browser_plugin.py`:废弃(原"扫描 VideoTrans 目录"设计作废),仅保留 `parse()` 方法给 Puppeteer 取到字幕文件时用
+- `subtitle/strategy.py`:重写,从"扫描 + 弹窗"改为"adapter 三级降级"
+- 新增 `subtitle/platform_adapter.py`:Protocol + Registry
+- 新增 `subtitle/bilibili_adapter.py`:BilibiliAdapter 实现
+- 新增 `subtitle/internal_site_adapter.py`:InternalSiteAdapter stub
+- 新增 `subtitle/browser_driver.py`:Puppeteer driver + 通用 JS 探测
+- 新增 `source/browser_record.py`:录屏触发 + 监听下载 + Whisper 直读(扩展自带抽音)
 
 ### FR-3 流式转写与磁盘管理
 
