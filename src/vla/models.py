@@ -27,14 +27,14 @@ class VideoTask(BaseModel):
 class SubtitleResult(BaseModel):
     """字幕提取结果。
 
-    source 取值:FR-2 三级策略
-      - "official":B站官方 CC 字幕(策略 ①)
-      - "plugin":浏览器插件导出(策略 ②)
+    source 取值:Phase 3.5 平台无关三级策略
+      - "api":平台官方 API(策略 ①)
+      - "browser":Puppeteer JS 探测(策略 ②)
       - "whisper":本地 faster-whisper 转写(策略 ③)
     """
 
     text: str
-    source: str  # "official" | "plugin" | "whisper"
+    source: str  # "api" | "browser" | "whisper"
     metadata: dict
 
 

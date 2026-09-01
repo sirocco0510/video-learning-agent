@@ -1,19 +1,12 @@
-"""SubtitleStrategy 编排器测试(SSOT: requirements.md FR-2.5/2.6/2.8/2.9/2.10/2.11)。
+"""SubtitleStrategy 三级降级测试(SSOT: requirements.md FR-2.5/2.6/2.8 + implementation-plan.md Phase 3.5)。
 
-状态机:
-  - ① 命中 → SubtitleResult(source="official")
-  - ① 失败 → 看 plugin_status:
-      available → ② find_subtitle / wait_for_subtitle, 命中则 SubtitleResult(source="plugin")
-      unavailable → 立即降级(返回 None → 由调用方走 ③)
-      unknown → 弹窗:
-        "opened" → ② wait → 命中 → source="plugin";超时 → mark unavailable
-        "skip"   → 返回 SKIP
-        "timeout" → mark unavailable, 降级
-
-返回值约定:
-  SubtitleResult  → 策略命中(官方 / 插件)
-  SkipSignal      → 用户主动跳过该视频
-  None            → ① ② 都失败 → 调用方走 ③ 转写
+覆盖:
+- ① 命中 → source=api, 不调 ② ③
+- ① 失败 / ② 命中 → source=browser, 不调 ③
+- ① ② 失败 / ③ 命中 → source=whisper
+- 全失败 → None
+- 无匹配 adapter → FallbackAdapter 兜底
+- 任一 fetch 抛异常 → 当作 miss 降级
 """
 
 from pathlib import Path
@@ -21,161 +14,320 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vla.config import VLAConfig
 from vla.models import SubtitleResult
-from vla.state.plugin_status import PluginStatus
-from vla.subtitle.strategy import SKIP, SubtitleStrategy
-from vla.ui.macos_notify import MacOSNotifier
+from vla.subtitle.strategy import FallbackAdapter, SubtitleStrategy
+
+
+# ---------------- Fake adapter ----------------
+
+
+class FakeAdapter:
+    """Mock adapter,每个 fetch 方法可独立配置返回值 / 异常。"""
+
+    def __init__(self):
+        self.api_calls = 0
+        self.browser_calls = 0
+        self.recording_calls = 0
+        self.api_return = None
+        self.browser_return = None
+        self.recording_return = None
+        self.api_exception: Exception | None = None
+        self.browser_exception: Exception | None = None
+        self.recording_exception: Exception | None = None
+
+    @classmethod
+    def match(cls, url: str) -> bool:
+        return True  # 测试用,总是命中
+
+    def fetch_api_subtitle(self, url: str):
+        self.api_calls += 1
+        if self.api_exception:
+            raise self.api_exception
+        return self.api_return
+
+    def fetch_browser_subtitle(self, driver, url: str):
+        self.browser_calls += 1
+        if self.browser_exception:
+            raise self.browser_exception
+        return self.browser_return
+
+    def fetch_via_recording(self, driver, url: str, duration_sec: int):
+        self.recording_calls += 1
+        if self.recording_exception:
+            raise self.recording_exception
+        return self.recording_return
+
+
+class StubRegistry:
+    """测试用 registry:固定返回指定 adapter。"""
+
+    def __init__(self, adapter):
+        self._adapter = adapter
+
+    def get_for_url(self, url: str):
+        return self._adapter
+
+
+class EmptyRegistry:
+    """get_for_url 永远返回 None(测试 FallbackAdapter 路径)。"""
+
+    def get_for_url(self, url: str):
+        return None
+
+
+# ---------------- Fixtures ----------------
 
 
 @pytest.fixture
-def cfg(tmp_path: Path) -> VLAConfig:
-    return VLAConfig.model_validate({
-        "storage": {"tmp_dir": "./tmp", "auto_cleanup_on_pass": True},
-        "whisper": {"model": "small", "language": "zh", "segment_seconds": 30, "compute_type": "int8"},
-        "video_source": {
-            "prefer_download": True,
-            "download": {"format": "worst"},
-            "record": {"enabled": True, "screen_index": 2, "fps": 30, "crf": 28, "audio_input": "0", "preset": "ultrafast"},
-        },
-        "quality_check": {"enabled": True, "model": "x", "min_score_to_pass": 70, "min_char_per_second": 1.0, "max_char_per_second": 15.0},
-        "browser_plugin": {"name": "VideoTrans", "enabled": True, "remind_timeout_sec": 30, "plugin_paths": [str(tmp_path / "vt")]},
-        "summary": {"model": "x", "target_words_min": 500, "target_words_max": 800, "notes_file": "./notes/v.md", "cross_video_dedup": True, "trigger_mode": "quota", "notes_section_header": "## x"},
-        "quota": {"summary_threshold_sec": 21600, "on_exhausted": "stop_session"},
-        "history": {"file": "./logs/h.jsonl"},
-        "logging": {"log_dir": "./logs", "notify_on_fail": False, "log_alert_threshold": 50, "log_alert_enabled": True},
-        "llm_client": {"provider": "openai", "api_key_env": "OPENAI_API_KEY", "base_url_env": "OPENAI_BASE_URL"},
-    })
+def adapter() -> FakeAdapter:
+    return FakeAdapter()
 
 
 @pytest.fixture
-def strategy(cfg: VLAConfig) -> SubtitleStrategy:
+def driver() -> MagicMock:
+    d = MagicMock()
+    # 默认 connect() 返回自身 driver(BrowserDriver 实例)
+    d.connect.return_value = d
+    return d
+
+
+@pytest.fixture
+def recorder() -> MagicMock:
+    return MagicMock()
+
+
+@pytest.fixture
+def log() -> MagicMock:
+    return MagicMock()
+
+
+@pytest.fixture
+def strategy(adapter, driver, recorder, log) -> SubtitleStrategy:
     return SubtitleStrategy(
-        official=MagicMock(),
-        plugin=MagicMock(),
-        plugin_status=PluginStatus(),
-        notifier=MagicMock(spec=MacOSNotifier),
-        config=cfg,
+        registry=StubRegistry(adapter),
+        driver=driver,
+        recorder=recorder,
+        log=log,
     )
 
 
-# ---------------- FR-2.6 ① 命中 ----------------
+@pytest.fixture
+def url() -> str:
+    return "https://www.bilibili.com/video/BV1xxx"
 
 
-class TestOfficialHit:
-    def test_official_hit_returns_official_result(self, strategy: SubtitleStrategy):
-        """① 命中 → SubtitleResult(source='official'),不调用 ②。"""
-        strategy.official.get_subtitle.return_value = (
-            "官方字幕",
-            {"language": "zh-Hans", "bvid": "BV1xxx"},
+# ---------------- ① 命中 ----------------
+
+
+class TestApiHit:
+    def test_returns_api_source(self, strategy, adapter, url):
+        adapter.api_return = ("API字幕", {"lang": "zh-CN"})
+
+        result = strategy.get_subtitle(url)
+
+        assert isinstance(result, SubtitleResult)
+        assert result.source == "api"
+        assert result.text == "API字幕"
+        assert result.metadata == {"lang": "zh-CN"}
+        assert adapter.api_calls == 1
+
+    def test_does_not_call_browser_or_recording(self, strategy, adapter, url):
+        adapter.api_return = ("x", {})
+
+        strategy.get_subtitle(url)
+
+        assert adapter.browser_calls == 0
+        assert adapter.recording_calls == 0
+
+
+# ---------------- ① miss / ② 命中 ----------------
+
+
+class TestBrowserHit:
+    def test_api_miss_then_browser_hit(self, strategy, adapter, url):
+        adapter.api_return = None
+        adapter.browser_return = ("浏览器字幕", {"method": "track", "lang": "zh"})
+
+        result = strategy.get_subtitle(url)
+
+        assert result.source == "browser"
+        assert result.text == "浏览器字幕"
+        assert result.metadata["method"] == "track"
+        assert adapter.recording_calls == 0
+
+
+class TestApiExceptionFallsThrough:
+    def test_api_raises_then_browser_hit(self, strategy, adapter, url):
+        adapter.api_exception = RuntimeError("api down")
+        adapter.browser_return = ("x", {"method": "initial_state"})
+
+        result = strategy.get_subtitle(url)
+
+        assert result.source == "browser"
+
+
+# ---------------- ① ② miss / ③ 命中 ----------------
+
+
+class TestRecordingHit:
+    def test_api_browser_miss_then_recording_hit(
+        self, strategy, adapter, url
+    ):
+        adapter.api_return = None
+        adapter.browser_return = None
+        adapter.recording_return = ("whisper字幕", {"method": "recording"})
+
+        result = strategy.get_subtitle(url)
+
+        assert result.source == "whisper"
+        assert result.text == "whisper字幕"
+
+    def test_api_hit_browser_exception_then_recording_hit(
+        self, strategy, adapter, url
+    ):
+        """异常也应降级到下一级。"""
+        adapter.api_return = None
+        adapter.browser_exception = RuntimeError("browser down")
+        adapter.recording_return = ("y", {})
+
+        result = strategy.get_subtitle(url)
+
+        assert result.source == "whisper"
+
+
+# ---------------- 全失败 ----------------
+
+
+class TestAllMiss:
+    def test_returns_none_when_all_miss(self, strategy, adapter, url):
+        adapter.api_return = None
+        adapter.browser_return = None
+        adapter.recording_return = None
+
+        result = strategy.get_subtitle(url)
+
+        assert result is None
+
+    def test_returns_none_when_recording_exception(self, strategy, adapter, url):
+        adapter.recording_exception = RuntimeError("whisper failed")
+
+        result = strategy.get_subtitle(url)
+
+        assert result is None
+
+
+# ---------------- 无匹配 adapter → FallbackAdapter ----------------
+
+
+class TestFallbackAdapter:
+    @pytest.fixture
+    def fb_strategy(self, driver, recorder, log) -> SubtitleStrategy:
+        return SubtitleStrategy(
+            registry=EmptyRegistry(),
+            driver=driver,
+            recorder=recorder,
+            log=log,
         )
-        result = strategy.get_subtitle("https://www.bilibili.com/video/BV1xxx")
-        assert isinstance(result, SubtitleResult)
-        assert result.source == "official"
-        assert result.text == "官方字幕"
-        strategy.plugin.find_subtitle.assert_not_called()
 
+    def test_uses_fallback_when_no_adapter(self, fb_strategy, driver, recorder):
+        """无匹配 adapter → FallbackAdapter(直接用 driver/recorder)。"""
+        fb_strategy.get_subtitle("https://unknown.example.com/v/1")
+        # driver.new_background_page 应该被调用过(② ③)
+        assert driver.new_background_page.called
 
-# ---------------- FR-2.8 ② 命中(plugin already available) ----------------
-
-
-class TestPluginHit:
-    def test_official_miss_then_plugin_available_hit(self, strategy: SubtitleStrategy):
-        """① 返回 None + plugin_status=available → ② find_subtitle,不弹窗。"""
-        strategy.official.get_subtitle.return_value = None
-        strategy.plugin_status.mark_available()
-        strategy.plugin.find_subtitle.return_value = Path("/tmp/vt/x_BV1xxx.srt")
-        strategy.plugin.parse.return_value = "插件字幕"
-
-        result = strategy.get_subtitle("https://www.bilibili.com/video/BV1xxx")
-        assert isinstance(result, SubtitleResult)
-        assert result.source == "plugin"
-        assert result.text == "插件字幕"
-        strategy.notifier.ask_open_browser.assert_not_called()
-        strategy.plugin.wait_for_subtitle.assert_not_called()
-
-
-# ---------------- FR-2.11 ② unavailable → 直接降级 ----------------
-
-
-class TestPluginUnavailable:
-    def test_unavailable_skips_dialog_and_falls_through(self, strategy: SubtitleStrategy):
-        """plugin_status=unavailable → 不弹窗,直接返回 None(由调用方走 ③)。"""
-        strategy.official.get_subtitle.return_value = None
-        strategy.plugin_status.mark_unavailable("用户上轮 timeout")
-
-        result = strategy.get_subtitle("https://www.bilibili.com/video/BV1xxx")
+    def test_fallback_api_always_miss(self, fb_strategy, driver, recorder, url):
+        """FallbackAdapter.fetch_api_subtitle 总是 None → 降级到 ②。"""
+        result = fb_strategy.get_subtitle(url)
+        # FallbackAdapter ② ③ 都 miss → None
         assert result is None
-        strategy.notifier.ask_open_browser.assert_not_called()
-        strategy.plugin.find_subtitle.assert_not_called()
+        assert driver.new_background_page.call_count >= 1
+
+    def test_fallback_browser_hit(self, fb_strategy, driver, url):
+        """FallbackAdapter 通过 BrowserDriver.fetch_subtitle_via_browser 拿字幕。"""
+        driver.fetch_subtitle_via_browser.return_value = (
+            "fallback字幕",
+            {"method": "dom_selector"},
+        )
+
+        result = fb_strategy.get_subtitle(url)
+
+        assert result is not None
+        assert result.source == "browser"
+        assert result.text == "fallback字幕"
+        assert result.metadata["platform"] == "fallback"
 
 
-# ---------------- FR-2.9 ② unknown → 弹窗:三态分支 ----------------
+# ---------------- FallbackAdapter 单元测试 ----------------
 
 
-class TestDialogWhenUnknown:
-    """plugin_status=unknown 时,弹窗 ask_open_browser。"""
+class TestFallbackAdapterUnit:
+    def test_api_subtitle_returns_none(self):
+        fb = FallbackAdapter(driver=MagicMock(), recorder=MagicMock())
+        assert fb.fetch_api_subtitle("any url") is None
 
-    def _prep_no_subtitle(self, strategy):
-        strategy.official.get_subtitle.return_value = None
-        # status 保持 unknown
+    def test_browser_subtitle_returns_none_on_miss(self):
+        driver = MagicMock()
+        page = MagicMock()
+        driver.new_background_page.return_value = page
+        driver.fetch_subtitle_via_browser.return_value = (None, None)
 
-    def test_dialog_skip_returns_skip_signal(self, strategy: SubtitleStrategy):
-        """用户点"跳过该视频" → 返回 SKIP。"""
-        self._prep_no_subtitle(strategy)
-        strategy.notifier.ask_open_browser.return_value = "skip"
-
-        result = strategy.get_subtitle("https://www.bilibili.com/video/BV1xxx")
-        assert result is SKIP
-        # status 仍然 unknown(用户没启用,也没拒绝)
-        assert strategy.plugin_status.get() == "unknown"
-
-    def test_dialog_opened_then_plugin_hits(self, strategy: SubtitleStrategy, tmp_path: Path):
-        """用户点"已开启" → mark_available + ② wait → 命中。"""
-        self._prep_no_subtitle(strategy)
-        strategy.notifier.ask_open_browser.return_value = "opened"
-        hit = tmp_path / "vt" / "x_BV1xxx.srt"
-        strategy.plugin.wait_for_subtitle.return_value = hit
-        strategy.plugin.parse.return_value = "插件后续命中"
-
-        result = strategy.get_subtitle("https://www.bilibili.com/video/BV1xxx")
-        assert isinstance(result, SubtitleResult)
-        assert result.source == "plugin"
-        assert result.text == "插件后续命中"
-        assert strategy.plugin_status.get() == "available"
-
-    def test_dialog_opened_then_plugin_misses(self, strategy: SubtitleStrategy):
-        """用户点"已开启" 但插件一直没文件 → mark_unavailable + 返回 None。"""
-        self._prep_no_subtitle(strategy)
-        strategy.notifier.ask_open_browser.return_value = "opened"
-        strategy.plugin.wait_for_subtitle.return_value = None
-
-        result = strategy.get_subtitle("https://www.bilibili.com/video/BV1xxx")
+        fb = FallbackAdapter(driver=driver, recorder=MagicMock())
+        result = fb.fetch_browser_subtitle(driver, "url")
         assert result is None
-        assert strategy.plugin_status.get() == "unavailable"
 
-    def test_dialog_timeout_marks_unavailable(self, strategy: SubtitleStrategy):
-        """弹窗超时 → mark_unavailable + 返回 None(FR-2.10)。"""
-        self._prep_no_subtitle(strategy)
-        strategy.notifier.ask_open_browser.return_value = "timeout"
+    def test_browser_subtitle_returns_text_and_meta(self):
+        driver = MagicMock()
+        page = MagicMock()
+        driver.new_background_page.return_value = page
+        driver.fetch_subtitle_via_browser.return_value = (
+            "x",
+            {"method": "track", "lang": "zh"},
+        )
 
-        result = strategy.get_subtitle("https://www.bilibili.com/video/BV1xxx")
+        fb = FallbackAdapter(driver=driver, recorder=MagicMock())
+        text, meta = fb.fetch_browser_subtitle(driver, "url")
+        assert text == "x"
+        assert meta["platform"] == "fallback"
+        assert meta["method"] == "track"
+
+    def test_recording_returns_none_without_recorder(self):
+        driver = MagicMock()
+        fb = FallbackAdapter(driver=driver, recorder=None)
+        result = fb.fetch_via_recording(driver, "url", 30)
         assert result is None
-        assert strategy.plugin_status.get() == "unavailable"
+
+    def test_recording_uses_recorder(self):
+        driver = MagicMock()
+        recorder = MagicMock()
+        recorder.record_and_transcribe.return_value = "whisper"
+        page = MagicMock()
+        driver.new_background_page.return_value = page
+
+        fb = FallbackAdapter(driver=driver, recorder=recorder)
+        text, meta = fb.fetch_via_recording(driver, "url", 30)
+
+        assert text == "whisper"
+        assert meta["method"] == "recording"
+        recorder.record_and_transcribe.assert_called_once()
 
 
-# ---------------- ① 失败 + ② available 但 find_subtitle 也没命中 → wait 然后 None ----------------
+# ---------------- duration_sec 传递给 ③ ----------------
 
 
-class TestPluginAvailableMiss:
-    def test_find_returns_none_then_wait_returns_none(self, strategy: SubtitleStrategy):
-        """available 但 find_subtitle 没命中 → wait 也没命中 → 返回 None。"""
-        strategy.official.get_subtitle.return_value = None
-        strategy.plugin_status.mark_available()
-        strategy.plugin.find_subtitle.return_value = None
-        strategy.plugin.wait_for_subtitle.return_value = None
+class TestDurationSecPassed:
+    def test_duration_passed_to_recording(self, strategy, adapter, url):
+        adapter.api_return = None
+        adapter.browser_return = None
+        adapter.recording_return = ("x", {})
+        recorded: list[int] = []
+        original = adapter.fetch_via_recording
 
-        result = strategy.get_subtitle("https://www.bilibili.com/video/BV1xxx")
-        assert result is None
-        # 既然 find 没命中,不该再弹窗
-        strategy.notifier.ask_open_browser.assert_not_called()
+        def spy(driver, u, d):
+            recorded.append(d)
+            return original(driver, u, d)
+
+        adapter.fetch_via_recording = spy  # type: ignore[method-assign]
+
+        strategy.get_subtitle(url, duration_sec=120)
+
+        assert recorded == [120]
