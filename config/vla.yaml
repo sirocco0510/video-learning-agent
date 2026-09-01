@@ -72,3 +72,20 @@ llm_client:
   provider: "minimax"     # openai | qwen | deepseek | minimax
   api_key_env: "OPENAI_API_KEY"
   base_url_env: "OPENAI_BASE_URL"
+
+puppeteer:                                 # Phase 3.1+ Puppeteer CDP 配置
+  debugging_port: 9222                    # Chrome --remote-debugging-port
+  cdp_host: "localhost"
+  recording_hotkey: "Control+Shift+R"       # Screen Recorder 扩展启停热键
+  recording_output_dir: "~/Downloads"     # 录屏兜底时扩展输出目录(可选)
+  recording_download_timeout_sec: 30      # 等下载完成的超时
+
+platforms:                                 # Phase 3 平台适配器注册(FR-2.0)
+  bilibili:
+    enabled: true
+    match_hosts:
+      - "bilibili.com"
+      - "b23.tv"
+  internal_site:
+    enabled: false                        # 等账号下发
+    match_hosts: []                       # 后续由 config 驱动
