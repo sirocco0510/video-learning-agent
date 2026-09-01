@@ -60,6 +60,8 @@ class BrowserPluginConfig(BaseModel):
     enabled: bool
     remind_timeout_sec: int
     plugin_paths: list[Path]
+    record_hotkey: str = "Control+Shift+R"
+    record_download_timeout_sec: int = 30
 
 
 class SummaryConfig(BaseModel):
