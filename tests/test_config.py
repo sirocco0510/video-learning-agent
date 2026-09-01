@@ -30,7 +30,7 @@ class TestFromYaml:
         assert cfg.video_source.download.format == "worst"
         # 嵌套:video_source.record
         assert cfg.video_source.record.enabled is True
-        assert cfg.video_source.record.screen_index == 1
+        assert cfg.video_source.record.screen_index == 2  # MacBook Air:0/1=相机,2=屏幕
 
         # 嵌套:summary 数值
         assert cfg.summary.target_words_min == 500

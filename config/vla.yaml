@@ -17,10 +17,10 @@ video_source:
     format: "worst"       # 最差画质,节约带宽
   record:
     enabled: true
-    screen_index: 1       # ffmpeg -list_devices 查
+    screen_index: 2       # ffmpeg -list_devices 查(MacBook Air 上 screen=2,相机 0/1)
     fps: 30
     crf: 28
-    audio_input: "1:0"    # screen:audio(策略 B:带系统音频)
+    audio_input: "0"      # 麦克风 index;前缀(screen)保留为文档用途,实现只用 split(":")[1]
     preset: "ultrafast"
 
 quality_check:

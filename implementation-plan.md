@@ -180,18 +180,24 @@ def _is_downloadable(self, url: str) -> bool:
 ```bash
 # 测试 1:可下载视频
 uv run python -c "
+import time
 from pathlib import Path
 from vla.source.video_source import VideoSourceFactory
 from vla.log.transcription_log import TranscriptionLog
 log = TranscriptionLog(Path('./logs'))
 factory = VideoSourceFactory(Path('./tmp'), log)
 src = factory.get('https://www.bilibili.com/video/BV1xxxxxxx', 'test1', 600)
-assert src.path.exists()
+# 录屏异步启动:poll 等文件落地(实测 MacBook Air 上 ~1.5s)
+for _ in range(60):
+    if src.path.exists():
+        break
+    time.sleep(0.5)
+assert src.path.exists(), f'录屏文件未生成: {src.path}'
 print(f'mode={src.mode}, size={src.path.stat().st_size}')
 "
 
 # 测试 2:不可下载视频(模拟)
-# 直接调用 _record_screen,确认 ffmpeg 启动
+# 直接调用 _record_screen,确认 ffmpeg 启动(同测试 1 末尾的 poll)
 ```
 
 ---
