@@ -1,0 +1,74 @@
+# video-learning-agent 默认配置(SSOT: requirements.md 第八章)
+# 修改需求 → 先改 requirements.md,再同步本文件
+
+storage:
+  tmp_dir: "./tmp"
+  auto_cleanup_on_pass: true
+
+whisper:
+  model: "small"          # tiny | base | small | medium | large-v3
+  language: "zh"
+  segment_seconds: 30
+  compute_type: "int8"    # int8 / int8_float16 / float16
+
+video_source:
+  prefer_download: true
+  download:
+    format: "worst"       # 最差画质,节约带宽
+  record:
+    enabled: true
+    screen_index: 1       # ffmpeg -list_devices 查
+    fps: 30
+    crf: 28
+    audio_input: "1:0"    # screen:audio(策略 B:带系统音频)
+    preset: "ultrafast"
+
+quality_check:
+  enabled: true
+  model: "gpt-4o-mini"    # 云端订阅
+  min_score_to_pass: 70
+  min_char_per_second: 1.0
+  max_char_per_second: 15.0
+
+browser_plugin:
+  name: "VideoTrans"
+  enabled: true
+  remind_timeout_sec: 30          # 弹窗等用户响应的超时(秒)
+  plugin_paths:
+    - "~/Documents/VideoTrans/subtitles"
+    - "~/Downloads"
+  # FR-2.9/2.10 插件状态:整个 session 只弹一次
+  #   available   用户确认启动 + 等到文件
+  #   unavailable 用户跳过 / 弹窗超时 / 字幕质量不过关
+  # 状态保存在内存,下次启动重置
+
+summary:
+  model: "gpt-4o-mini"
+  target_words_min: 500
+  target_words_max: 800
+  notes_file: "./notes/videos.md"
+  cross_video_dedup: true
+  # FR-9 配额触发
+  trigger_mode: "quota"           # quota(累计 6h) | per_video(每条)
+  notes_section_header: "## {group_title}"  # 笔记里用什么标题分段
+
+quota:                              # FR-9 累计时长配额
+  summary_threshold_sec: 21600    # 6 小时 = 21600 秒
+  on_exhausted: "stop_session"     # 达到阈值后行为:stop_session | continue
+
+history:                            # FR-9.5/9.6 去重历史
+  file: "./logs/transcribed_history.jsonl"
+  # 每行 JSON:
+  # {"url": "bilibili://group/python-tutorial-basics/BV1xxx",
+  #  "title": "...", "duration_sec": 1800, "transcribed_at": "2026-08-31T10:00:00"}
+
+logging:
+  log_dir: "./logs"
+  notify_on_fail: false                 # FR-6.4:转写/质量失败不通知
+  log_alert_threshold: 50               # FR-6.6:每 50 条失败弹窗汇总一次
+  log_alert_enabled: true               # 是否启用失败日志上限弹窗
+
+llm_client:
+  provider: "minimax"     # openai | qwen | deepseek | minimax
+  api_key_env: "OPENAI_API_KEY"
+  base_url_env: "OPENAI_BASE_URL"

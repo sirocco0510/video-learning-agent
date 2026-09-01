@@ -1,0 +1,18 @@
+# 视频组输入（FR-10）。group_id 暂时用视频组名字。
+# 内部去重 key: bilibili://group/{group_id}/{bvid}
+video_groups:
+  - group_id: python-tutorial-basics
+    title: "Python 基础教程"
+    videos:
+      - bvid: BV1xxxxxxxx
+        title: "第1集 变量与类型"
+        url: "https://www.bilibili.com/video/BV1xxxxxxxx"
+        duration_sec: 1800
+      - bvid: BV1yyyyyyyy
+        title: "第2集 控制流"
+        url: "https://www.bilibili.com/video/BV1yyyyyyyy"
+        duration_sec: 2400
+      - bvid: BV1zzzzzzzz
+        title: "第3集 函数"
+        url: "https://www.bilibili.com/video/BV1zzzzzzzz"
+        duration_sec: 2100
