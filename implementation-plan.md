@@ -113,7 +113,7 @@ cfg = VLAConfig.from_yaml("./config/vla.yaml")
 task = VideoTask(
     id="test",
     title="测试",
-    url="https://www.bilibili.com/video/BV1xxx",
+    url="https://www.bilibili.com/video/BV1X54y1p7Dd?spm_id_from=333.788.videopod.episodes&vd_source=60b3697df165803cf7edaa996f5e0cb9",
     expected_duration=1800,
 )
 assert task.id == "test"
@@ -1538,7 +1538,7 @@ Phase 9(E2E 测试)
 ## 进度
 
 - [x] Phase 0: 项目骨架
-- [x] Phase 1: 配置 + 数据模型
+- [ ] Phase 1: 配置 + 数据模型
 - [ ] Phase 2: 视频源工厂
 - [ ] Phase 3: 字幕三级策略
 - [ ] Phase 4: 流式转写
