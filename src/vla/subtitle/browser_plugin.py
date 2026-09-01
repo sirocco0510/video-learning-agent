@@ -1,24 +1,23 @@
-"""浏览器插件字幕(策略 ②,SSOT: requirements.md FR-2.2 + implementation-plan.md Phase 3)。
+"""字幕文件解析工具(SSOT: requirements.md FR-2.4 + implementation-plan.md Phase 3.7)。
 
-扫描 plugin_paths 目录,优先精确匹配 {title}_{bvid}.{srt|vtt|json|ass},
-否则模糊匹配 *{bvid}* + 已知后缀。
+Phase 3.7:仅保留 `parse()`,`find_subtitle` / `wait_for_subtitle` 已删除(由三级降级取代)。
 
 parse 支持四种格式:
   - .srt  pysrt
   - .vtt  webvtt-py
   - .json 递归收集所有 string
   - .ass  Dialogue: 行的最后一列,剥离 {\\...} override
+
+BrowserDriver._fetch_subtitle_text 用 parse() 解析 Puppeteer 取回的字幕文件。
 """
 
 import json
 import re
-import time
 from pathlib import Path
 
 import pysrt
 import webvtt
 
-from ..config import VLAConfig
 
 SUFFIXES = (".srt", ".vtt", ".json", ".ass")
 
@@ -26,49 +25,7 @@ _ASS_OVERRIDE_RE = re.compile(r"\{[^}]*\}")
 
 
 class BrowserPluginSubtitle:
-    """策略 ②:浏览器插件导出的字幕文件。"""
-
-    def __init__(self, config: VLAConfig) -> None:
-        self.config = config
-        self.plugin_paths = [
-            Path(p).expanduser() for p in config.browser_plugin.plugin_paths
-        ]
-
-    def find_subtitle(self, bvid: str, title: str) -> Path | None:
-        """按 plugin_paths 顺序扫描;精确 → 模糊。
-
-        精确:`{title}_{bvid}.{srt|vtt|json|ass}`
-        模糊:`{bvid}` 出现在文件名 + 已知后缀
-        """
-        for base in self.plugin_paths:
-            if not base.exists() or not base.is_dir():
-                continue
-            # 精确
-            for suffix in SUFFIXES:
-                candidate = base / f"{title}_{bvid}{suffix}"
-                if candidate.exists():
-                    return candidate
-            # 模糊
-            for path in base.iterdir():
-                if not path.is_file():
-                    continue
-                if bvid not in path.name:
-                    continue
-                if path.suffix.lower() in SUFFIXES:
-                    return path
-        return None
-
-    def wait_for_subtitle(
-        self, bvid: str, title: str, timeout: int = 600
-    ) -> Path | None:
-        """轮询 find_subtitle,直到超时或命中。"""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            path = self.find_subtitle(bvid, title)
-            if path is not None:
-                return path
-            time.sleep(2)
-        return None
+    """字幕文件解析(Phase 3.7+ 仅 parse;find_subtitle/wait_for_subtitle 已删除)。"""
 
     def parse(self, path: Path) -> str:
         """根据后缀分发解析;返回纯文本(按时间顺序拼接,行间 \\n)。"""

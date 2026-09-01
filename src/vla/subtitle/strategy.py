@@ -19,7 +19,6 @@
          └── None ─→ FallbackAdapter(直接用 driver / recorder,跳 ①)
 
 返回 SubtitleResult(source='api'|'browser'|'whisper') 或 None(全失败)。
-旧逻辑(弹窗 + SKIP + plugin_status 状态机)在 Phase 3.7 删除。
 """
 
 from __future__ import annotations
