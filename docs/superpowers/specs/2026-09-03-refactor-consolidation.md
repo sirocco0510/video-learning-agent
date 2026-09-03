@@ -11,17 +11,17 @@
 用户决策(2026-09-03):
 - 整体重构(全 9 个 Phase 范围)
 - 两次 LLM 调用(refine + quality check)保留分离,但共用 parser + prompt 模板
-- 完全删除 `FailureAlert`(连同测试 + implementation-plan.md 章节)
+- 完全删除 `FailureAlert`(连同测试;`implementation-plan.md` 章节保留为历史快照)
 - 完全删除 `_record_screen` + ffmpeg fallback(网络失败 = 报错退出)
 
 ## 范围
 
 ### 包含
 
-- §3 列出的 11 个 Phase 工作(R.1 ~ R.11)
-- 删除 `FailureAlert` 相关一切:`log/failure_alert.py` / `tests/test_e2e.py::TestFailureAlertE2E` / `implementation-plan.md:1717-1744` 章节
+- §"执行 Phase" 列出的 R.1 ~ R.15 工作
+- 删除 `FailureAlert` 相关一切:`log/failure_alert.py` / `tests/test_e2e.py::TestFailureAlertE2E`
 - 删除 `_record_screen` + `config.video_source.record.*` 配置
-- 改名 `alert_blocking` → `alert`(若 R.7 取消则无需做,顺带删除)
+- 字幕提取 4 项重构(Sub-1 ~ Sub-4)
 
 ### 不包含
 
@@ -34,7 +34,7 @@
 
 1. **不动业务行为** — FR-1 ~ FR-10 可观测行为不变
 2. **共用抽象,不一锅端** — refine + quality check 是两次调用,但共用 parser + prompt 工具;summarizer 仍独立
-3. **删死代码优先** — 14 处全部处理
+3. **删死代码优先** — 18 处全部处理
 4. **TDD** — 每个 R.Phase 先写 test,再写实现,跑测试
 6. **SSOT 重新分层**(2026-09-03 用户决策):
    - 产品需求 SSOT:`requirements.md`
@@ -60,7 +60,7 @@
 
 `implementation-plan.md:1919-1959` 全部 `[x]` 是历史快照,本 spec 后不再更新。
 
-## 14 处冗余处理清单
+## 18 处冗余处理清单(14 原有 + 4 字幕提取 2026-09-03 增补)
 
 ### A. 真 bug(必须修)
 
@@ -96,6 +96,15 @@
 | 13 | `state/{quota,history,plugin_status}` | 不动 |
 | 14 | web entry spec | 不动 |
 
+### E. 字幕提取重构(2026-09-03 增补)
+
+| # | 位置 | 处理 |
+|---|---|---|
+| Sub-1 | `browser_driver._extract_json_subtitle` / `browser_plugin._parse_json.collect` / `bilibili_official.get_subtitle` 各自 strip 不同格式 | 抽 `subtitle/normalize.py`:`normalize_subtitle_text(raw, *, format_hint)` 统一处理 SRT timestamp / VTT cue / plain text |
+| Sub-2 | `browser_driver._extract_json_subtitle` (line 33) + `browser_plugin._parse_json.collect` (line 45) | 抽 `utils/json_walk.py`:`walk_strings(obj, *, predicate=None)` 共享 dict/list 递归 walker |
+| Sub-3 | `browser_driver.fetch_subtitle_via_browser` 4 个 `_probe_*` 串行调用 | 抽 `ProbeStrategy` Protocol + `browser_driver.PROBE_STRATEGIES` 列表,`fetch_subtitle_via_browser` 改 `for s in strategies` |
+| Sub-4 | `browser_driver.fetch_subtitle_via_browser` 的 `finally: page.close()` race | 去掉 finally 自动 close,改 caller 负责(2 处 adapter 各自 close);BilibiliAdapter / FallbackAdapter 简化 |
+
 ## 模块布局(目标态)
 
 ```text
@@ -120,14 +129,16 @@ src/vla/
 ├── source/
 │   └── video_source.py       # 删 _record_screen,get() 失败抛 DownloadError
 ├── subtitle/                 # 删 _pause_page_video 兼容包装
+│   └── normalize.py          # **新增** normalize_subtitle_text (Sub-1)
 ├── transcribe/               # 不变
 ├── ui/                       # 不变
 ├── state/                    # 不变
 └── utils/                    # **新增**
-    └── bvid.py               # extract_bvid + make_url_key (#8)
+    ├── bvid.py               # extract_bvid + make_url_key (#8)
+    └── json_walk.py          # **新增** walk_strings (Sub-2)
 ```
 
-## 执行 Phase(R.1 ~ R.11)
+## 执行 Phase(R.1 ~ R.15)
 
 | Phase | 内容 | 验收 |
 |---|---|---|
@@ -142,6 +153,10 @@ src/vla/
 | **R.9** | 删 `subtitle/browser_record.py` 的 `_pause_page_video` 兼容包装,3 处调用直接用 | `grep "_pause_page_video"` 返回 0 |
 | **R.10** | `config.py` 新 `LLMConfig`,迁移 3 个 model 字段;`from_yaml` 兼容旧 yaml(自动归并到 `cfg.llm.*`) | `tests/test_config.py` 更新 |
 | **R.11** | 全量回归:test 全 pass + `vla doctor` + 一次真实 B站 跑通 | 35+ tests pass;pipeline end-to-end |
+| **R.12** | `subtitle/normalize.py` 新建 `normalize_subtitle_text(raw, *, format_hint)`;`browser_driver._extract_json_subtitle` / `browser_plugin._parse_json` / `bilibili_official.get_subtitle` 改用 | `tests/test_normalize_subtitle.py` |
+| **R.13** | `utils/json_walk.py` 新建 `walk_strings(obj, *, predicate=None)`;`browser_driver` + `browser_plugin` 改用 | `tests/test_json_walk.py` |
+| **R.14** | `subtitle/browser_driver.py` 抽 `ProbeStrategy` Protocol + `PROBE_STRATEGIES = [_probe_track, _probe_initial_state, _probe_player, _probe_dom]`;`fetch_subtitle_via_browser` 改循环 | `tests/test_probe_strategies.py` |
+| **R.15** | `fetch_subtitle_via_browser` 删 `finally: page.close()`;`BilibiliAdapter.fetch_browser_subtitle` + `FallbackAdapter.fetch_browser_subtitle` 改成"probe 后 close"(若 miss 留给 caller);`fetch_via_recording` 重新 open page | `tests/test_adapter_page_lifecycle.py` + R.11 真实 B站 验证 |
 
 ## 风险
 
@@ -152,6 +167,9 @@ src/vla/
 | 删 `_record_screen` 后有人依赖 ffmpeg 兜底 | R.11 实跑 B站 验证;失败报错符合预期 |
 | `LLMConfig` 迁移后旧 yaml 配置不生效 | R.10 加 yaml 兼容(检测旧字段自动映射到 `cfg.llm.*`) |
 | web entry spec 之后想用 `_record_screen` 兜底 | R.8 后 web spec 也得改 — 与 web 实现的协调是后续 spec 范围 |
+| Sub-3 `ProbeStrategy` 抽出来后顺序变了 | 列表化后保持原 `[_probe_track, _probe_initial_state, _probe_player, _probe_dom]` 顺序,ProbeStrategy 接受 page/url 参数对齐 |
+| Sub-4 去掉 `finally: page.close()` 后某个 caller 漏 close | R.11 真实 B站 跑通验证;`adapter.fetch_via_recording` 走自己的 try/finally 模式 |
+| Sub-1 normalize 对未识别格式的处理 | format_hint 缺省 → 走 plain text pass-through(假设已是清洗过的文本) |
 
 ## 不在本 spec 范围
 
@@ -165,6 +183,6 @@ src/vla/
 
 ## 后续
 
-- 用户审 spec,通过后用 superpowers writing-plans skill 拆 R.1 ~ R.11 的执行 plan
+- 用户审 spec,通过后用 superpowers writing-plans skill 拆 R.1 ~ R.15 的执行 plan
 - 每个 R.Phase 由独立 plan 执行(测试先行,验收由该 plan 的"验收代码"块定义)
 - R.11 完成后,新功能/新需求走 brainstorming → spec → writing-plans 流程,不再回 implementation-plan.md
