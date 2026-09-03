@@ -25,19 +25,15 @@ video_source:
 
 quality_check:
   enabled: true
-  # 2026-09-02 修正:用 MiniMax endpoint 实际支持的模型名(M2.7 / M2.5 是 reasoning model,
-  # 响应会带 <think>...</think> 块;QualityChecker / Refiner 的 _parse_json 已能剥掉)
-  model: "MiniMax-M2.7-highspeed"
   min_score_to_pass: 70
   min_char_per_second: 1.0
   max_char_per_second: 15.0
   # 2026-09-02 Level 4:LLM 语义清理(faster-whisper 输出整理)
-  # refine_enabled=true 才调 LLM;refine_model=None 复用 quality_check.model
+  # refine_enabled=true 才调 LLM
   # refine_max_chars=6000 是粗估的输入 token 上限(超出跳过 LLM,只用本地清理)
   # refine_max_output_tokens=4000 是 LLM 输出上限 — reasoning model (MiniMax M2 / DeepSeek R1)
   # 还要算上 <think>...</think> 块,实际可能到 ~6000 tokens
   refine_enabled: true
-  refine_model: MiniMax-M2.7-highspeed
   refine_max_chars: 6000
   refine_max_output_tokens: 4000
 
@@ -70,8 +66,6 @@ browser_plugin:
   # 状态保存在内存,下次启动重置
 
 summary:
-  # 2026-09-02 修正:与 quality_check.model 保持一致(同 MiniMax endpoint)
-  model: "MiniMax-M2.7-highspeed"
   target_words_min: 500
   target_words_max: 800
   notes_file: "./notes/videos.md"
@@ -100,6 +94,15 @@ llm_client:
   provider: "minimax"     # openai | qwen | deepseek | minimax
   api_key_env: "OPENAI_API_KEY"
   base_url_env: "OPENAI_BASE_URL"
+
+# R-10(2026-09-03):LLM 模型选择统一在这里 — 旧 quality_check.model / refine_model /
+# summary.model 字段已删除,通过 VLAConfig._migrate_legacy_llm_keys 自动迁移。
+# 2026-09-02 修正:用 MiniMax endpoint 实际支持的模型名(M2.7 / M2.5 是 reasoning model,
+# 响应会带 <think>...</think> 块;QualityChecker / Refiner 的 _parse_json 已能剥掉)
+llm:
+  refine_model: "MiniMax-M2.7-highspeed"
+  quality_model: "MiniMax-M2.7-highspeed"
+  summary_model: "MiniMax-M2.7-highspeed"
 
 puppeteer:                                 # Phase 3.1+ Puppeteer CDP 配置
   debugging_port: 9222                    # Chrome --remote-debugging-port

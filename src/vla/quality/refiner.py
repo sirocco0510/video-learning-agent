@@ -109,11 +109,13 @@ class SubtitleRefiner:
 
     @property
     def model(self) -> str:
-        """refine_model 优先,fallback 到 quality_check.model。"""
-        return (
-            self.config.quality_check.refine_model
-            or self.config.quality_check.model
-        )
+        """R-10:统一从 cfg.llm.refine_model 取值。
+
+        历史语义(refine_model 为空时 fallback 到 quality_check.model)在
+        VLAConfig._migrate_legacy_llm_keys 的 pre-validator 里实现:
+        旧 YAML 缺 refine_model 时,llm.refine_model 默认 = llm.quality_model。
+        """
+        return self.config.llm.refine_model
 
     # ---------------- 主流程 ----------------
 

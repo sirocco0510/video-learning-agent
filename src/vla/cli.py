@@ -152,12 +152,12 @@ def _assemble_components(cfg_path: Path) -> dict:
     history = HistoryManager(cfg.history.file)
     quota = QuotaManager(cfg)
     summarizer = LLMSummarizer(
-        LLMClient(cfg.llm_client, model=cfg.summary.model),
+        LLMClient(cfg.llm_client, model=cfg.llm.summary_model),
         cfg.summary.notes_file,
     )
     summarizer.cfg = cfg
     checker = QualityChecker(cfg)
-    checker.set_llm(LLMClient(cfg.llm_client, model=cfg.quality_check.model))
+    checker.set_llm(LLMClient(cfg.llm_client, model=cfg.llm.quality_model))
     notifier = MacOSNotifier()
     plugin_status = PluginStatus()
 

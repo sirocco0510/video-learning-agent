@@ -87,13 +87,15 @@ class TestProperties:
         assert r.enabled is False
 
     def test_model_prefers_refine_model(self, cfg, mock_llm):
-        cfg.quality_check.refine_model = "gpt-4o"
+        cfg.llm.refine_model = "gpt-4o"
         r = SubtitleRefiner(cfg, llm=mock_llm)
         assert r.model == "gpt-4o"
 
     def test_model_fallback_to_quality_model(self, cfg, mock_llm):
-        cfg.quality_check.refine_model = None
-        cfg.quality_check.model = "gpt-4o-mini"
+        # R-10:fallback 语义在 VLAConfig._migrate_legacy_llm_keys 的 pre-validator 里实现
+        # (llm.refine_model 默认 = llm.quality_model);refiner 直接返回 cfg.llm.refine_model。
+        cfg.llm.quality_model = "gpt-4o-mini"
+        cfg.llm.refine_model = "gpt-4o-mini"
         r = SubtitleRefiner(cfg, llm=mock_llm)
         assert r.model == "gpt-4o-mini"
 
@@ -250,8 +252,8 @@ class TestHappyPath:
         assert len(result.corrections) == 2
 
     def test_uses_refine_model_when_set(self, cfg, mock_llm):
-        """refine_model 显式设置 → 用 refine_model,不用 quality_check.model。"""
-        cfg.quality_check.refine_model = "gpt-4o"
+        """refine_model 显式设置 → 用 refine_model,不用 quality_model(R-10:统一从 cfg.llm.* 取值)。"""
+        cfg.llm.refine_model = "gpt-4o"
         mock_llm.complete.return_value = '{"cleaned_text": "x", "corrections": [], "notes": ""}'
         r = SubtitleRefiner(cfg, llm=mock_llm)
 

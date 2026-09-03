@@ -121,6 +121,21 @@ class LLMClientConfig(BaseModel):
     base_url_env: str
 
 
+class LLMConfig(BaseModel):
+    """集中所有 LLM 模型选择(SSOT: spec §C #11,2026-09-03)。
+
+    - `refine_model`:SubtitleRefiner 用(整理繁简 + 错字)
+    - `quality_model`:QualityChecker 用(评分)
+    - `summary_model`:LLMSummarizer 用(6h 批量总结)
+
+    旧 YAML 字段通过 VLAConfig._migrate_legacy_llm_keys 自动迁移到 llm.*。
+    """
+
+    refine_model: str
+    quality_model: str
+    summary_model: str
+
+
 class PuppeteerConfig(BaseModel):
     """Puppeteer CDP 连接配置(SSOT: requirements.md FR-2.10)。
 
@@ -176,9 +191,62 @@ class VLAConfig(BaseModel):
     history: HistoryConfig
     logging: LoggingConfig
     llm_client: LLMClientConfig
+    llm: LLMConfig
     puppeteer: PuppeteerConfig = PuppeteerConfig()
     # 2026-09-02 修复:之前 VLAConfig 没有 platforms 字段,YAML 里写 platforms:.* 是被 pydantic 静默忽略的
     platforms: PlatformsConfig = PlatformsConfig()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_llm_keys(cls, data: Any) -> Any:
+        """迁移旧 YAML 字段到 llm.*,并保持 legacy accessor 可用。
+
+        旧字段 → 新字段:
+        - quality_check.model         → llm.quality_model
+        - quality_check.refine_model  → llm.refine_model
+        - summary.model               → llm.summary_model
+
+        新字段 → 旧字段(back-compat):
+        - llm.quality_model    → quality_check.model  (QualityCheckConfig.model 是必填字段)
+        - llm.refine_model     → quality_check.refine_model
+        - llm.summary_model    → summary.model
+
+        规则:新 llm: 块优先(SSOT)。当新旧并存时,新字段胜出,旧字段被新字段覆盖。
+        """
+        if not isinstance(data, dict):
+            return data
+        llm = dict(data.get("llm") or {})
+        qc = dict(data.get("quality_check") or {})
+        sm = dict(data.get("summary") or {})
+
+        # 旧 → 新(legacy YAML 兼容)
+        if "quality_model" not in llm and "model" in qc:
+            llm["quality_model"] = qc["model"]
+        # refine_model:旧 YAML 里 refine_model 可选(None = 复用 quality_check.model),
+        # 新 llm.refine_model 是必填 str,所以缺省时默认 = quality_model。
+        if "refine_model" not in llm:
+            legacy_refine = qc.get("refine_model")
+            llm["refine_model"] = (
+                legacy_refine if legacy_refine else llm.get("quality_model") or qc.get("model", "")
+            )
+        if "summary_model" not in llm and "model" in sm:
+            llm["summary_model"] = sm["model"]
+
+        # 新 → 旧(legacy accessor 兼容 — quality_check.model / summary.model 都是必填字段)
+        if "quality_model" in llm:
+            qc["model"] = llm["quality_model"]
+        if "refine_model" in llm:
+            qc["refine_model"] = llm["refine_model"]
+        if "summary_model" in llm:
+            sm["model"] = llm["summary_model"]
+
+        if llm:
+            data["llm"] = llm
+        if qc:
+            data["quality_check"] = qc
+        if sm:
+            data["summary"] = sm
+        return data
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "VLAConfig":
