@@ -10,40 +10,68 @@ whisper:
   language: "zh"
   segment_seconds: 30
   compute_type: "int8"    # int8 / int8_float16 / float16
+  # 2026-09-02 Level 3 步骤 1:本地后处理(碎片合并 + 重复段去重)
+  postprocess_enabled: true
+  postprocess_min_line_chars: 8      # 短于这个字符的行认为碎片
+  postprocess_max_line_chars: 80     # 合并后单行上限
+  postprocess_min_overlap_chars: 6   # 重复段最小公共子串
 
 video_source:
   prefer_download: true
   download:
-    format: "worst"       # 最差画质,节约带宽
-  record:
-    enabled: true
-    screen_index: 2       # ffmpeg -list_devices 查(MacBook Air 上 screen=2,相机 0/1)
-    fps: 30
-    crf: 28
-    audio_input: "0"      # 麦克风 index;前缀(screen)保留为文档用途,实现只用 split(":")[1]
-    preset: "ultrafast"
+    # 2026-09-02 修正:"worst" 在 B站 audio-only 格式上不可用,改为"最低画质视频 + 最佳音频"优先
+    # 备选降级:仅最低画质 / 仅最佳。详见 yt-dlp format selector。
+    format: "bestvideo[height<=360]+bestaudio/best[height<=360]/best"
 
 quality_check:
   enabled: true
-  model: "gpt-4o-mini"    # 云端订阅
+  # 2026-09-02 修正:用 MiniMax endpoint 实际支持的模型名(M2.7 / M2.5 是 reasoning model,
+  # 响应会带 <think>...</think> 块;QualityChecker / Refiner 的 _parse_json 已能剥掉)
+  model: "MiniMax-M2.7-highspeed"
   min_score_to_pass: 70
   min_char_per_second: 1.0
   max_char_per_second: 15.0
+  # 2026-09-02 Level 4:LLM 语义清理(faster-whisper 输出整理)
+  # refine_enabled=true 才调 LLM;refine_model=None 复用 quality_check.model
+  # refine_max_chars=6000 是粗估的输入 token 上限(超出跳过 LLM,只用本地清理)
+  # refine_max_output_tokens=4000 是 LLM 输出上限 — reasoning model (MiniMax M2 / DeepSeek R1)
+  # 还要算上 <think>...</think> 块,实际可能到 ~6000 tokens
+  refine_enabled: true
+  refine_model: MiniMax-M2.7-highspeed
+  refine_max_chars: 6000
+  refine_max_output_tokens: 4000
 
 browser_plugin:
-  name: "VideoTrans"
+  name: "Screen Recorder"
   enabled: true
   remind_timeout_sec: 30          # 弹窗等用户响应的超时(秒)
   plugin_paths:
     - "~/Documents/VideoTrans/subtitles"
     - "~/Downloads"
+  # FR-2.14/2.15:录屏触发。
+  # macOS 上 Screen Recorder for Google Chrome™ 用 Command+Shift+R(已 wait_user_hotkey spike 验证)。
+  # 旧 Screencastify(Alt+Shift+R)因 popup 行为不稳定弃用。
+  # 改 hotkey 要同步 chrome://extensions 里 commands。
+  record_hotkey: "Command+Shift+R"
+  # FR-2.17:Screencastify 录完后跳 chrome-extension:// 编辑标签页,
+  # 用户手动点 btn-download → 触发 Chrome download 事件。
+  # 30min 视频用户可能短暂 AFK,默认 180s。
+  record_download_timeout_sec: 180
+  # FR-2.15:BrowserRecorder 按 hotkey(CDP no-op)后给用户的窗口期,
+  # 让用户在真实 Chrome 手动按对应热键 / 操作 popup。0 = 关闭。
+  record_pre_grace_sec: 10
+  # FR-2.15:`录屏到时`通知在 duration_sec + post_buffer_sec 后发出。
+  # 给用户 buffer 处理:浏览器加载延迟 / 手动点 Play / 视频缓冲 / 暂停/重看。
+  # 录屏本身由用户手动 Stop,不影响。
+  record_post_buffer_sec: 30
   # FR-2.9/2.10 插件状态:整个 session 只弹一次
   #   available   用户确认启动 + 等到文件
   #   unavailable 用户跳过 / 弹窗超时 / 字幕质量不过关
   # 状态保存在内存,下次启动重置
 
 summary:
-  model: "gpt-4o-mini"
+  # 2026-09-02 修正:与 quality_check.model 保持一致(同 MiniMax endpoint)
+  model: "MiniMax-M2.7-highspeed"
   target_words_min: 500
   target_words_max: 800
   notes_file: "./notes/videos.md"
@@ -76,9 +104,8 @@ llm_client:
 puppeteer:                                 # Phase 3.1+ Puppeteer CDP 配置
   debugging_port: 9222                    # Chrome --remote-debugging-port
   cdp_host: "localhost"
-  recording_hotkey: "Control+Shift+R"       # Screen Recorder 扩展启停热键
-  recording_output_dir: "~/Downloads"     # 录屏兜底时扩展输出目录(可选)
-  recording_download_timeout_sec: 30      # 等下载完成的超时
+  # 注意:录屏相关字段(hotkey / download timeout)已挪到 browser_plugin: 下
+  # (FR-2.16/2.17 属于 BrowserPluginConfig,而非 PuppeteerConfig)。
 
 platforms:                                 # Phase 3 平台适配器注册(FR-2.0)
   bilibili:

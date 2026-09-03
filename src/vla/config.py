@@ -26,25 +26,21 @@ class WhisperConfig(BaseModel):
     language: str
     segment_seconds: int
     compute_type: str
+    # 2026-09-02 Level 3 步骤 1:本地后处理(碎片合并 + 重复段去重)
+    # 纯本地,不依赖 OpenCC / jieba / 云端 LLM,满足"字幕永远本地"红线
+    postprocess_enabled: bool = True
+    postprocess_min_line_chars: int = 8      # 短于这个字符的行认为碎片
+    postprocess_max_line_chars: int = 80     # 合并后单行上限
+    postprocess_min_overlap_chars: int = 6   # 重复段最小公共子串
 
 
 class VideoSourceDownloadConfig(BaseModel):
     format: str
 
 
-class VideoSourceRecordConfig(BaseModel):
-    enabled: bool
-    screen_index: int
-    fps: int
-    crf: int
-    audio_input: str
-    preset: str
-
-
 class VideoSourceConfig(BaseModel):
     prefer_download: bool
     download: VideoSourceDownloadConfig
-    record: VideoSourceRecordConfig
 
 
 class QualityCheckConfig(BaseModel):
@@ -53,6 +49,17 @@ class QualityCheckConfig(BaseModel):
     min_score_to_pass: int
     min_char_per_second: float
     max_char_per_second: float
+    # 2026-09-02 Level 4:LLM 语义清理(在 quality_check 之前,云端 LLM,
+    # 复用 quality_check.model 或独立 model)。
+    # 设计目标:把 faster-whisper 输出的繁简混排 + 同音字错字 + 碎片,
+    # 整理成可读性接近人工字幕的版本。归入"字幕质量检查"云端配额。
+    refine_enabled: bool = False         # 默认关(云端 API 花钱,显式开启)
+    refine_model: str | None = None       # None = 复用 quality_check.model
+    refine_max_chars: int = 6000          # 超过这个字符数不调 LLM(避免爆 token)
+    # 2026-09-02:输出 token 上限 — 必须大于输入 + corrections + notes 的预计总长。
+    # reasoning model(MiniMax M2 / DeepSeek R1)还要算上 <think>...</think>。
+    # 默认 max(2000, max_input_chars * 2 + 2000) — see SubtitleRefiner.
+    refine_max_output_tokens: int = 4000
 
 
 class BrowserPluginConfig(BaseModel):
@@ -60,8 +67,20 @@ class BrowserPluginConfig(BaseModel):
     enabled: bool
     remind_timeout_sec: int
     plugin_paths: list[Path]
-    record_hotkey: str = "Control+Shift+R"
-    record_download_timeout_sec: int = 30
+    record_hotkey: str = "Alt+Shift+R"
+    # FR-2.15:Screencastify 录完后跳 chrome-extension:// 编辑标签页,
+    # 用户点 btn-download 触发 Chrome download 事件。30min 长视频用户可能
+    # 短暂 AFK,所以默认 180s。
+    record_download_timeout_sec: int = 180
+    # FR-2.15:BrowserRecorder 按 hotkey(CDP no-op)之后给用户的窗口期,
+    # 让用户有时间在真实 Chrome 里手动按对应热键 / 操作 popup。
+    # 0 = 关闭(B级批量场景)。
+    record_pre_grace_sec: int = 10
+    # FR-2.15:`duration_sec` 是估计的视频时长;实际录屏结束由用户手动 Stop。
+    # "录屏到时"通知在 duration_sec + post_buffer_sec 后发出,给用户 buffer:
+    # 1) 浏览器加载延迟 2) 用户手动点 Play 3) 视频缓冲 4) 用户暂停/重看。
+    # 录屏本身不受影响(用户控制 Stop),只是通知延后。
+    record_post_buffer_sec: int = 30
 
 
 class SummaryConfig(BaseModel):
@@ -116,6 +135,33 @@ class PuppeteerConfig(BaseModel):
         return f"http://{self.cdp_host}:{self.debugging_port}"
 
 
+# ---------------- 平台 adapter 配置(2026-09-02 新增) ----------------
+
+
+class PlatformEntryConfig(BaseModel):
+    """单个平台 adapter 启用配置(FR-2.0 + Phase 3.0)。
+
+    match_hosts 仅作文档/校验用途(实际匹配逻辑在 adapter 自身的 match() 类方法里)。
+    enabled=False → build_text_provider 跳过这个 adapter 注册。
+    """
+
+    enabled: bool = False
+    match_hosts: list[str] = []
+
+
+class PlatformsConfig(BaseModel):
+    """所有平台 adapter 的启用状态。
+
+    2026-09-02 修复:之前 VLAConfig 没有这个字段,`cfg.platforms.*` 直接 AttributeError,
+    实际等于永远 0 个 adapter 被注册(Phase 9 集成 bug)。
+
+    默认:B站开,内部网站关(等账号下发)。
+    """
+
+    bilibili: PlatformEntryConfig = PlatformEntryConfig(enabled=True)
+    internal_site: PlatformEntryConfig = PlatformEntryConfig(enabled=False)
+
+
 # ---------------- 顶层 ----------------
 
 
@@ -131,6 +177,8 @@ class VLAConfig(BaseModel):
     logging: LoggingConfig
     llm_client: LLMClientConfig
     puppeteer: PuppeteerConfig = PuppeteerConfig()
+    # 2026-09-02 修复:之前 VLAConfig 没有 platforms 字段,YAML 里写 platforms:.* 是被 pydantic 静默忽略的
+    platforms: PlatformsConfig = PlatformsConfig()
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "VLAConfig":
