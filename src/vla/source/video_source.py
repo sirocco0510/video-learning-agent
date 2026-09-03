@@ -1,15 +1,10 @@
-"""视频源工厂(SSOT: requirements.md FR-1 / FR-8 + implementation-plan.md Phase 2)。
+"""视频源工厂(SSOT: requirements.md FR-1 + R-08 决策)。
 
-FR-1:yt-dlp simulate 检测 → 下载 or 录屏
-FR-8:ffmpeg + avfoundation 录屏,系统音频,libx264 ultrafast CRF=28
-
-⚠️ Phase 2 边界:
-- ffmpeg 进程的清理(proc.wait() / proc.kill())归主调度器(Phase 8)负责
-- _record_screen 只负责启动 Popen 并返回目标路径
+FR-1:yt-dlp simulate 检测 → 下载
+R-08(2026-09-03 spec §A #5):屏幕录制路径已删除,get() 失败抛 DownloadError
 """
 
 import subprocess
-import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -73,51 +68,18 @@ class VideoSourceFactory:
             )
         return output_path
 
-    # ---- 录屏 ----
-
-    def _record_screen(self, url: str, video_id: str, duration_sec: int) -> Path:
-        """打开浏览器 → 等加载 → 异步启动 ffmpeg avfoundation → 返回路径。
-
-        进程清理(proc.kill() / proc.wait())归主调度器(Phase 8)。
-        """
-        output_path = self.tmp_dir / f"{video_id}.mp4"
-
-        # 1. 打开浏览器(非阻塞)
-        subprocess.run(["open", url], check=False)
-
-        # 2. 等浏览器加载
-        time.sleep(5)
-
-        # 3. 异步启动 ffmpeg
-        record_cfg = self.config.video_source.record
-        # audio_input 兼容 "screen:audio" 旧格式 与 "audio" 新格式;只取最后一段
-        audio_idx = record_cfg.audio_input.split(":")[-1]
-        cmd = [
-            "ffmpeg", "-y",
-            "-f", "avfoundation",
-            "-framerate", str(record_cfg.fps),
-            "-i", f"{record_cfg.screen_index}:{audio_idx}",
-            "-t", str(duration_sec),
-            "-c:v", "libx264",
-            "-preset", record_cfg.preset,
-            "-crf", str(record_cfg.crf),
-            "-c:a", "aac",
-            "-b:a", "128k",
-            str(output_path),
-        ]
-        subprocess.Popen(cmd)
-        return output_path
-
     # ---- 编排 ----
 
     def get(self, url: str, video_id: str, expected_duration: int) -> VideoSource:
-        """调度:_is_downloadable → _download or _record_screen。"""
-        if self._is_downloadable(url):
-            path = self._download(url, video_id)
-            return VideoSource(
-                path=path, mode="download", duration_sec=float(expected_duration)
-            )
-        path = self._record_screen(url, video_id, expected_duration)
+        """下载视频源。失败抛 DownloadError(上层 main_provider 不再 fallback 到 ffmpeg)。
+
+        决策(2026-09-03 spec §A #5):
+        - 屏幕录制路径已删除(FR-8)
+        - 网络/yt-dlp 失败 = 报错退出,不静默走 ffmpeg 录屏
+        """
+        if not self._is_downloadable(url):
+            raise DownloadError(f"无法下载(yt-dlp simulate failed): {url}")
+        path = self._download(url, video_id)
         return VideoSource(
-            path=path, mode="record", duration_sec=float(expected_duration)
+            path=path, mode="download", duration_sec=float(expected_duration)
         )
