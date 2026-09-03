@@ -23,6 +23,7 @@ from typing import Any, Iterable
 
 from vla.config import VLAConfig
 from vla.llm.client import LLMClientLike
+from vla.log.transcribed_file import TranscribedItem, read as read_transcribed
 
 
 logger = logging.getLogger(__name__)
@@ -33,19 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------- 数据结构 ----------------
-
-
-@dataclass
-class TranscribedItem:
-    """从 logs/transcribed/*.txt 读出的单条字幕。"""
-
-    title: str
-    source: str
-    quality_score: int
-    duration_sec: int
-    text: str
-    path: Path
-    mtime: float
+# TranscribedItem 已统一从 vla.log.transcribed_file 导入(SSOT)
 
 
 # ---------------- PROMPT ----------------
@@ -106,44 +95,8 @@ class LLMSummarizer:
         return items
 
     def _parse_file(self, path: Path) -> TranscribedItem:
-        """解析单条字幕文件。"""
-        content = path.read_text(encoding="utf-8")
-        lines = content.split("\n", 1)
-        # 标题
-        title = path.stem
-        if lines and lines[0].startswith("# "):
-            title = lines[0][2:].strip()
-        # 元数据
-        meta_line = lines[1].split("\n", 1)[0] if len(lines) > 1 else ""
-        source = "whisper"
-        quality_score = 0
-        duration_sec = 0
-        for token in meta_line.split("|"):
-            token = token.strip()
-            if token.startswith("来源:"):
-                source = token.removeprefix("来源:").strip()
-            elif "质量:" in token:
-                m = re.search(r"质量:(\d+)", token)
-                if m:
-                    quality_score = int(m.group(1))
-            elif "时长:" in token:
-                m = re.search(r"时长:(\d+)", token)
-                if m:
-                    duration_sec = int(m.group(1))
-        # 正文(header 后第一个空行之后)
-        if "\n\n" in content:
-            text = content.split("\n\n", 1)[1].strip()
-        else:
-            text = content.strip()
-        return TranscribedItem(
-            title=title,
-            source=source,
-            quality_score=quality_score,
-            duration_sec=duration_sec,
-            text=text,
-            path=path,
-            mtime=path.stat().st_mtime,
-        )
+        """委托 transcribed_file.read — 单一来源。"""
+        return read_transcribed(path)
 
     # ---------------- 总结 ----------------
 
