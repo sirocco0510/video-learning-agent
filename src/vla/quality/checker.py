@@ -18,20 +18,14 @@ import json
 import logging
 import re
 from collections import Counter
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 from vla.config import VLAConfig
+from vla.llm.client import LLMClientLike
 from vla.models import QualityResult
 
 
 logger = logging.getLogger(__name__)
-
-
-@runtime_checkable
-class LLMClientLike(Protocol):
-    """LLM 客户端 duck typing 接口(避免强依赖 openai SDK)。"""
-
-    def complete(self, prompt: str, max_tokens: int = 1000, temperature: float = 0.3) -> str: ...
 
 
 # LLM Prompt(从 implementation-plan.md Phase 5 复制,保持一致)

@@ -26,20 +26,14 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 from vla.config import VLAConfig
+from vla.llm.client import LLMClientLike
 from vla.models import Correction, RefinementResult
 
 
 logger = logging.getLogger(__name__)
-
-
-@runtime_checkable
-class LLMClientLike(Protocol):
-    """LLM 客户端 duck typing 接口(与 quality_checker 一致)。"""
-
-    def complete(self, prompt: str, max_tokens: int = 1000, temperature: float = 0.3) -> str: ...
 
 
 # ---------------- Prompt 设计 ----------------
