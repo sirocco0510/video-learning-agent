@@ -44,6 +44,11 @@ from typing import Protocol, runtime_checkable
 
 from vla.config import VLAConfig
 from vla.subtitle.page_control import pause_page_video
+from vla.subtitle.probe_strategy import (
+    ProbeContext,
+    ProbeRegistry,
+    ProbeResult,
+)
 from vla.ui.macos_notify import MacOSNotifier
 
 
@@ -124,6 +129,7 @@ class BrowserRecorder:
         transcriber: AudioTranscriber,
         notifier: MacOSNotifier | None = None,
         poll_interval_ms: int = 1000,
+        probe_registry: ProbeRegistry | None = None,
     ) -> None:
         self.config = config
         self.transcriber = transcriber
@@ -133,6 +139,37 @@ class BrowserRecorder:
         self._pre_grace_sec = config.browser_plugin.record_pre_grace_sec
         self._post_buffer_sec = config.browser_plugin.record_post_buffer_sec
         self._poll_interval_ms = poll_interval_ms
+        # 探针注册表(R-14):默认空 registry,保持向后兼容;
+        # 上线时通过 default_probe_registry() 注入 Head/Referer/Cookie 三件套。
+        self.probe_registry: ProbeRegistry = (
+            probe_registry if probe_registry is not None else ProbeRegistry()
+        )
+
+    def probe(self, url: str) -> tuple[bool, list[ProbeResult]]:
+        """按注册顺序跑所有 match(url) 的探针,直到任意一个 ok 或全部跑完。
+
+        Returns:
+            (ok, results) — ok=True 表示至少一个探针判定 url 可达;
+            results 保留本次全部 ProbeResult 用于日志 / 调试。
+
+        行为契约(R-14 SSOT):
+        - session/page/cfg 都从 self 拿;session 留给调用方注入,
+          这里只是占位(ProbeContext 需要)
+        - 当前 session 暂未在 BrowserRecorder 内构造(留给 CDP 接管),
+          上线时由 main_provider 注入一个 requests.Session 到 ctx.session
+        """
+        ctx = ProbeContext(session=None, page=None, cfg=self.config)
+        results: list[ProbeResult] = []
+        for strat in self.probe_registry.get_all_for(url):
+            result = strat.run(url, ctx)
+            logger.info(
+                "probe[%s] url=%s ok=%s note=%s",
+                strat.name, url[:80], result.ok, result.note,
+            )
+            results.append(result)
+            if result.ok:
+                return True, results
+        return False, results
 
     def record_and_transcribe(
         self,
