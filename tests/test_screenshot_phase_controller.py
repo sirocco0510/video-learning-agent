@@ -115,3 +115,46 @@ class TestPhaseBC:
             ctrl.phase_b_then_c(mock_driver, "Bv1_partial", duration_sec=15, poll_interval_sec=0.1)
         )
         assert end_ts > 0
+
+
+class TestPhaseD:
+    def test_phase_d_writes_index_entry(
+        self, mock_driver: MagicMock, mock_capture: MagicMock, mock_notifier: MagicMock
+    ) -> None:
+        """PHASE D: 调 ScreenCapture.write_index_entry 写 index.jsonl.
+
+        F2-4 actual signature takes ScreenshotIndexEntry dataclass, not 5 positional args.
+        Test asserts the constructed dataclass, not positional args.
+        """
+        from vla.capture.screenshot_phase_controller import ScreenshotIndexEntry
+
+        ctrl = ScreenshotPhaseController(mock_driver, mock_notifier, mock_capture)
+        ctrl.phase_d_write_index(
+            "Bv1_d", start_ts=100.0, end_ts=370.0, duration_estimate=270,
+            partial_flags=["fullscreen_denied"],
+        )
+        expected_entry = ScreenshotIndexEntry(
+            bvid="Bv1_d",
+            start_ts=100.0,
+            end_ts=370.0,
+            duration_estimate=270,
+            partial_flags=["fullscreen_denied"],
+        )
+        mock_capture.write_index_entry.assert_called_once_with(expected_entry)
+
+    def test_phase_d_with_no_partial_flags(
+        self, mock_driver: MagicMock, mock_capture: MagicMock, mock_notifier: MagicMock
+    ) -> None:
+        """partial_flags=None → 写空 list (dataclass 不能 None)。"""
+        from vla.capture.screenshot_phase_controller import ScreenshotIndexEntry
+
+        ctrl = ScreenshotPhaseController(mock_driver, mock_notifier, mock_capture)
+        ctrl.phase_d_write_index("Bv1_clean", 50.0, 320.0, 270)
+        expected_entry = ScreenshotIndexEntry(
+            bvid="Bv1_clean",
+            start_ts=50.0,
+            end_ts=320.0,
+            duration_estimate=270,
+            partial_flags=[],
+        )
+        mock_capture.write_index_entry.assert_called_once_with(expected_entry)

@@ -117,3 +117,37 @@ class ScreenshotPhaseController:
         except Exception:
             pass
         return end_ts
+
+    def phase_d_write_index(
+        self,
+        audio_id: str,
+        start_ts: float,
+        end_ts: float,
+        duration_estimate: int,
+        partial_flags: list[str] | None = None,
+    ) -> None:
+        """PHASE D: 落盘 logs/screenshots/index.jsonl (委托给 ScreenCapture).
+
+        Brief verbatim assumed ScreenCapture.write_index_entry(bvid, start_ts,
+        end_ts, duration_estimate, partial_flags) — 5 positional args. But F2-4
+        actual signature is write_index_entry(entry: ScreenshotIndexEntry) —
+        1 dataclass arg. This wrapper constructs the dataclass and delegates.
+
+        Args:
+            audio_id: B站 BV id (dataclass field name: `bvid`)
+            start_ts: PHASE A monotonic time (or 0.0 on partial)
+            end_ts: PHASE C monotonic time (or 0.0 on partial)
+            duration_estimate: int(end_ts - start_ts), ±5s tolerance per FR-2.28.2e
+            partial_flags: list of degradation tags; None → stored as []
+
+        partial_flags=None → stored as [] in dataclass (required by
+        `list[str]` type, dataclass 不能 None).
+        """
+        entry = ScreenshotIndexEntry(
+            bvid=audio_id,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            duration_estimate=duration_estimate,
+            partial_flags=partial_flags if partial_flags is not None else [],
+        )
+        self._capture.write_index_entry(entry)
