@@ -64,7 +64,7 @@ def mock_refiner_enabled() -> MagicMock:
             original_text="cleaned text",
             cleaned_text="refined text",
             corrections=[],
-            notes=[],
+            notes="",
             model="claude-fable-5",
             prompt_tokens=100,
             completion_tokens=50,
@@ -140,3 +140,58 @@ class TestPipelineLevel1Only:
         assert cleaned_path.exists()
         assert cleaned_path.read_text(encoding="utf-8") == "cleaned text"
         assert not (tmp_path / "Bv1_clean.refined.txt").exists()
+
+
+class TestPipelineLevel4:
+    def test_level4_runs_when_enabled(
+        self,
+        config: VLAConfig,
+        mock_postprocessor: MagicMock,
+        mock_refiner_enabled: MagicMock,
+        mock_checker: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """refine_enabled=True → 调 refiner.refine + 写 refined.txt + quality 用 refined_text。"""
+        pipeline = SubtitlePipeline(
+            config, mock_postprocessor, mock_refiner_enabled, mock_checker
+        )
+        result = asyncio.run(
+            pipeline.run("raw", "title", 200, "small", tmp_path, "Bv1_refined")
+        )
+        assert result.refine_result is not None
+        assert result.refined_text == "refined text"
+        assert result.cleaned_text == "cleaned text"
+        mock_refiner_enabled.refine.assert_called_once_with("cleaned text", title="title")
+        mock_checker.check.assert_called_once_with(
+            "refined text", "title", 200, "small",
+        )
+        assert (tmp_path / "Bv1_refined.cleaned.txt").exists()
+        assert (tmp_path / "Bv1_refined.refined.txt").exists()
+
+    def test_level4_skips_when_long_text(
+        self,
+        config: VLAConfig,
+        mock_postprocessor: MagicMock,
+        mock_refiner_enabled: MagicMock,
+        mock_checker: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """text > refine_max_chars (6000) → 跳过 Level 4,用 cleaned_text。"""
+        long_text = "a" * 7000
+        mock_postprocessor.return_value = (
+            long_text,
+            PostprocessStats(
+                original_chars=7000, original_lines=1,
+                final_chars=7000, final_lines=1,
+                merged_short_lines=0, deduped_repeated_segments=0,
+            ),
+        )
+        pipeline = SubtitlePipeline(
+            config, mock_postprocessor, mock_refiner_enabled, mock_checker
+        )
+        result = asyncio.run(
+            pipeline.run(long_text, "long", 600, "small", tmp_path, "Bv1_long")
+        )
+        assert result.refine_result is None
+        assert result.refined_text == long_text
+        mock_refiner_enabled.refine.assert_not_called()
