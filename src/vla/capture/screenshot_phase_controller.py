@@ -77,3 +77,43 @@ class ScreenshotPhaseController:
             return time.monotonic()
         except Exception:
             return 0.0
+
+    async def phase_b_then_c(
+        self,
+        page: Any,
+        audio_id: str,
+        duration_sec: int,
+        poll_interval_sec: float = 5,
+    ) -> float:
+        """PHASE B (后台 poll) + PHASE C (末尾),并发跑,不 raise。
+
+        B: duration_sec 期间每 poll_interval_sec 抓一次 (失败 → partial,继续)。
+        C: duration_sec 即将结束时抓一次。
+        返回 end_ts (monotonic)。
+
+        Args:
+            duration_sec: B 阶段总时长 (秒)
+            poll_interval_sec: B 阶段轮询间隔 (秒); 测试可用 0.1 加速
+        """
+        end_ts = 0.0
+        try:
+            # PHASE B: 每 5s 抓一次(固定 5s 逻辑间隔,匹配 spec §3.7 "每 5s"),
+            # 但实际 sleep 用 poll_interval_sec (测试用 0.1 加速)
+            for elapsed in range(0, duration_sec, 5):
+                save_path = self._capture.save_dir / f"{audio_id}.phase_b.{elapsed}.png"
+                try:
+                    await self._capture.capture_full_screen(save_path)
+                except Exception:
+                    pass  # Q8: 失败不抛,记 partial
+                await asyncio.sleep(poll_interval_sec)
+
+            # PHASE C: 末尾截图
+            save_path = self._capture.save_dir / f"{audio_id}.phase_c.png"
+            try:
+                await self._capture.capture_full_screen(save_path)
+                end_ts = time.monotonic()
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return end_ts

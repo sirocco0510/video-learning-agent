@@ -86,3 +86,32 @@ class TestPhaseA:
         assert start_ts == 0.0
         # 不抛异常,降级到 capture
         mock_capture.capture_full_screen.assert_awaited_once()
+
+
+class TestPhaseBC:
+    def test_phase_b_then_c_returns_end_ts(
+        self, mock_driver: MagicMock, mock_capture: MagicMock, mock_notifier: MagicMock
+    ) -> None:
+        """PHASE B (后台 poll) + PHASE C (末尾) → 返回 end_ts。"""
+        ctrl = ScreenshotPhaseController(mock_driver, mock_notifier, mock_capture)
+        # duration_sec=15, poll_interval_sec=0.1 → B 跑 3 次 (0,5,10) + C 1 次
+        # Test runs in ~0.5s instead of 15s
+        end_ts = asyncio.run(
+            ctrl.phase_b_then_c(mock_driver, "Bv1_bc", duration_sec=15, poll_interval_sec=0.1)
+        )
+        assert isinstance(end_ts, float)
+        assert end_ts > 0
+        # B 阶段调用了 capture_full_screen 至少 2 次,C 阶段又 1 次 → 总 ≥3 次
+        assert mock_capture.capture_full_screen.await_count >= 3
+
+    def test_phase_b_partial_failure_continues(
+        self, mock_driver: MagicMock, mock_capture: MagicMock, mock_notifier: MagicMock
+    ) -> None:
+        """Q8: PHASE B 单次失败不中断,继续到 C。"""
+        # 第一次 capture 失败,后续成功
+        mock_capture.capture_full_screen = AsyncMock(side_effect=[False, True, True, True])
+        ctrl = ScreenshotPhaseController(mock_driver, mock_notifier, mock_capture)
+        end_ts = asyncio.run(
+            ctrl.phase_b_then_c(mock_driver, "Bv1_partial", duration_sec=15, poll_interval_sec=0.1)
+        )
+        assert end_ts > 0
