@@ -275,3 +275,157 @@ class TestStartRecording:
         assert driver.evaluate_calls, (
             "start_recording 必须在 polling 之前先调用 _resolve_ext_id(driver)"
         )
+
+
+# ---- click_download tests (2) ----
+
+
+class FakeDownload:
+    """Mock playwright Download 对象。"""
+
+    def __init__(self, suggested_filename: str, save_path: Path) -> None:
+        self.suggested_filename = suggested_filename
+        self._save_path = save_path
+        self.save_as_calls: list[Path] = []
+
+    async def save_as(self, path: Path) -> None:
+        self.save_as_calls.append(path)
+        # 模拟文件落盘
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"fake-webm-bytes")
+
+
+class FakeDownloadPage:
+    """Mock 一个可以触发 download 事件的 page。"""
+
+    def __init__(
+        self,
+        download: FakeDownload | None,
+        click_should_trigger: bool = True,
+        click_delay: float = 0.0,
+    ) -> None:
+        self._download = download
+        self._click_should_trigger = click_should_trigger
+        self._click_delay = click_delay
+        self.url = "chrome-extension://ext123/editor.html?id=99"
+        self.goto_calls: list[str] = []
+        self.click_calls: list[str] = []
+        self._download_emitted = False
+
+    async def goto(self, url: str) -> None:
+        self.goto_calls.append(url)
+
+    async def click(self, selector: str, **kwargs: Any) -> None:
+        self.click_calls.append(selector)
+        if self._click_delay:
+            await asyncio.sleep(self._click_delay)
+        if self._click_should_trigger and self._download and not self._download_emitted:
+            self._download_emitted = True
+            # 模拟 download 事件被 ctx._download_handler 捕获
+            # 由 FakeContext.emit_download 触发,这里只标状态
+
+    @property
+    def download(self) -> FakeDownload | None:
+        return self._download if self._download_emitted else None
+
+
+class FakeContext:
+    """Mock BrowserContext,管理 download handler 注册 + 新页面创建。"""
+
+    def __init__(self, page: FakeDownloadPage) -> None:
+        self.page = page
+        self._download_handler: Any = None
+        self.handlers: list[Any] = []
+
+    def on(self, event: str, handler: Any) -> None:
+        if event == "download":
+            self._download_handler = handler
+            self.handlers.append(handler)
+
+    def new_page(self) -> FakeDownloadPage:
+        return self.page
+
+    def emit_download(self, dl: FakeDownload) -> None:
+        """手动触发 download 事件(模拟扩展点完按钮后产生的事件)。
+
+        handler 实际是 sync(只是 set_result),所以直接同步调用。
+        brief 原稿用了 asyncio.create_task(handler(dl)),但 sync handler 返回
+        None,create_task(None) 会 TypeError;这里改成同步调用。
+        """
+        if self._download_handler is not None:
+            self._download_handler(dl)
+
+
+class FakeDriverWithContext:
+    """带 context 的 FakeDriver,用于 click_download 测试。"""
+
+    def __init__(self, context: FakeContext, page: FakeDownloadPage) -> None:
+        self.context = context
+        self.page = page
+
+
+class TestClickDownload:
+    async def test_click_download_registers_listener_before_click(
+        self, tmp_path: Path, recorder: TabAudioRecorder
+    ) -> None:
+        # 验证: context.on("download") 必须在 click() 之前注册
+        # 用 ordered_calls 列表记录两件事的先后顺序
+        ordered_calls: list[str] = []
+
+        class TrackingContext(FakeContext):
+            def on(self, event: str, handler: Any) -> None:
+                ordered_calls.append(f"on:{event}")
+                super().on(event, handler)
+
+        class TrackingPage(FakeDownloadPage):
+            async def click(self, selector: str, **kwargs: Any) -> None:
+                ordered_calls.append(f"click:{selector}")
+                await super().click(selector, **kwargs)
+
+        dl = FakeDownload("audio.webm", tmp_path / "audio.webm")
+        page = TrackingPage(download=dl, click_should_trigger=False)
+        # click 不立即 emit,让测试自己 emit,确保 on 在 click 之前注册
+        ctx = TrackingContext(page=page)
+        driver = FakeDriverWithContext(ctx, page)
+
+        # 后台 emit download(模拟扩展点完按钮后产生的事件)
+        async def emit_later() -> None:
+            await asyncio.sleep(0.05)
+            ctx.emit_download(dl)
+
+        emit_task = asyncio.create_task(emit_later())
+
+        result_path = await recorder.click_download(
+            driver,  # type: ignore[arg-type]
+            audio_id="99",
+            ext_id="ext123",
+            save_dir=tmp_path,
+            timeout_sec=5,
+        )
+
+        await emit_task
+
+        assert result_path.exists()
+        assert result_path.name == "99.webm"  # audio_id 作为文件名(FR-2.26)
+        # 关键断言: on("download") 必须在 click() 之前
+        assert ordered_calls[0].startswith("on:"), (
+            f"download listener must be registered before click, got: {ordered_calls}"
+        )
+        assert any(c.startswith("click:") for c in ordered_calls)
+
+    async def test_click_download_timeout_raises(
+        self, tmp_path: Path, recorder: TabAudioRecorder
+    ) -> None:
+        # click 永远不触发 download 事件 → timeout 抛 DownloadTimeoutError
+        page = FakeDownloadPage(download=None, click_should_trigger=False)
+        ctx = FakeContext(page=page)
+        driver = FakeDriverWithContext(ctx, page)
+
+        with pytest.raises(DownloadTimeoutError):
+            await recorder.click_download(
+                driver,  # type: ignore[arg-type]
+                audio_id="99",
+                ext_id="ext123",
+                save_dir=tmp_path,
+                timeout_sec=1,  # 缩短 timeout 让测试快
+            )

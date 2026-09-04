@@ -17,9 +17,6 @@ import re
 from pathlib import Path
 from typing import Any, Literal
 
-from vla.config import VLAConfig
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -259,3 +256,98 @@ class TabAudioRecorder:
             f"等待 editor.html 跳转超时 ({duration_sec + post_buffer_sec}s);"
             f"最后 url={getattr(bg_page, 'url', '?')}"
         )
+
+    # ---- 落盘下载 ----
+
+    async def click_download(
+        self,
+        driver: Any,
+        audio_id: str,
+        ext_id: str,
+        save_dir: Path | None = None,
+        timeout_sec: int = 180,
+    ) -> Path:
+        """FR-2.25: 直接 goto editor.html?id=<audio_id>,注册 download 监听,点下载按钮。
+
+        关键顺序:必须 page.on("download") 先注册,再点按钮(否则事件丢失)。
+
+        步骤:
+            1. save_dir 兜底: None → self.save_dir(创建 mkdir(parents=True, exist_ok=True))
+            2. context.on("download", handler) 注册监听(关键:先注册)
+            3. page.goto(chrome-extension://<ext_id>/editor.html?id=<audio_id>)
+            4. 在 editor.html 内 evaluate 找下载按钮,点击
+               (候选 selector: button:has-text("Download"), button:has-text("保存"),
+                #download-btn, [data-action="download"])
+            5. 等 download 事件触发,download.save_as(<save_dir>/<audio_id>.webm)
+            6. 超时 → raise DownloadTimeoutError
+
+        Args:
+            driver: playwright Driver(提供 context / new_page / goto / click / evaluate)
+            audio_id: 扩展分配的音频 ID(来自 editor.html ?id= 参数)
+            ext_id: 扩展 ID(由调用方从 _resolve_ext_id 获取,避免重复探测)
+            save_dir: 落盘目录;None → self.save_dir
+            timeout_sec: download 事件等待超时(秒;默认 180)
+
+        Returns:
+            落盘后的音频文件路径(save_dir / f"{audio_id}.webm",FR-2.26 命名规范)
+
+        Raises:
+            DownloadTimeoutError: timeout_sec 内未收到 download 事件
+        """
+        target_dir = Path(save_dir) if save_dir is not None else self.save_dir
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_path = target_dir / f"{audio_id}.webm"
+
+        # 拿到 context(playwright Driver 的 context)
+        ctx = getattr(driver, "context", driver)
+
+        # 步骤 2: 先注册 download 监听(关键!)
+        loop = asyncio.get_event_loop()
+        download_future: asyncio.Future[Any] = loop.create_future()
+
+        def on_download(dl: Any) -> None:
+            if not download_future.done():
+                download_future.set_result(dl)
+
+        ctx.on("download", on_download)
+
+        # 步骤 3: 打开 editor.html
+        editor_url = f"chrome-extension://{ext_id}/editor.html?id={audio_id}"
+        page = ctx.new_page()
+        try:
+            await page.goto(editor_url)
+        except Exception as e:
+            raise DownloadTimeoutError(f"goto editor.html 失败: {e}") from e
+
+        # 步骤 4: 找下载按钮并点击
+        # 候选 selector 按优先级尝试,首个点击成功即可
+        download_selectors = [
+            'button:has-text("Download")',
+            'button:has-text("保存")',
+            "#download-btn",
+            '[data-action="download"]',
+        ]
+        clicked = False
+        for selector in download_selectors:
+            try:
+                await page.click(selector, timeout=2000)
+                clicked = True
+                break
+            except Exception:
+                continue
+
+        if not clicked:
+            raise DownloadTimeoutError(
+                f"editor.html 中未找到下载按钮(已尝试 {len(download_selectors)} 个 selector)"
+            )
+
+        # 步骤 5: 等 download 事件
+        try:
+            download = await asyncio.wait_for(download_future, timeout=timeout_sec)
+        except asyncio.TimeoutError as e:
+            raise DownloadTimeoutError(
+                f"等待 download 事件超时 ({timeout_sec}s)"
+            ) from e
+
+        await download.save_as(target_path)
+        return target_path
