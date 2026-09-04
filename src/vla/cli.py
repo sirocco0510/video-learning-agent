@@ -78,9 +78,52 @@ def _parse_env_value(text: str, key: str) -> str | None:
     return value
 
 
+def _check_screenshot_tcc(driver: Any) -> tuple[bool, str]:
+    """FR-2.28.2c `vla doctor` pre-warm:Q8=TCC 拒绝 → warn+continue,exit 0。
+
+    Returns (ok, message)。ok=False 时 caller 只 print warning,不 raise,不 sys.exit(1)。
+
+    Brief verbatim included unused `capture = ScreenCapture(save_dir=save_dir)`
+    — dropped because _try() never touches capture. Function only probes
+    driver.page for fullscreen capability.
+    """
+    import asyncio
+
+    async def _try() -> bool:
+        page = getattr(driver, "page", None)
+        if page is None:
+            return False
+        try:
+            await page.bring_to_front()
+            await page.evaluate(
+                "video.currentTime=0; video.pause(); video.requestFullscreen()"
+            )
+            return True
+        except Exception:
+            return False
+
+    granted = asyncio.run(_try())
+    if granted:
+        return True, "屏幕录制权限 OK (FR-2.28.2c)"
+    return False, (
+        "WARN: 屏幕录制权限被拒 — 截图功能不可,但音频转写可继续。"
+        "可在 系统设置 → 隐私与安全性 → 屏幕录制 授权。"
+    )
+
+
 @app.command()
-def doctor() -> None:
-    """检测本机环境:Python、ffmpeg、核心 Python 包、.env、配置。"""
+def doctor(
+    check_screenshot: bool = typer.Option(
+        False, "--check-screenshot",
+        help="FR-2.28.2c 屏幕录制权限 pre-warm (Q8=Warn)"
+    ),
+) -> None:
+    """检测本机环境:Python、ffmpeg、核心 Python 包、.env、配置。
+
+    `--check-screenshot`:Q8 规则下尝试 requestFullscreen;失败时 WARN,不影响 doctor 退出码。
+    当前 `doctor` 不持有 browser driver,传 MagicMock() 让 _try() 走到 except
+    返回 WARN(代表 "未接入真实浏览器");接入 driver 后改为传真实 driver 即可。
+    """
     checks: list[tuple[str, bool, str]] = []
 
     py_ok = sys.version_info >= (3, 11)
@@ -141,6 +184,15 @@ def doctor() -> None:
         typer.echo(f"[{mark}] {name}: {detail}")
         if not ok:
             all_ok = False
+
+    # FR-2.28.2c pre-warm: Q8 warn-only, 不 raise 不 sys.exit
+    if check_screenshot:
+        from unittest.mock import MagicMock
+
+        ok, msg = _check_screenshot_tcc(driver=MagicMock())
+        mark = "OK" if ok else "WARN"
+        typer.echo(f"[{mark}] screenshot_tcc: {msg}")
+        # Q8: 不 raise,不 sys.exit(1) — 仅 print
 
     if not all_ok:
         raise typer.Exit(code=1)

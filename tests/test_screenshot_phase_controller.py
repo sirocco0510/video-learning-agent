@@ -158,3 +158,47 @@ class TestPhaseD:
             partial_flags=[],
         )
         mock_capture.write_index_entry.assert_called_once_with(expected_entry)
+
+
+class TestDoctorPreWarm:
+    def test_doctor_prewarm_warns_on_tcc_deny(self) -> None:
+        """Q8: TCC 拒绝 → (False, msg 含 WARN/TCC/权限)。函数返回元组,不 print。
+
+        Brief verbatim had capsys assertion; dropped because _check_screenshot_tcc
+        returns a tuple, not prints. Caller (doctor command) is responsible for
+        printing the returned message via typer.echo.
+        """
+        from vla.cli import _check_screenshot_tcc
+        fake_page = MagicMock()
+        fake_page.bring_to_front = AsyncMock()
+        fake_page.evaluate = AsyncMock(side_effect=Exception("NotAllowedError"))
+        fake_driver = MagicMock()
+        fake_driver.page = fake_page
+
+        ok, msg = _check_screenshot_tcc(fake_driver)
+        assert ok is False
+        assert "WARN" in msg or "TCC" in msg or "权限" in msg
+
+    def test_doctor_prewarm_ok_on_grant(self) -> None:
+        """fullscreen 成功 → (True, msg 含 OK)。"""
+        from vla.cli import _check_screenshot_tcc
+        fake_page = MagicMock()
+        fake_page.bring_to_front = AsyncMock()
+        fake_page.evaluate = AsyncMock(return_value=None)
+        fake_driver = MagicMock()
+        fake_driver.page = fake_page
+        ok, msg = _check_screenshot_tcc(fake_driver)
+        assert ok is True
+        assert "OK" in msg
+
+    def test_doctor_prewarm_no_page_returns_warn(self) -> None:
+        """driver 无 .page 属性 → (False, WARN)。
+
+        Brief verbatim only covered deny+grant; added this to cover the
+        `getattr(driver, 'page', None) is None` branch in _try().
+        """
+        from vla.cli import _check_screenshot_tcc
+        fake_driver = MagicMock(spec=[])  # no .page attribute
+        ok, msg = _check_screenshot_tcc(fake_driver)
+        assert ok is False
+        assert "WARN" in msg or "权限" in msg
