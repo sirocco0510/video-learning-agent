@@ -213,3 +213,18 @@ class ScreenCapture:
         index_path = self.save_dir / "index.jsonl"
         with index_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(asdict(entry), ensure_ascii=False) + "\n")
+
+    async def request_fullscreen_warmup(self, page: Any) -> bool:
+        """FR-2.28.2a: try page.evaluate('video.requestFullscreen()'); catch NotAllowedError.
+
+        Returns: True if granted, False if denied by TCC.
+        Page param duck-typed (Playwright Page).
+        """
+        try:
+            await page.evaluate(
+                "video.currentTime=0; video.pause(); video.requestFullscreen()"
+            )
+            return True
+        except Exception:
+            # Q8: Warn, 不抛
+            return False
