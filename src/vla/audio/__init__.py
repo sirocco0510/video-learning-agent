@@ -1,1 +1,5 @@
-"""音频提取与队列(SSOT: spec 2026-09-03-fr2-fr3 §3.2 / §3.3)。"""
+"""Audio transcription pipeline (SSOT: spec §FR-2.27)."""
+
+from vla.audio.queue import AudioQueue, AudioTask
+
+__all__ = ["AudioQueue", "AudioTask"]
