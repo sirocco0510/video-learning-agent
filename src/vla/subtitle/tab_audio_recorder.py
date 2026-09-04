@@ -170,3 +170,84 @@ class TabAudioRecorder:
         raise ExtensionNotFoundError(
             f"未找到匹配 match_keyword='{self.match_keyword}' 的扩展"
         )
+
+    # ---- 触发录制 ----
+
+    async def start_recording(
+        self,
+        driver: Any,
+        url: str,
+        duration_sec: int,
+        post_buffer_sec: int = 30,
+    ) -> str:
+        """FR-2.24: 触发扩展开始录制,轮询 bg_page.url 直到 editor.html?id=<audio_id>。
+
+        步骤:
+            1. 找到扩展 background page(driver.targets() 中 url 含
+               _generated_background_page.html 的 target)
+            2. 在 bg page 上 evaluate `startTabRecording()`(扩展内部暴露的全局函数)
+            3. 轮询 bg_page.url 直到匹配 editor.html?id=<digits>
+            4. 正则提取 audio_id 返回
+
+        ext_id 从 bg page URL 直接解析(URL 含 chrome-extension://<ext_id>/...),
+        避免重复调 _resolve_ext_id(已开 bg page = 扩展已确认存在)。
+
+        Args:
+            driver: playwright Driver(提供 targets() 方法返回 bg page 等 page 对象)
+            url: 视频 URL(供扩展抓取 tab 音频;此函数不直接使用,扩展自己读 tab)
+            duration_sec: 录制时长(秒);扩展自己计时 stop,我们等 duration+post_buffer
+            post_buffer_sec: 额外等待扩展完成编码的时间(默认 30s)
+
+        Returns:
+            audio_id(扩展分配的纯数字字符串,来自 editor.html URL ?id= 参数)
+
+        Raises:
+            RecorderTriggerError: 找不到 bg page / evaluate 失败 / 跳转超时
+        """
+        # 步骤 1: 找 background page(targets 中 url 含 _generated_background_page.html)
+        bg_page: Any = None
+        try:
+            targets = await driver.targets() if hasattr(driver, "targets") else []
+        except Exception as e:
+            raise RecorderTriggerError(f"driver.targets() 失败: {e}") from e
+
+        for t in targets:
+            t_url = getattr(t, "url", "") or ""
+            if "_generated_background_page.html" in t_url:
+                bg_page = t
+                break
+
+        if bg_page is None:
+            raise RecorderTriggerError(
+                "未找到扩展 background page(_generated_background_page.html);"
+                "请先在 Chrome 启用 Tab Audio Recorder 并打开一次"
+            )
+
+        # 步骤 2: 启动录制(扩展暴露 startTabRecording() 或等价函数)
+        # 用 try/except 防御:扩展 API 可能改名,降级到 RecorderTriggerError
+        try:
+            await bg_page.evaluate(
+                "typeof startTabRecording === 'function' ? startTabRecording() : null"
+            )
+        except Exception as e:
+            raise RecorderTriggerError(f"启动录制失败: {e}") from e
+
+        # 步骤 3 + 4: 轮询 bg_page.url 直到匹配 editor.html?id=<digits>
+        # 总等待时长 = duration_sec + post_buffer_sec
+        # (扩展自己 stop + 编码需要 buffer,FR-2.15 后置 buffer)
+        # 用 polling 而不是单次 sleep,提高响应速度
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + duration_sec + post_buffer_sec
+        poll_interval = 0.5
+
+        while loop.time() < deadline:
+            current_url = getattr(bg_page, "url", "") or ""
+            match = _EDITOR_URL_PATTERN.search(current_url)
+            if match:
+                return match.group(1)
+            await asyncio.sleep(poll_interval)
+
+        raise RecorderTriggerError(
+            f"等待 editor.html 跳转超时 ({duration_sec + post_buffer_sec}s);"
+            f"最后 url={getattr(bg_page, 'url', '?')}"
+        )
