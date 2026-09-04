@@ -151,22 +151,41 @@ class FakeBackgroundPage:
 
 
 class FakeDriver:
-    """Mock playwright Driver — 暴露 start_recording / click_download 需要的 hooks。"""
+    """Mock playwright Driver — 暴露 start_recording / click_download 需要的 hooks。
+
+    模拟 _resolve_ext_id 路径:driver.evaluate() 解析 _PROBE_GET_ALL_JS,
+    返回 chrome.management.getAll() 等价值。
+    """
 
     def __init__(
         self,
         bg_page: FakeBackgroundPage | None = None,
         targets: list[Any] | None = None,
         pages_for_goto: dict[str, FakeBackgroundPage] | None = None,
+        get_all_result: list[FakeExtension] | Exception | None = None,
+        bg_url_override: str | None = None,
     ) -> None:
         self.bg_page = bg_page
         self.targets_list = targets or []
         self.pages_for_goto = pages_for_goto or {}
         self.new_page_calls: list[str] = []
         self.goto_calls: list[str] = []
+        self._get_all_result = get_all_result if get_all_result is not None else []
+        self._bg_url_override = bg_url_override
+        self.evaluate_calls: list[str] = []
 
     async def targets(self) -> list[Any]:
         return self.targets_list
+
+    async def evaluate(self, js: str) -> Any:
+        # 用于 _resolve_ext_id:解析 chrome.management.getAll() JS,返回扩展列表
+        self.evaluate_calls.append(js)
+        if isinstance(self._get_all_result, Exception):
+            raise self._get_all_result
+        return [
+            {"name": e.name, "id": e.id, "enabled": e.enabled, "description": e.description}
+            for e in self._get_all_result
+        ]
 
     def new_page(self) -> Any:
         # 返回一个 capture 用的 mock,实际跳转由 goto 单独处理
@@ -178,8 +197,8 @@ class TestStartRecording:
     async def test_start_recording_polls_url_and_extracts_audio_id(
         self, recorder: TabAudioRecorder
     ) -> None:
-        # start_recording 的核心: 启动录制后,扩展跳转 editor.html?id=<audio_id>,
-        # 我们轮询 bg_page.url 提取 audio_id。
+        # start_recording 的核心: _resolve_ext_id → 找到 bg page → 启动录制
+        # → 轮询 bg_page.url 直到 editor.html?id=<audio_id>。
         # 用 FakeBackgroundPage 模拟 url 变化:
         #   第 1 次: chrome-extension://ext123/_generated_background_page.html  (录制中)
         #   第 2 次: chrome-extension://ext123/editor.html?id=4242  (录制完成)
@@ -190,8 +209,9 @@ class TestStartRecording:
             ],
             evaluate_js="undefined",
         )
-        # start_recording 第一步会 evaluate("startTabRecording()" 或等价 JS),
-        # 然后轮询 url;我们让 bg.advance() 在 evaluate 后推进一次。
+        # start_recording 第一步 _resolve_ext_id(driver) → driver.evaluate(...)
+        # 然后在 bg page 上 evaluate("startTabRecording()") → 我们让 bg.advance()
+        # 在 evaluate 后推进一次。
 
         original_evaluate = bg.evaluate
 
@@ -202,17 +222,56 @@ class TestStartRecording:
 
         bg.evaluate = evaluate_then_advance  # type: ignore[assignment]
 
-        # start_recording 需要 driver.targets() 返回包含 bg page 的列表
-        driver = FakeDriver(targets=[bg])
-
-        # 简化版 start_recording 会:
-        #   1. 遍历 driver.targets() 找到 type='background_page' or url 含 _generated_background_page.html
-        #   2. evaluate 启动录制
-        #   3. 轮询 url 直到匹配 editor.html?id=(\d+)
-        # 测试只需要验证 audio_id 提取正确;内部如何找 bg page 由实现决定。
-        # 这里我们直接在 FakeDriver 上挂一个辅助方法(供实现 hook):
-        driver.bg_page = bg  # type: ignore[attr-defined]
+        # FakeDriver 同时支持 evaluate (给 _resolve_ext_id) 和 targets() (给 bg page 查找)
+        driver = FakeDriver(
+            targets=[bg],
+            get_all_result=[FakeExtension("Tab Audio Recorder", "ext123", True)],
+        )
 
         audio_id = await recorder.start_recording(driver, "https://example.com/video", 60)
         assert audio_id == "4242"
         assert bg.evaluate_calls, "start_recording 应该至少调用一次 evaluate 启动录制"
+
+    async def test_start_recording_no_bg_page_raises(
+        self, recorder: TabAudioRecorder
+    ) -> None:
+        # driver.targets() 返回 [] → _resolve_ext_id 之后找不到 bg page → RecorderTriggerError
+        driver = FakeDriver(
+            targets=[],
+            get_all_result=[FakeExtension("Tab Audio Recorder", "ext123", True)],
+        )
+
+        with pytest.raises(RecorderTriggerError):
+            await recorder.start_recording(
+                driver, "https://example.com/video", 60
+            )
+        # 关键: _resolve_ext_id 必须先调用(evaluate 非空),
+        # 而不是直接走 bg page 查找(spec §3.1 line 113)。
+        assert driver.evaluate_calls, (
+            "start_recording 必须在找 bg page 之前先调用 _resolve_ext_id(driver)"
+        )
+
+    async def test_start_recording_poll_timeout_raises(
+        self, recorder: TabAudioRecorder
+    ) -> None:
+        # URL 永远停在 _generated_background_page.html,从不跳到 editor.html?id=
+        # 用 duration_sec=1, post_buffer_sec=0 让测试尽快失败
+        bg = FakeBackgroundPage(
+            url_sequence=[
+                "chrome-extension://ext123/_generated_background_page.html",
+            ],
+            evaluate_js="undefined",
+        )
+        driver = FakeDriver(
+            targets=[bg],
+            get_all_result=[FakeExtension("Tab Audio Recorder", "ext123", True)],
+        )
+
+        with pytest.raises(RecorderTriggerError):
+            await recorder.start_recording(
+                driver, "https://example.com/video", duration_sec=1, post_buffer_sec=0
+            )
+        # 必须先调 _resolve_ext_id,再走 polling 超时路径
+        assert driver.evaluate_calls, (
+            "start_recording 必须在 polling 之前先调用 _resolve_ext_id(driver)"
+        )

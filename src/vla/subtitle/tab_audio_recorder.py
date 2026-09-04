@@ -182,18 +182,16 @@ class TabAudioRecorder:
     ) -> str:
         """FR-2.24: 触发扩展开始录制,轮询 bg_page.url 直到 editor.html?id=<audio_id>。
 
-        步骤:
-            1. 找到扩展 background page(driver.targets() 中 url 含
-               _generated_background_page.html 的 target)
-            2. 在 bg page 上 evaluate `startTabRecording()`(扩展内部暴露的全局函数)
-            3. 轮询 bg_page.url 直到匹配 editor.html?id=<digits>
-            4. 正则提取 audio_id 返回
-
-        ext_id 从 bg page URL 直接解析(URL 含 chrome-extension://<ext_id>/...),
-        避免重复调 _resolve_ext_id(已开 bg page = 扩展已确认存在)。
+        步骤(spec §3.1):
+            1. _resolve_ext_id(driver) → ext_id (NO hardcode)
+            2. 找到扩展 background page(driver.targets() 中 url 同时含
+               chrome-extension://<ext_id>/ 和 _generated_background_page.html)
+            3. 在 bg page 上 evaluate `startTabRecording()`(扩展内部暴露的全局函数)
+            4. 轮询 bg_page.url 直到匹配 editor.html?id=<digits>
+            5. 正则提取 audio_id 返回
 
         Args:
-            driver: playwright Driver(提供 targets() 方法返回 bg page 等 page 对象)
+            driver: playwright Driver(提供 targets() + evaluate() 方法)
             url: 视频 URL(供扩展抓取 tab 音频;此函数不直接使用,扩展自己读 tab)
             duration_sec: 录制时长(秒);扩展自己计时 stop,我们等 duration+post_buffer
             post_buffer_sec: 额外等待扩展完成编码的时间(默认 30s)
@@ -202,28 +200,38 @@ class TabAudioRecorder:
             audio_id(扩展分配的纯数字字符串,来自 editor.html URL ?id= 参数)
 
         Raises:
-            RecorderTriggerError: 找不到 bg page / evaluate 失败 / 跳转超时
+            ExtensionNotFoundError: _resolve_ext_id 没找到匹配扩展
+                                    (spec §3.1 line 113,FR-2.21 quality_skip)
+            RecorderTriggerError: 找到 ext_id 但找不到 bg page / evaluate 失败 / 跳转超时
         """
-        # 步骤 1: 找 background page(targets 中 url 含 _generated_background_page.html)
+        # 步骤 1: 动态解析 ext_id(spec §3.1 line 113:不硬编码)。
+        # 找不到扩展 → ExtensionNotFoundError 自然抛出,
+        # 上层 SubtitleStrategy 捕获后写 quality_skip.csv(FR-2.21 降级)。
+        ext_id = await self._resolve_ext_id(driver)
+
+        # 步骤 2: 找 background page(targets 中 url 同时含
+        # chrome-extension://<ext_id>/ 与 _generated_background_page.html)。
+        # 双重匹配避免选错扩展的 bg page(多个 chrome-extension 同时打开时)。
         bg_page: Any = None
         try:
             targets = await driver.targets() if hasattr(driver, "targets") else []
         except Exception as e:
             raise RecorderTriggerError(f"driver.targets() 失败: {e}") from e
 
+        ext_prefix = f"chrome-extension://{ext_id}/"
         for t in targets:
             t_url = getattr(t, "url", "") or ""
-            if "_generated_background_page.html" in t_url:
+            if ext_prefix in t_url and "_generated_background_page.html" in t_url:
                 bg_page = t
                 break
 
         if bg_page is None:
             raise RecorderTriggerError(
-                "未找到扩展 background page(_generated_background_page.html);"
+                f"未找到扩展 {ext_id} 的 background page;"
                 "请先在 Chrome 启用 Tab Audio Recorder 并打开一次"
             )
 
-        # 步骤 2: 启动录制(扩展暴露 startTabRecording() 或等价函数)
+        # 步骤 3: 启动录制(扩展暴露 startTabRecording() 或等价函数)
         # 用 try/except 防御:扩展 API 可能改名,降级到 RecorderTriggerError
         try:
             await bg_page.evaluate(
@@ -232,7 +240,7 @@ class TabAudioRecorder:
         except Exception as e:
             raise RecorderTriggerError(f"启动录制失败: {e}") from e
 
-        # 步骤 3 + 4: 轮询 bg_page.url 直到匹配 editor.html?id=<digits>
+        # 步骤 4 + 5: 轮询 bg_page.url 直到匹配 editor.html?id=<digits>
         # 总等待时长 = duration_sec + post_buffer_sec
         # (扩展自己 stop + 编码需要 buffer,FR-2.15 后置 buffer)
         # 用 polling 而不是单次 sleep,提高响应速度
