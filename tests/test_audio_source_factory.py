@@ -42,15 +42,19 @@ class TestExtract:
         factory = AudioSourceFactory(save_dir=tmp_path)
 
         def fake_run(cmd, **kwargs):
-            # 找到 yt-dlp 命令的 -o 参数对应的输出路径,创建空文件
-            out_idx = cmd.index("-o")
-            out_template = cmd[out_idx + 1]
-            out_path = Path(out_template.replace("%(ext)s", "wav"))
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_bytes(b"RIFF....")
-            # ffprobe 用于 duration
+            # yt-dlp 命令:从 -o 模板取输出路径,创建空 wav
+            if "-o" in cmd:
+                out_idx = cmd.index("-o")
+                out_template = cmd[out_idx + 1]
+                out_path = Path(out_template.replace("%(ext)s", "wav"))
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_bytes(b"RIFF....")
+                return subprocess.CompletedProcess(cmd, 0, stdout=b"", stderr=b"")
+            # ffprobe 命令:返回 JSON {format: {duration: 120.5}}
             if "ffprobe" in cmd[0] or "ffprobe" in str(cmd):
-                r = subprocess.CompletedProcess(cmd, 0, stdout=b"120.5", stderr=b"")
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout=b'{"format": {"duration": 120.5}}', stderr=b""
+                )
             return subprocess.CompletedProcess(cmd, 0, stdout=b"", stderr=b"")
 
         with patch("subprocess.run", side_effect=fake_run):
