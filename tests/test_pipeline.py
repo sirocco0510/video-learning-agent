@@ -195,3 +195,58 @@ class TestPipelineLevel4:
         assert result.refine_result is None
         assert result.refined_text == long_text
         mock_refiner_enabled.refine.assert_not_called()
+
+
+class TestPipelineFailure:
+    def test_refiner_failure_continues_with_cleaned(
+        self,
+        config: VLAConfig,
+        mock_postprocessor: MagicMock,
+        mock_refiner_enabled: MagicMock,
+        mock_checker: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """refiner.refine 抛异常 → pipeline 不抛,继续 quality check 用 cleaned_text。"""
+        mock_refiner_enabled.refine = MagicMock(
+            side_effect=Exception("LLM API timeout")
+        )
+        pipeline = SubtitlePipeline(
+            config, mock_postprocessor, mock_refiner_enabled, mock_checker
+        )
+        result = asyncio.run(
+            pipeline.run("raw", "t", 100, "small", tmp_path, "Bv1_fail")
+        )
+        assert result.refine_result is None
+        assert result.refined_text == "cleaned text"
+        mock_checker.check.assert_called_once_with(
+            "cleaned text", "t", 100, "small",
+        )
+        assert result.quality.passed is True
+
+
+class TestPipelineFileOutput:
+    def test_three_files_written(
+        self,
+        config: VLAConfig,
+        mock_postprocessor: MagicMock,
+        mock_refiner_enabled: MagicMock,
+        mock_checker: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """3 文件输出契约:transcript.txt (caller) + cleaned.txt + refined.txt。"""
+        pipeline = SubtitlePipeline(
+            config, mock_postprocessor, mock_refiner_enabled, mock_checker
+        )
+        # transcript.txt 由 caller (StreamingTranscriber) 写,pipeline 不负责
+        transcript_path = tmp_path / "Bv1_three.transcript.txt"
+        transcript_path.write_text("raw transcript", encoding="utf-8")
+        asyncio.run(
+            pipeline.run("raw transcript", "t", 100, "small", tmp_path, "Bv1_three")
+        )
+        assert (tmp_path / "Bv1_three.transcript.txt").exists()
+        assert (tmp_path / "Bv1_three.cleaned.txt").exists()
+        assert (tmp_path / "Bv1_three.refined.txt").exists()
+        assert (tmp_path / "Bv1_three.cleaned.txt").read_text() == "cleaned text"
+        # refined.txt 由 write_cleaned_transcript 写入,带 header
+        refined_content = (tmp_path / "Bv1_three.refined.txt").read_text()
+        assert "refined text" in refined_content
