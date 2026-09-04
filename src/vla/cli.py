@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -114,6 +115,25 @@ def doctor() -> None:
         checks.append(
             ("config/vla.yaml", False, f"未找到 {CONFIG_FILE.relative_to(PROJECT_ROOT)}")
         )
+
+    # yt-dlp 可用性探测(F2-1:AudioSourceFactory.is_downloadable 烟雾测试)
+    # —— FR-2.14 path ① 兜底链路前置检查;失败时主调度降级到 path ② 录屏
+    try:
+        from vla.audio.source_factory import AudioSourceFactory
+
+        factory = AudioSourceFactory(simulate_timeout_sec=10)
+        probe_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        t0 = time.monotonic()
+        audio_ok = factory.is_downloadable(probe_url)
+        elapsed = time.monotonic() - t0
+        if audio_ok:
+            audio_detail = f"yt-dlp available (simulate OK in {elapsed:.1f}s)"
+        else:
+            audio_detail = "yt-dlp MISSING — path ① 不可用,所有 URL 走 path ②"
+    except Exception as e:  # pragma: no cover — 防御性,probe 异常不阻塞 doctor
+        audio_ok = False
+        audio_detail = f"yt-dlp probe 异常({type(e).__name__}):{e}"
+    checks.append(("audio_source_factory", audio_ok, audio_detail))
 
     all_ok = True
     for name, ok, detail in checks:
