@@ -75,7 +75,13 @@ class TestAudioQueueCapacity:
 
         asyncio.create_task(producer())
 
-        await asyncio.wait_for(push_done.wait(), timeout=0.05)
+        # Brief verbatim had `await asyncio.wait_for(... timeout=0.05)` followed by
+        # `assert not push_done.is_set()` — but wait_for raises TimeoutError when
+        # producer correctly blocks (the FR-2.27 behavior we're testing for),
+        # which short-circuits the assert. Use pytest.raises to catch the expected
+        # timeout, then verify push_done is still unset.
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(push_done.wait(), timeout=0.05)
         assert not push_done.is_set(), "producer must block until a slot frees"
 
         first = await asyncio.wait_for(queue.pull(), timeout=1.0)
