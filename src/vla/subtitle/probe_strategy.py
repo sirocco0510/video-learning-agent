@@ -1,14 +1,15 @@
 """探针策略抽象(SSOT: docs/superpowers/plans/R-14-probe-strategy.md + spec §E Sub-3)。
 
-把 BrowserRecorder 里的"预探测链"(head / referer / cookie warmup 等)
-换成一个可插拔的策略注册表:
+把"预探测链"(head / referer / cookie warmup 等)换成一个可插拔的策略注册表:
 
 - `ProbeStrategy` Protocol — duck typing 接口(name / match / run)
 - `ProbeRegistry`         — 按注册顺序迭代,过滤掉 match(url) = False 的项
 - `ProbeContext`          — 共享资源(session / page / cfg;至少一个非 None)
 - `ProbeResult`           — ok + note + extra(给调用方足够上下文)
 
-新增平台探针 = 一个新类 + 一个 `register()`,不动 BrowserRecorder。
+新增平台探针 = 一个新类 + 一个 `register()`,不动已有逻辑。
+F2-8:此模块与 src/vla/subtitle/probes/ 一并保留,等 F2-14 接入
+PlatformAdapter.prefetch_url(预探测 URL 是否能拿到 cookie / referer)。
 """
 
 from __future__ import annotations
@@ -63,7 +64,7 @@ class ProbeStrategy(Protocol):
 
 
 class ProbeRegistry:
-    """按注册顺序迭代;BrowserRecorder 用这个代替硬编码 if/elif 链。
+    """按注册顺序迭代;适配层用这个代替硬编码 if/elif 链。
 
     - register(strategy): 追加;同名校验交由调用方(或用 register_unique)。
     - get_all_for(url):  保留**注册顺序**;只返回 match(url) == True 的探针。

@@ -72,8 +72,9 @@ class BrowserPluginConfig(BaseModel):
     # 用户点 btn-download 触发 Chrome download 事件。30min 长视频用户可能
     # 短暂 AFK,所以默认 180s。
     record_download_timeout_sec: int = 180
-    # FR-2.15:BrowserRecorder 按 hotkey(CDP no-op)之后给用户的窗口期,
-    # 让用户有时间在真实 Chrome 里手动按对应热键 / 操作 popup。
+    # FR-2.15(legacy):旧 Screen Recorder 流程在按 hotkey(CDP no-op)之后
+    # 给用户的窗口期,让用户有时间在真实 Chrome 里手动按对应热键 / 操作 popup。
+    # F2-8:流程已废弃;字段保留(默认)以兼容旧 config.yaml。
     # 0 = 关闭(B级批量场景)。
     record_pre_grace_sec: int = 10
     # FR-2.15:`duration_sec` 是估计的视频时长;实际录屏结束由用户手动 Stop。

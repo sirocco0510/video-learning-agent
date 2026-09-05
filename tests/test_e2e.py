@@ -572,7 +572,7 @@ class PopupFlowAdapter:
     """测试用 adapter:模拟"插件没启用 → 触发弹窗"流程。
 
     fetch_browser_subtitle 永远返回 None(模拟插件未启用,JS 探测没拿到字幕)。
-    FR-2.21:第一次 miss 后弹窗 → "enabled" 改走 BrowserRecorder.record_and_transcribe
+    FR-2.21:第一次 miss 后弹窗 → "enabled" 改走已注入 recorder 的 record_and_transcribe
     (不再 retry fetch_browser_subtitle);"skip"/"timeout" 降级到策略 ③。
     """
 
@@ -632,8 +632,8 @@ def _build_real_strategy(cfg, *, popup_response, recorder=None):
     """构造真实 SubtitleStrategy + PopupFlowAdapter + PopupFlowNotifier + PluginStatus。
 
     Args:
-        recorder: BrowserRecorder MagicMock(可选);None 表示 enabled 路径无 recorder 可调,
-            会降级到策略 ③(ffmpeg)。
+        recorder: 已注入 recorder 的 MagicMock(可选);None 表示 enabled 路径
+            无 recorder 可调,会降级到策略 ③(ffmpeg)。
     """
     from vla.subtitle.strategy import SubtitleStrategy
 
@@ -665,7 +665,7 @@ def tmp_path_factory_mkdir():
 
 
 def test_e2e_2e_plugin_enabled_triggers_recorder_returns_text(cfg, tmp_path):
-    """E2E-2e: 弹窗 'enabled' → BrowserRecorder.record_and_transcribe → source='whisper',audio=None。
+    """E2E-2e: 弹窗 'enabled' → 已注入 recorder 的 record_and_transcribe → source='whisper',audio=None。
 
     recorder 新规:返回 transcript 文件路径(不返回 text),strategy 从文件读一次。"""
     from unittest.mock import MagicMock

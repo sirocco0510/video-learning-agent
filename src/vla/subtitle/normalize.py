@@ -1,7 +1,7 @@
 """字幕归一化层(SSOT: spec §E Sub-1/Sub-2,2026-09-03)。
 
-- 把 SRT/VTT/ASS 解析集中在一处(消除 SubtitleRefiner / browser_record
-  中的格式耦合)
+- 把 SRT/VTT/ASS 解析集中在一处(消除 SubtitleRefiner 与旧 Screen Recorder
+  模块的格式耦合)
 - 输出统一的 Segment(start, end, text) 列表
 - SubtitleRefiner 现在只接 list[Segment],不再管格式
 """

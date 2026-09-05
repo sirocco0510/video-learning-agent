@@ -64,7 +64,7 @@ def _safe_close_page(page: Any) -> None:
 
 
 class FallbackAdapter:
-    """无匹配平台 adapter 时使用,直接调 BrowserDriver / BrowserRecorder。
+    """无匹配平台 adapter 时使用,直接调 BrowserDriver / 自管 recorder。
 
     不实现 PlatformAdapter Protocol(无 match 类方法),仅在 strategy 内部构造。
     """
@@ -110,7 +110,7 @@ class FallbackAdapter:
         **_kwargs: Any,
     ) -> tuple[str, dict] | None:
         """F2-7:接受 **kwargs(由 strategy 传 4 deps)但忽略 —— FallbackAdapter
-        内部仍用旧 BrowserRecorder 路径,F2-8 才统一删。
+        内部仍用旧 Screen Recorder 路径,F2-8 后保留为可注入 stub(测试用)。
         """
         if self.recorder is None:
             return None
@@ -200,7 +200,8 @@ class SubtitleStrategy:
         Args:
             registry: PlatformAdapterRegistry
             driver: BrowserDriver(可选)
-            recorder: BrowserRecorder(F2-8 才删,目前仍需给 _try_browser 旧路径用)
+            recorder: 旧 Screen Recorder 桩(测试 fixture 注入 MagicMock;F2-8 后
+                无生产实例,代码路径保留以兼容既有测试 + 弹窗 enabled 流程)
             notifier: MacOSNotifier(必填 — FR-2.5/2.6 弹窗)
             plugin_status: PluginStatus(必填 — FR-2.9/2.10 session 单例)
             remind_timeout_sec: 弹窗超时(秒),默认 30
@@ -307,7 +308,7 @@ class SubtitleStrategy:
         2. 第一次尝试 adapter.fetch_browser_subtitle(FR-2.5~2.8)
         3. miss → 暂停页面视频 + 弹 A 级 dialog 询问用户是否已开启 Screen Recorder
         4. 用户响应:
-           - "enabled" → 调 BrowserRecorder.record_and_transcribe(FR-2.14)
+           - "enabled" → 调已注入 recorder 的 record_and_transcribe(FR-2.14 的 stub)
              · 成功 → mark_available + 返回 text,meta={"via": "screen_recorder"}
              · 抛错 → 不 mark_unavailable,降级策略 ③(ffmpeg 兜底,FR-2.20)
            - "skip"    → mark_unavailable(user_skip) + return None
@@ -350,14 +351,14 @@ class SubtitleStrategy:
             self.log.info("弹窗超时未响应,降级到策略 ③")
             return None
 
-        # 5. "enabled" → 触发 Screen Recorder(FR-2.14/2.15)
+        # 5. "enabled" → 触发已注入的 recorder(FR-2.14/2.15 的 stub)
         if self.recorder is None or page is None:
             self.log.warning(
                 "未注入 recorder / 无法创建 page,降级策略 ③(ffmpeg)"
             )
             return None
 
-        self.log.info("用户已开启插件,触发 Screen Recorder 录屏 → Whisper")
+        self.log.info("用户已开启插件,触发已注入的 recorder 录屏 → Whisper")
         try:
             # recorder 返回转写文本的**文件路径**(Path),不是文本本身(用户新规:不存内存)
             transcript_path = self.recorder.record_and_transcribe(
