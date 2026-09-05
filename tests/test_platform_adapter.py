@@ -256,3 +256,71 @@ class TestPathOneHit:
         # Q7: 静默 — 不 raise,只是 None
         assert result is None
         tr.probe_status.assert_awaited()
+
+
+class TestPathTwoHit:
+    def test_path_two_used_when_not_downloadable(self) -> None:
+        """is_downloadable=False → 自动试 path ② (Q7 Silent,no warning)。"""
+        af = _make_audio_factory(downloadable=False)
+        tr = _make_tab_recorder(enabled=True)
+        tx = _make_transcriber("tab text")
+        result = PlatformAdapter().fetch_via_recording(
+            driver=MagicMock(), url="https://x.com/v/2", duration_sec=200,
+            audio_factory=af, tab_recorder=tr, transcriber=tx,
+        )
+        assert result is not None
+        text, meta = result
+        assert text == "tab text"
+        assert meta["via"] == "tab_recorder"
+        tr.probe_status.assert_awaited_once()
+        tr.start_recording.assert_awaited_once()
+        tr.click_download.assert_awaited_once()
+
+
+class TestScreenshotIntegration:
+    def test_screenshot_controller_phase_a_called_only_on_path2(self) -> None:
+        """screenshot_controller=mock → path ② 触发 phase_a_start + phase_b_then_c + phase_d。"""
+        af = _make_audio_factory(downloadable=False)
+        tr = _make_tab_recorder(enabled=True)
+        tx = _make_transcriber("tab text")
+        sc = _make_screenshot()
+        PlatformAdapter().fetch_via_recording(
+            driver=MagicMock(), url="https://x.com/v/3", duration_sec=200,
+            audio_factory=af, tab_recorder=tr, transcriber=tx,
+            screenshot_controller=sc,
+        )
+        sc.phase_a_start.assert_awaited_once()
+        sc.phase_b_then_c.assert_awaited_once()
+        sc.phase_d_write_index.assert_called_once()
+
+    def test_screenshot_controller_none_skips_phases(self) -> None:
+        """screenshot_controller=None → 不调 phase_*(FR-2.28 opt-in)。"""
+        af = _make_audio_factory(downloadable=False)
+        tr = _make_tab_recorder(enabled=True)
+        tx = _make_transcriber("tab text")
+        result = PlatformAdapter().fetch_via_recording(
+            driver=MagicMock(), url="https://x.com/v/4", duration_sec=200,
+            audio_factory=af, tab_recorder=tr, transcriber=tx,
+            screenshot_controller=None,
+        )
+        assert result is not None  # 仍然返回 text
+        # 但 phase_* 不能 mock 验证(没传);用 path ② 命中验证
+        assert result is not None
+        text, meta = result
+        assert text == "tab text"
+        assert meta["via"] == "tab_recorder"
+
+    def test_path_one_hit_does_not_trigger_screenshot(self) -> None:
+        """path ① 命中时即使传 screenshot_controller 也不调 phase_*。"""
+        af = _make_audio_factory(downloadable=True)
+        tr = _make_tab_recorder()
+        tx = _make_transcriber("yt-dlp text")
+        sc = _make_screenshot()
+        PlatformAdapter().fetch_via_recording(
+            driver=MagicMock(), url="https://x.com/v/5", duration_sec=300,
+            audio_factory=af, tab_recorder=tr, transcriber=tx,
+            screenshot_controller=sc,
+        )
+        sc.phase_a_start.assert_not_called()
+        sc.phase_b_then_c.assert_not_called()
+        sc.phase_d_write_index.assert_not_called()
