@@ -161,6 +161,10 @@ def doctor(
 
     # yt-dlp 可用性探测(F2-1:AudioSourceFactory.is_downloadable 烟雾测试)
     # —— FR-2.14 path ① 兜底链路前置检查;失败时主调度降级到 path ② 录屏
+    # WARN-only(Q8 同款策略):probe 失败不阻塞 doctor,因为:
+    # 1. yt-dlp probe 走真实网络 → 受地区/防火墙影响大
+    # 2. yt-dlp package 已 OK + path ② 兜底就够(FR-2.14 v3 设计)
+    audio_warn = None
     try:
         from vla.audio.source_factory import AudioSourceFactory
 
@@ -173,10 +177,10 @@ def doctor(
             audio_detail = f"yt-dlp available (simulate OK in {elapsed:.1f}s)"
         else:
             audio_detail = "yt-dlp MISSING — path ① 不可用,所有 URL 走 path ②"
+            audio_warn = audio_detail
     except Exception as e:  # pragma: no cover — 防御性,probe 异常不阻塞 doctor
-        audio_ok = False
         audio_detail = f"yt-dlp probe 异常({type(e).__name__}):{e}"
-    checks.append(("audio_source_factory", audio_ok, audio_detail))
+        audio_warn = audio_detail
 
     all_ok = True
     for name, ok, detail in checks:
@@ -193,6 +197,10 @@ def doctor(
         mark = "OK" if ok else "WARN"
         typer.echo(f"[{mark}] screenshot_tcc: {msg}")
         # Q8: 不 raise,不 sys.exit(1) — 仅 print
+
+    # audio_source_factory 单独走 WARN-only:probe 失败不阻塞 doctor
+    audio_mark = "WARN" if audio_warn else "OK"
+    typer.echo(f"[{audio_mark}] audio_source_factory: {audio_detail}")
 
     if not all_ok:
         raise typer.Exit(code=1)
