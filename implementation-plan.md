@@ -122,82 +122,77 @@ print(cfg.whisper.model)  # "small"
 
 ---
 
-## Phase 2:视频源工厂(3h)
+## Phase 2:音频源工厂(2h,2026-09-03 重构)
+
+> **重大重构**:从"视频源工厂(下载+录屏)"改为"音频源工厂",Whisper 永不接收视频信号。
 
 ### 必读
-- [[requirements#FR-1 视频源管理]]
-- [[requirements#FR-8 录屏与音频]]
-- [[requirements#6.1 source/video_source.py]]
+- [[requirements#FR-1 视频源管理]] — 仍保留 `_is_downloadable`(yt-dlp simulate),用于路径 ① 判定
+- [[requirements#FR-2.14 策略 ③ 音频三级降级总览]]
+- [[requirements#FR-2.16a yt-dlp -x 抽音频]]
+- [[requirements#FR-2.16b Puppeteer 抓音频流]]
 
 ### 文件清单
-- `src/vla/source/video_source.py`
+- `src/vla/audio/source_factory.py` **(NEW)** — 统一音频源工厂,封装三条路径
+- `src/vla/source/video_source.py` — **简化**,删除 `_record_screen`,只保留 `_is_downloadable` 给路径 ① 用
 
 ### 实现要点
 
-#### `VideoSourceFactory._is_downloadable(url: str) -> bool`
+#### `AudioSourceFactory.extract(url, video_id, duration_sec, save_dir) -> AudioSource`
+- 返回 `AudioSource(path, source="ytdlp|puppeteer|tab_audio_recorder", audio_id=None)`
+- 决策树(FR-2.14):
+  ```
+  yt-dlp simulate 可下载?
+    ├─ YES → _extract_via_ytdlp(url, video_id, save_dir)  # 路径 ①
+    │         └─ yt-dlp -x --audio-format wav ...
+    └─ NO  → _extract_via_puppeteer(driver, url, duration_sec)  # 路径 ②
+              └─ page.evaluate MediaRecorder + ArrayBuffer 回传
+  ```
+
+#### 路径 ①:`_extract_via_ytdlp(url, video_id, save_dir) -> AudioSource`
 ```python
-def _is_downloadable(self, url: str) -> bool:
-    """调用 yt-dlp --simulate,返回码 0 即视为可下载"""
+def _extract_via_ytdlp(self, url: str, video_id: str, save_dir: Path) -> AudioSource:
+    """yt-dlp -x 直接抽音频 wav,16kHz 单声道,Whisper 直吃(FR-2.16a)。"""
+    save_dir.mkdir(parents=True, exist_ok=True)
+    out = save_dir / f"{video_id}.wav"
     r = subprocess.run(
-        ["yt-dlp", "--simulate", "--quiet", url],
-        capture_output=True, timeout=30,
+        ["yt-dlp", "-x", "--audio-format", "wav",
+         "--postprocessor-args", "-ac 1 -ar 16000",
+         "-o", str(out), url],
+        capture_output=True, timeout=300,
     )
-    return r.returncode == 0
+    if r.returncode != 0 or not out.exists():
+        raise YtdlpExtractError(f"yt-dlp 抽音失败: {r.stderr.decode()}")
+    return AudioSource(path=out, source="ytdlp")
 ```
 
-#### `VideoSourceFactory._download(url, video_id) -> Path`
-- 调用 `yt-dlp -f worst -o <tmp>/<id>.mp4 <url>`
-- 检查 `returncode == 0`,否则抛 `DownloadError`
-- 返回文件路径(必须确认文件存在)
+#### 路径 ②:`_extract_via_puppeteer(driver, url, duration_sec, save_dir) -> AudioSource`
+- `ctx.new_page().goto(url)` 后台标签页
+- `page.evaluate(getUserMedia + MediaRecorder)` 流式录制 `duration_sec` 秒
+- ArrayBuffer → Python → `save_dir / f"{bvid}_{timestamp}.webm"`
+- **关键**:Tab Audio Recorder 路径失败才 fallback 到这里;正常情况 Puppeteer 音频流质量差(浏览器音频 mix)
+- 详见 [[requirements#FR-2.16b]]
 
-#### `VideoSourceFactory._record_screen(url, video_id, duration_sec) -> Path`
-- `subprocess.run(["open", url])` 打开浏览器
-- `time.sleep(5)` 等加载
-- 启动 ffmpeg **非阻塞**:`subprocess.Popen([...])`
-- 完整命令:
-```python
-[
-    "ffmpeg", "-y",
-    "-f", "avfoundation",
-    "-framerate", "30",
-    "-i", f"{self.config.video_source.record.screen_index}:{self.config.video_source.record.audio_input.split(':')[1]}",
-    "-t", str(duration_sec),
-    "-c:v", "libx264",
-    "-preset", "ultrafast",
-    "-crf", "28",
-    "-c:a", "aac",
-    "-b:a", "128k",
-    output_path,
-]
-```
-
-#### 关键点
-- 录屏命令**异步启动**,主调度器会等转写完才继续
-- 失败时**必须** `proc.kill()` 清理孤儿进程
-- `expected_duration` + 30s 余量后,主动 `kill` ffmpeg
+#### 路径 ③:Tab Audio Recorder(FR-2.16c,Phase 3 `tab_audio_recorder.py` 实现)
+- AudioSourceFactory **不直接实现路径 ③**,只在路径 ①② fail 时向上抛 `AudioSourceUnavailable`
+- `SubtitleStrategy` 捕获后调 `TabAudioRecorder.start_recording` 走路径 ③
 
 ### 验收
 ```bash
-# 测试 1:可下载视频
+# 测试 1:yt-dlp 抽音频(B站可下载视频)
 uv run python -c "
-import time
 from pathlib import Path
-from vla.source.video_source import VideoSourceFactory
-from vla.log.transcription_log import TranscriptionLog
-log = TranscriptionLog(Path('./logs'))
-factory = VideoSourceFactory(Path('./tmp'), log)
-src = factory.get('https://www.bilibili.com/video/BV1xxxxxxx', 'test1', 600)
-# 录屏异步启动:poll 等文件落地(实测 MacBook Air 上 ~1.5s)
-for _ in range(60):
-    if src.path.exists():
-        break
-    time.sleep(0.5)
-assert src.path.exists(), f'录屏文件未生成: {src.path}'
-print(f'mode={src.mode}, size={src.path.stat().st_size}')
+from vla.audio.source_factory import AudioSourceFactory
+factory = AudioSourceFactory(Path('./logs/audio_raw'))
+src = factory.extract('https://www.bilibili.com/video/BV1xxxxxxx', 'test1')
+assert src.path.exists() and src.path.stat().st_size > 1000
+assert src.source == 'ytdlp'
+print(f'source={src.source}, size={src.path.stat().st_size}')
+src.path.unlink()  # 测试完清理
 "
 
-# 测试 2:不可下载视频(模拟)
-# 直接调用 _record_screen,确认 ffmpeg 启动(同测试 1 末尾的 poll)
+# 测试 2:Puppeteer 路径(需要 Chrome --remote-debugging-port=9222)
+# 见 Phase 3 Step 3 tab_audio_recorder.py 的验收段
 ```
 
 ---
@@ -215,7 +210,9 @@ print(f'mode={src.mode}, size={src.path.stat().st_size}')
 - `src/vla/subtitle/bilibili_adapter.py` **(NEW)** — B站 adapter
 - `src/vla/subtitle/internal_site_adapter.py` **(NEW)** — 内部网站 adapter stub
 - `src/vla/subtitle/browser_driver.py` **(NEW)** — Puppeteer + 4 种 JS 探测
-- `src/vla/source/browser_record.py` **(NEW)** — 录屏触发 + 监听 + 抽音
+- `src/vla/subtitle/tab_audio_recorder.py` **(NEW)** — Tab Audio Recorder 触发 + 下载 + 异步队列(FR-2.24/2.25/2.26/2.27)
+- `src/vla/audio/queue.py` **(NEW)** — AudioQueue(asyncio.Queue,容量 10)
+- `src/vla/audio/worker_pool.py` **(NEW)** — WhisperWorkerPool(默认 2 worker)
 - `src/vla/subtitle/bilibili_official.py` — 保留,作为 `BilibiliAdapter.fetch_api_subtitle` 内部实现
 - `src/vla/subtitle/browser_plugin.py` — **废弃**,仅保留 `parse()` 方法
 - `src/vla/subtitle/strategy.py` — **重写**,从"扫描 + 弹窗"改为"adapter 三级降级"
@@ -293,9 +290,31 @@ class BrowserDriver:
         return self._browser
 
     def new_background_page(self, browser=None):
-        """context.new_page(),后台标签页,不抢用户焦点。"""
+        """context.new_page(),后台标签页,不抢用户焦点。
+
+        FR-2.23:创建前调用 cleanup_stale_extension_pages 关闭旧的扩展 popup,
+        只保留最新的 1 个,避免 Chrome 标签栏堆积(用户多次按 Cmd+Shift+R)。
+        """
         ctx = browser.contexts[0] if browser else self._browser.contexts[0]
+        self.cleanup_stale_extension_pages(ctx, keep_latest=1)
         return ctx.new_page()
+
+    @staticmethod
+    def cleanup_stale_extension_pages(ctx, keep_latest: int = 1) -> int:
+        """FR-2.23:关闭除最新 keep_latest 个外的所有 chrome-extension:// 页面。"""
+        pages = list(getattr(ctx, "pages", []))
+        ext = [p for p in pages if (getattr(p, "url", "") or "").startswith("chrome-extension://")]
+        if len(ext) <= keep_latest:
+            return 0
+        to_close = ext[:-keep_latest] if keep_latest > 0 else ext
+        closed = 0
+        for p in to_close:
+            try:
+                p.close()
+                closed += 1
+            except Exception:
+                pass
+        return closed
 
     def fetch_subtitle_via_browser(
         self, page, url: str
@@ -384,57 +403,115 @@ class BrowserDriver:
 - 测试跨 origin context.request 调用
 - 测试 4 种都 miss 时返回 None
 
-#### Step 3:`browser_record.py`(1.5h)
+#### Step 3:`tab_audio_recorder.py`(2h,2026-09-03 重构)
 
-**职责**:Puppeteer 触发 Screen Recorder 扩展 → 监听下载 → Whisper 直读扩展输出(扩展自带抽音)。
+**职责**:Tab Audio Recorder 触发(FR-2.24)+ 编辑器页下载(FR-2.25)+ audio_id 管理 + 异步入队,**不录屏**。
+
+**关键设计(2026-09-03)**:
+
+| 组件 | 职责 |
+|------|------|
+| `TabAudioRecorder.start_recording(driver, url, duration_sec) -> str` | 在 bg page 上 evaluate 启动录制,轮询 editor.html URL 拿到 audio_id(FR-2.24) |
+| `DownloadButtonClicker.click_download(driver, audio_id, save_dir, timeout_sec=180) -> Path` | goto editor.html → 注册 download 监听 → 点下载按钮 → save_as(FR-2.25) |
+| `TabAudioRecorderPluginStatus`(单例) | unknown/asked/available/skipped 四态,整 session 只弹一次(FR-2.21) |
+| `AudioQueue.push(audio_id, audio_path, video_meta)` | 入队到 Whisper worker 池(FR-2.27) |
+
+**核心代码骨架**:
 
 ```python
-class BrowserRecorder:
-    def __init__(self, config: VLAConfig, transcriber):
+class TabAudioRecorder:
+    EXT_ID = "hanfcigjijjcbdbfoplddndcblmlfiio"
+    EDITOR_URL = f"chrome-extension://{EXT_ID}/editor.html"
+
+    def __init__(self, driver: BrowserDriver, config: VLAConfig):
+        self.driver = driver
         self.config = config
-        self.transcriber = transcriber
-        self.download_dir = Path(config.puppeteer.recording_output_dir).expanduser()
+        self.timeout_sec = config.extension.tab_audio_recorder.timeout_sec  # 180
 
-    def record_and_transcribe(
-        self, page, url: str, duration_sec: int, title: str = ""
-    ) -> tuple[str, dict] | None:
-        """
-        录屏 + Whisper 转写。返回 (text, metadata)。
-        """
-        page.goto(url, wait_until="domcontentloaded")
-        page.wait_for_timeout(3000)
+    async def start_recording(self, url: str, duration_sec: int) -> str:
+        """bg page evaluate 启动录制,返回 audio_id。"""
+        bg_page = await self._get_bg_page()
+        # 在 bg page 上 evaluate 启动(扩展内部暴露的全局函数名)
+        await bg_page.evaluate("startTabRecording()")
+        # 轮询 editor.html URL 拿到 audio_id
+        deadline = asyncio.get_event_loop().time() + duration_sec + 60
+        while asyncio.get_event_loop().time() < deadline:
+            current_url = bg_page.url
+            m = re.search(r"editor\.html\?id=(\d+)", current_url)
+            if m:
+                return m.group(1)
+            await asyncio.sleep(1)
+        raise RecorderTriggerError("Tab Audio Recorder 未在 timeout 内跳转到 editor.html")
 
-        # 1. 触发 Screen Recorder 开始(预设快捷键 Control+Shift+R)
-        page.keyboard.press("Control+Shift+R")
-        page.wait_for_timeout(2000)  # 等录屏启动
+    async def _get_bg_page(self) -> Page:
+        for ctx in self.driver.browser.contexts:
+            for p in ctx.pages:
+                if p.url.startswith(f"chrome-extension://{self.EXT_ID}/"):
+                    return p
+        # 未打开则导航到 background page
+        ctx = self.driver.browser.contexts[0]
+        page = await ctx.new_page()
+        await page.goto(f"chrome-extension://{self.EXT_ID}/_generated_background_page.html")
+        return page
 
-        # 2. 等视频时长(留 5s 余量)
-        page.wait_for_timeout((duration_sec + 5) * 1000)
 
-        # 3. 触发停止(同款快捷键)
-        page.keyboard.press("Control+Shift+R")
+class DownloadButtonClicker:
+    EXT_ID = "hanfcigjijjcbdbfoplddndcblmlfiio"
 
-        # 4. 监听下载目录,等 .webm 落地
-        webm_path = self._wait_for_webm(timeout=30)
+    def __init__(self, driver: BrowserDriver, save_dir: Path, timeout_sec: int = 180):
+        self.driver = driver
+        self.save_dir = save_dir
+        self.timeout_sec = timeout_sec
 
-        # 5. Whisper 转写(扩展自带抽音,直接读 .webm/.ogg)
-        text = self.transcriber.transcribe(webm_path)
+    async def click_download(self, audio_id: str) -> Path:
+        """goto editor.html + 点下载 → 拿到 audio_id.webm。"""
+        ctx = self.driver.browser.contexts[0]
+        page = await ctx.new_page()
+        # 先注册 download 监听(必须在点按钮前)
+        async with ctx.expect_download(timeout=self.timeout_sec * 1000) as dl_info:
+            await page.goto(f"chrome-extension://{self.EXT_ID}/editor.html?id={audio_id}")
+            # 点下载按钮(候选 selector)
+            for sel in [
+                'button:has-text("Download")',
+                'button:has-text("保存")',
+                '#download-btn',
+                '[data-action="download"]',
+            ]:
+                try:
+                    await page.click(sel, timeout=2000)
+                    break
+                except PlaywrightTimeoutError:
+                    continue
+        download = await dl_info.value
+        target = self.save_dir / f"{audio_id}.webm"
+        await download.save_as(target)
+        await page.close()
+        return target
 
-        # 6. 清理(成功才删;失败保留)
-        webm_path.unlink()
 
-        return text, {
-            "source": "whisper",
-            "duration_sec": duration_sec,
-            "method": "screen_recorder",
-        }
+class TabAudioRecorderPluginStatus:
+    """整 session 单例,四态机(unknown/asked/available/skipped)。"""
+    _instance = None
+
+    def __init__(self):
+        self.state = "unknown"  # unknown → asked → available | skipped
+
+    @classmethod
+    def get(cls) -> "TabAudioRecorderPluginStatus":
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
 ```
 
-**TDD**:
-- mock `page.keyboard.press` 验证快捷键触发
-- mock 下载目录监听,验证 WebM 等待逻辑
-- mock Whisper 转写
-- 测试转写失败时 WebM 保留
+**关键约束(2026-09-03)**:
+
+- 扩展 ID 固定为 `hanfcigjijjcbdbfoplddndcblmlfiio`,用户在 `chrome://extensions` 复制粘贴到 `config/vla.yaml`
+- **不依赖 hotkey**:Tab Audio Recorder 无 `chrome.commands`,macOS TCC 拦截 `Input.dispatchKeyEvent`
+- **editor.html = 录制完成标志**:扩展自己 stop + 跳转,Agent 端只轮询 URL,避免抢焦
+- **download 必须先注册再点按钮**:`ctx.expect_download` 上下文管理器保证事件不丢
+- **audio_id 是纯数字字符串**,作为本地文件名 + 转写队列 key(FR-2.26)
+- **audio_path 命名**:`logs/audio_raw/<audio_id>.webm`,失败文件进 `logs/audio_failed/`
+
 
 #### Step 4:`bilibili_adapter.py`(1h)
 
@@ -948,6 +1025,22 @@ def log_quality_fail(self, video_id, title, url, result, text):
     # 追加到 quality_fail.csv
     # 列:timestamp, video_id, title, url, score, issues, suggestion
     # 同时把 text 存到 failed_texts/<id>_<title短>.txt
+
+def save_transcribed(self, video_id, title, text, quality, source, duration_sec):
+    """质量通过 → 原文存盘到 logs/transcribed/<id>_<title短>.txt(FR-7.7)。
+    文件格式:首行 # 视频标题 + 来源 + 质量分,后续为字幕正文(便于 Phase 7 直接读取)。"""
+    safe_title = _safe_title(title)
+    path = self.transcribed_dir / f"{video_id}_{safe_title}.txt"
+    header = f"# {title}\n来源:{source} | 质量:{quality.score}/100 | 时长:{duration_sec}s\n\n"
+    path.write_text(header + text, encoding="utf-8")
+
+def save_failed_text(self, video_id, title, text, reason):
+    """质量失败 → 原文存盘到 logs/failed_texts/<id>_<title短>.txt(FR-7.3)。
+    文件格式:首行 # 标题 + 失败原因,后续为字幕正文(便于人工审核)。"""
+    safe_title = _safe_title(title)
+    path = self.failed_texts_dir / f"{video_id}_{safe_title}.txt"
+    header = f"# {title}\n失败原因:{reason}\n\n"
+    path.write_text(header + text, encoding="utf-8")
 ```
 
 ### 验收
@@ -978,22 +1071,26 @@ assert len(log.transcribe_fail_file.read_text().splitlines()) >= 2
 ### 文件清单
 - `src/vla/summary/llm_summarizer.py`
 
-### 关键变化(相对 v0.1)
+### 关键变化(相对 v0.1 → 2026-09)
 
-**之前**:每条视频单独总结 → 现在改为 **6h 配额触发批量总结**。
-- 主调度不再每条调用 `summarize(title, text)`,改为在累加器达 6h 时调用 `summarize_batch(window)`。
+**v0.1**:每条视频单独总结 → 改为 **6h 配额触发批量总结**(in-memory window)。
+**2026-09**:进一步改为 **从磁盘 `logs/transcribed/*.txt` 读**(FR-7.7)+ **统一输出 500-800 字总结**(用户需求)。
+- Phase 4 触发 `save_transcribed()` 把通过的字幕写盘,Phase 8 不需要在内存维护 window
+- 崩溃恢复:即使 session 中途崩,磁盘文件还在,下次启动照样能总结
+- 配额触发时一次性读盘所有 `*.txt`(按 mtime 升序,即按处理顺序)+ 批量 LLM 总结
 
-#### `LLMSummarizer.summarize_batch(window: list[SubtitleWindowItem]) -> str`
+#### `LLMSummarizer.summarize_batch(transcribed_dir: Path, ...) -> str`
 
 ```python
 @dataclass
-class SubtitleWindowItem:
-    """6h 窗口内的单个视频"""
+class TranscribedItem:
+    """从 logs/transcribed/*.txt 读出的单条字幕"""
     title: str
-    text: str
-    quality: QualityResult
-    source: str  # official / plugin / whisper
+    source: str          # official / plugin / whisper
+    quality_score: int
     duration_sec: int
+    text: str
+    mtime: float
 
 SUMMARIZE_BATCH_PROMPT = """你是视频内容总结助手。以下是累计约 6 小时视频的字幕(共 {video_count} 个视频),请生成一份 {min_words}-{max_words} 字的统一总结。
 
@@ -1015,46 +1112,82 @@ SUMMARIZE_BATCH_PROMPT = """你是视频内容总结助手。以下是累计约 
 【输出】
 直接输出 Markdown 内容。"""
 
+def _load_items(self, transcribed_dir: Path) -> list[TranscribedItem]:
+    """从 logs/transcribed/*.txt 加载,按 mtime 升序。"""
+    items: list[TranscribedItem] = []
+    for path in sorted(transcribed_dir.glob("*.txt"), key=lambda p: p.stat().st_mtime):
+        content = path.read_text(encoding="utf-8")
+        # 解析头部 "# title\n来源:... | 质量:N/100 | 时长:Ns\n\n<text>"
+        lines = content.split("\n", 1)
+        title = lines[0].lstrip("# ").strip() if lines[0].startswith("# ") else path.stem
+        meta_line = lines[1].split("\n", 1)[0] if len(lines) > 1 else ""
+        # 来源:official / 质量:85/100 / 时长:600s
+        source = "whisper"
+        quality_score = 0
+        duration_sec = 0
+        for token in meta_line.split("|"):
+            token = token.strip()
+            if token.startswith("来源:"):
+                source = token.removeprefix("来源:").strip()
+            elif "质量:" in token:
+                m = re.search(r"质量:(\d+)", token)
+                if m: quality_score = int(m.group(1))
+            elif "时长:" in token:
+                m = re.search(r"时长:(\d+)", token)
+                if m: duration_sec = int(m.group(1))
+        body = content.split("\n\n", 1)[1] if "\n\n" in content else content
+        items.append(TranscribedItem(
+            title=title, source=source, quality_score=quality_score,
+            duration_sec=duration_sec, text=body.strip(),
+            mtime=path.stat().st_mtime,
+        ))
+    return items
+
 def summarize_batch(
     self,
-    window: list[SubtitleWindowItem],
+    transcribed_dir: Path,
     group_title: str | None = None,
+    clear_after: bool = True,
 ) -> str:
+    """从 logs/transcribed/ 读所有字幕 → 批量 LLM 总结 → 返回 Markdown。
+    
+    clear_after=True: 总结完后删除源文件,避免下次重复总结(默认)。
     """
-    生成 6h 窗口的批量总结。
-    返回 Markdown 内容(不含 notes.md 头)。
-    调用方负责追加/写入文件。
-    """
-    # 1. 构造 video_index(标题 + 来源)
+    items = self._load_items(transcribed_dir)
+    if not items:
+        return ""
+    
     video_index = "\n".join(
         f"- [{i+1}] {item.title}({item.duration_sec}s, 来源:{item.source})"
-        for i, item in enumerate(window)
+        for i, item in enumerate(items)
     )
-
-    # 2. 构造 video_sections(每个视频一个 section)
     video_sections = "\n\n".join(
         f"### 视频 {i+1}:{item.title}\n"
-        f"时长:{item.duration_sec}s | 来源:{item.source} | 质量:{item.quality.score}/100\n\n"
+        f"时长:{item.duration_sec}s | 来源:{item.source} | 质量:{item.quality_score}/100\n\n"
         f"{item.text[:3000]}"
-        for i, item in enumerate(window)
+        for i, item in enumerate(items)
     )
-
-    # 3. 调用 LLM
     prompt = SUMMARIZE_BATCH_PROMPT.format(
-        video_count=len(window),
+        video_count=len(items),
         video_index=video_index,
         video_sections=video_sections,
         min_words=self.config.summary.target_words_min,
         max_words=self.config.summary.target_words_max,
     )
     summary = self.llm.complete(prompt, max_tokens=2000)
-
-    # 4. 加笔记头部(可选,group_title 时加)
+    
     if group_title:
-        total_sec = sum(item.duration_sec for item in window)
-        header = f"## {group_title} — 累计 {total_sec // 60} 分钟({len(window)} 个视频)\n\n"
-        return header + summary
-    return summary
+        total_sec = sum(item.duration_sec for item in items)
+        header = f"## {group_title} — 累计 {total_sec // 60} 分钟({len(items)} 个视频)\n\n"
+        result = header + summary
+    else:
+        result = summary
+    
+    if clear_after:
+        for item in items:
+            path = next(transcribed_dir.glob(f"*.txt"), None)  # 简化,实际用 _path_for(item)
+            # 实际删除应通过 mtime 反查;实现时记录 _items_with_path 返回 (item, path)
+    return result
 ```
 
 **调用时机**(由 Phase 8 主调度触发):
@@ -1062,9 +1195,9 @@ def summarize_batch(
 ```text
 _quota.add(duration_sec)
   ├─ current < threshold → 不调 summarize_batch
-  └─ current ≥ threshold → 调 summarize_batch(window)
-                              ├─ 写入 notes.md
-                              ├─ 清空 window
+  └─ current ≥ threshold → 调 summarize_batch(transcribed_dir)
+                              ├─ 写入 notes.md(FR-5)
+                              ├─ 删除 transcribed/*.txt(避免重复)
                               └─ _quota.reset()
 ```
 
@@ -1072,18 +1205,23 @@ _quota.add(duration_sec)
 
 ### 验收
 ```python
+# 准备 logs/transcribed/ 目录,写入若干 fake 字幕(模拟 Phase 6 save_transcribed 输出)
+transcribed_dir = Path("./logs/transcribed")
+for title, secs in [("Python 列表推导式", 1800), ("Python 装饰器", 2400), ("Python 生成器", 3600)]:
+    (transcribed_dir / f"v_{title}.txt").write_text(
+        f"# {title}\n来源:whisper | 质量:85/100 | 时长:{secs}s\n\n字幕正文...",
+        encoding="utf-8",
+    )
+
 summarizer = LLMSummarizer(LLMClient(...), Path("./notes/videos.md"))
-window = [
-    SubtitleWindowItem(title="Python 列表推导式", text="...", quality=Q, source="whisper", duration_sec=1800),
-    SubtitleWindowItem(title="Python 装饰器", text="...", quality=Q, source="whisper", duration_sec=2400),
-    # ... 共 6h
-]
-result = summarizer.summarize_batch(window, group_title="Python 基础")
+result = summarizer.summarize_batch(transcribed_dir, group_title="Python 基础")
 assert 500 <= len(result) <= 1500
 assert "Python" in result
 assert "列表推导式" in result
 assert "装饰器" in result
 assert result.startswith("## ")
+# 总结完后默认清空源文件
+assert list(transcribed_dir.glob("*.txt")) == []
 ```
 ```
 
@@ -1695,8 +1833,10 @@ uv run vla process --url "file:///tmp/test.mp4" --title "测试视频" --duratio
 | E2E-1 | 有 CC 的 B站视频 | official 字幕 + 总结 | 笔记追加 + 无录屏 |
 | E2E-2 | 无 CC + 插件目录有文件 | plugin 字幕 + 弹窗 | 弹窗出现,点了继续 |
 | E2E-2b | 无 CC + 插件目录无 + 用户点"跳过该视频" | **降级到 whisper** + 总结 | **transcribe_fail.csv 不增加** |
-| E2E-2c | 无 CC + 插件目录无 + **弹窗超时未响应** | **降级到 whisper** + 总结 | **transcribe_fail.csv 不增加** |
+| E2E-2c | 无 CC + 插件目录无 + **弹窗超时未响应** | **降级到 whisper** + 总结 + **B 级 warning 通知用户** | **transcribe_fail.csv 不增加** |
 | E2E-2d | **插件字幕质量不过关**(FR-2.11) | 标记 + 降级 + 写日志 | quality_fail.csv `failure_source=plugin`,后续视频直接 unavailable |
+| E2E-2e | 无 CC + 浏览器探测 miss + 用户点"已启用" + Tab Audio Recorder 正常 | **Tab Audio Recorder 录制 → editor.html → 下载 → Whisper** | source="whisper",metadata["via"]="tab_audio_recorder",audio_id=数字 ID |
+| E2E-2f | 无 CC + 浏览器探测 miss + 用户点"已启用" + Tab Audio Recorder 超时/失败 | **降级 quality_skip.csv** | 不记 transcribe_fail,继续下一个视频(FR-2.21 降级语义) |
 | E2E-3 | 无 CC + 插件无 + 用户点"已开启"但文件不出现 | whisper 字幕 + 总结 | 降级路径 + 走下载/录屏 |
 | E2E-4 | 防下载视频(YouTube 等) | 录屏 + whisper | ffmpeg 启动 |
 | E2E-5 | 静音视频 | quality_fail | 视频源保留 + CSV 记录 |
@@ -1781,14 +1921,42 @@ Phase 9(E2E 测试)
 - [x] Phase 1: 配置 + 数据模型
 - [x] Phase 2: 视频源工厂
 - [x] Phase 3: 字幕三级策略(2026-09-01 完成,平台无关三级 + 86 测试通过 + B站 spike 验证)
-- [ ] Phase 4: 流式转写
-- [ ] Phase 5: 质量门控
-- [ ] Phase 6: 通知 + 日志
-- [ ] Phase 7: LLM 总结
-- [ ] Phase 7.5: 状态管理(QuotaManager / HistoryManager / PluginStatus)
-- [ ] Phase 7.6: FailureAlert(失败日志上限监控,FR-6.6)
-- [ ] Phase 8: 主调度 + CLI
-- [ ] Phase 9: 端到端测试
+  - [x] Phase 3.2: BrowserRecorder(2026-09-01 完成,Screencastify/Screen Recorder 录屏兜底)→ **2026-09-03 重构**:`tab_audio_recorder.py`(Tab Audio Recorder + audio_id + 异步 worker 池)+ `audio/source_factory.py`(yt-dlp -x / Puppeteer 路径);原 `browser_record.py` 整段删除,详细变更见 [[requirements#FR-2.14]]
+- [x] Phase 4: 流式转写(2026-09-01 完成,StreamingTranscriber + AudioTranscriber Protocol + ffmpeg 抽音轨 + faster-whisper VAD + 懒加载 + 边转写边清理 + 179 测试通过)
+- [x] Phase 5: 质量门控(2026-09-01 完成,LLMClient + QualityChecker + 启发式预筛(语速 / 重复) + LLM JSON 评估 + pass/fail 阈值 + 216 测试通过)
+- [x] Phase 5: 质量门控
+- [x] Phase 6: 通知 + 日志
+- [x] Phase 7: LLM 总结
+- [x] Phase 7.5: 状态管理(QuotaManager / HistoryManager / PluginStatus)
+- [x] Phase 7.6: FailureAlert(失败日志上限监控,FR-6.6)
+- [x] Phase 8: 主调度 + CLI
+- [x] Phase 9: 端到端测试
+  - [x] Phase 9.6: FR-2.5/2.6 popup 流程接入(2026-09-02 完成,MacOSNotifier.ask_open_browser/ask_recording_done + SubtitleStrategy pause+popup + RealTextProvider 透传 notifier+plugin_status + 4 个 E2E 测试覆盖 enabled/skip/timeout/session-single-popup + 328 测试通过)
+  - [x] Phase 9.6.1: popup enabled 路径修正(2026-09-02 完成,修三个 bug + 改 SSOT)
+    - plugin_name "VideoTrans" → "Screen Recorder"(config + popup 文案 + 热键 Alt+Shift+R → Command+Shift+R)
+    - "enabled" 路径不再 retry fetch_browser_subtitle,改为直接调 BrowserRecorder.record_and_transcribe(FR-2.14)
+    - ~~弹窗超时分支加 B 级 `notifier.warning(...)`~~ **改**:**移除**超时 B 级 warning(2026-09-02 UX 收敛)—— macOS dialog 自动消失已是用户感知信号,叠加 B 级通知会和"录屏启动"/"录屏到时"挤在通知中心,反而干扰;只 `logger.info()` 记录降级原因
+    - record_and_transcribe 抛错 → 不标记 unavailable,降级 ffmpeg(FR-2.20)
+    - **录屏到时 = duration + post_buffer**(2026-09-02 UX 改):post_buffer 是弹性而非反应时间,warning 在 `duration + post_buffer` 后发出,见 FR-2.15
+    - **pause_page_video 双触发点**(2026-09-02 UX 改):Strategy/BilibiliAdapter 在 page.goto 后**立即**也调一次,消除"录屏启动 → 视频开始播放"窗口,见 FR-2.15a'
+    - **recorder 返回 transcript 路径**(2026-09-02):`record_and_transcribe` 返回 `Path` 落盘文件路径,Strategy 读一次得 `SubtitleResult.text`,见 FR-2.15b
+    - audio_path 处理(2026-09-03 改):屏幕录制路径 audio_path=None(BrowserRecorder 自己清理)→ **改为 audio_id.webm 文件路径**:`logs/audio_raw/<audio_id>.webm`,由 `TabAudioRecorder.start_recording` 返回的 audio_id 命名(FR-2.26);失败文件进 `logs/audio_failed/`
+    - 测试:test_subtitle_strategy 加 enabled→record 路径、test_macos_notify 加超时 warning、test_e2e 加整链路 + 真实 spike 验证
+- [x] 字幕清理 Level 3 步骤 1(2026-09-02 完成,本地 postprocess):
+    - 新增 `src/vla/transcribe/postprocess.py`:`merge_short_lines()` + `dedupe_repeated_segments()` + `_has_significant_overlap()`(LCS-style) + `clean_transcript()`(组装 + PostprocessStats)
+    - `StreamingTranscriber.transcribe()` 末尾 `clean_transcript()` 串联(`whisper.postprocess_enabled` 控制开关,默认开)
+    - 配置:`whisper.postprocess_min/max_line_chars / min_overlap_chars`(`config/vla.yaml`)
+    - 测试:27 个单元测试覆盖 happy path / 边界 / spike 真实样本,full suite 380+ passed
+- [x] 字幕清理 Level 4(2026-09-02 完成,云端 LLM 语义整理,可选):
+    - 新增 `src/vla/quality/refiner.py`:`SubtitleRefiner.refine(text, title)` + `write_cleaned_transcript()` + `_parse_json()` helper(与 QualityChecker 同模式)
+    - 新增数据模型:`Correction` + `RefinementResult`(在 `src/vla/models.py`)
+    - `QualityCheckConfig` 加 `refine_enabled / refine_model / refine_max_chars` 字段,`config/vla.yaml` 同步
+    - LLM 调用参数:`max_tokens=2000, temperature=0.2`(低随机,稳定输出),JSON `{cleaned_text, corrections[], notes}` schema
+    - 失败 fallback:LLM 抛错 / JSON 解析失败 / 空 `cleaned_text` → 返回原始 text + notes,主流程不中断
+    - 落盘:`<stem>.cleaned.txt`(与 `.transcript.txt` 同目录,不覆盖原文),头部含 `cleaned_at / model / notes / corrections` 元数据
+    - 配额归类:NFR-5 第 ③ 项(字幕语义清理)
+    - 测试:37 个单元测试覆盖 properties / 调用参数 / JSON 鲁棒解析 / 成功路径 / 失败 fallback / 长度超限 / 真实场景 / 落盘格式,full suite 417 passed
+    - 集成 spike:`scripts/spike_refiner_integration.py` 端到端跑通(本地 clean → LLM refine → 落盘),real transcript 320 行 → 79 行 → 356 字符 + 7 条 corrections
 ```
 
 ---

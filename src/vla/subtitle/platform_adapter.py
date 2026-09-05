@@ -44,28 +44,54 @@ class PlatformAdapter(Protocol):
 class PlatformAdapterRegistry:
     """平台适配器注册表。
 
-    按 `register()` 顺序遍历,首个 `match(url)` 返回 True 的类被实例化返回。
-    每次 `get_for_url` 调用都新建实例,避免状态污染。
+    支持两种注册方式(2026-09-02 扩展):
+    - `register(adapter_cls)` — 无依赖 adapter,用 class 注册;每次 get_for_url
+      返回新实例(状态隔离,测试友好)。
+    - `register_instance(adapter)` — 带依赖 adapter(如 BilibiliAdapter 需要
+      `official` 和 `recorder`),用 pre-built 实例注册,get_for_url 直接返回
+      这个实例(共享 deps,每次同一对象)。
+
+    实例优先于类匹配(同一 URL 实例先命中,再 fallback 到 class)。
     """
 
     def __init__(self) -> None:
-        self._adapters: list[type] = []
+        self._classes: list[type] = []
+        self._instances: list[Any] = []
 
     def register(self, adapter_cls: type) -> None:
         """注册一个 adapter 类;重复注册同一类会被忽略。"""
-        if adapter_cls not in self._adapters:
-            self._adapters.append(adapter_cls)
+        if adapter_cls not in self._classes:
+            self._classes.append(adapter_cls)
+
+    def register_instance(self, adapter: Any) -> None:
+        """注册一个 pre-built adapter 实例(带 deps 的 adapter 用这个)。"""
+        # 不去重 — 调用方应自己保证不重复;实例共享 deps 是预期行为
+        self._instances.append(adapter)
 
     def list_adapters(self) -> list[type]:
-        """返回所有已注册的 adapter 类(注册顺序)。"""
-        return list(self._adapters)
+        """返回所有已注册的 adapter 类(注册顺序)。
+
+        注:实例不暴露在这里(legacy 兼容 — 旧测试只看 class list)。
+        """
+        return list(self._classes)
+
+    def list_instances(self) -> list[Any]:
+        """返回所有已注册的 adapter 实例(注册顺序,2026-09-02 新增)。"""
+        return list(self._instances)
 
     def get_for_url(self, url: str) -> Any | None:
-        """按注册顺序找首个匹配 URL 的 adapter,返回新实例。
+        """按注册顺序找首个匹配 URL 的 adapter。
+
+        实例优先匹配;类匹配命中时返回新实例(避免状态污染)。
 
         None 表示无匹配 → 调用方应降级或跳过策略 ①。
         """
-        for cls in self._adapters:
+        # 1. 实例优先(pre-built,带 deps)
+        for inst in self._instances:
+            if inst.match(url):
+                return inst
+        # 2. 类(无 deps,每次新建)
+        for cls in self._classes:
             if cls.match(url):
                 return cls()
         return None

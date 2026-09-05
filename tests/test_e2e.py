@@ -614,7 +614,6 @@ class PopupFlowNotifier:
         self.popup_calls: list[dict] = []
         self.infos: list[tuple[str, str]] = []
         self.warnings: list[tuple[str, str]] = []
-        self.alert_calls: list[tuple[str, str]] = []
 
     def ask_open_browser(self, url, plugin_name, timeout_sec=30):
         self.popup_calls.append({
@@ -627,9 +626,6 @@ class PopupFlowNotifier:
 
     def warning(self, title, message):
         self.warnings.append((title, message))
-
-    def alert_blocking(self, title, message, **kw):
-        self.alert_calls.append((title, message))
 
 
 def _build_real_strategy(cfg, *, popup_response, recorder=None):

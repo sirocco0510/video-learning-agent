@@ -3,6 +3,7 @@
 职责:
 - 通过 `connect_over_cdp` 接管用户已打开的 Chrome(无需重复登录)
 - `new_background_page()` 创建后台标签页(不抢焦点)
+  - 自动清理旧的扩展 popup(只留最新的一个)— 用户多次按 Cmd+Shift+R 不会堆积
 - `fetch_subtitle_via_browser()` 跑 4 种 JS 探测(track → initial_state → player → DOM)
 - `_fetch_subtitle_text()` 用 `context.request` 跨 origin 下载字幕文本
   (绕过 CORS,使用浏览器已登录的 cookie)
@@ -11,14 +12,19 @@
 - `browser_provider` 是注入点,默认走真实 playwright;测试时注入 mock。
 - 4 种探测按优先级短路,track 命中就不跑后面的。
 - JSON 字幕(B站 AI 风格 `{body: [{from, to, content}]}`)自动提取 content 拼接。
+- `cleanup_stale_extension_pages()` 是静态方法,spike 也可直接调用,无需 BrowserDriver 实例。
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Callable
 
 from vla.config import VLAConfig
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---- JSON 字幕的 content 拼接 ----
@@ -76,9 +82,53 @@ class BrowserDriver:
         return self._browser
 
     def new_background_page(self) -> Any:
-        """从第一个 context 创建后台标签页(不抢焦点)。"""
+        """从第一个 context 创建后台标签页(不抢焦点)。
+
+        先调用 `cleanup_stale_extension_pages` 关闭旧的 chrome-extension:// 标签页
+        (只保留最新的一个),避免用户多次按 Cmd+Shift+R 时 popup 堆积。
+        """
         ctx = self._browser.contexts[0]
+        self.cleanup_stale_extension_pages(ctx, keep_latest=1)
         return ctx.new_page()
+
+    @staticmethod
+    def cleanup_stale_extension_pages(ctx: Any, keep_latest: int = 1) -> int:
+        """关闭除最新 `keep_latest` 个之外的所有 `chrome-extension://` 标签页。
+
+        用途: Screen Recorder 扩展每次按 Cmd+Shift+R 都开一个 popup,
+        多次误触会让 Chrome 标签栏堆满 `chrome-extension://.../popup.html`。
+        只保留最新的那一个,其余关闭,避免 tab 堆积。
+
+        Args:
+            ctx: playwright BrowserContext(或 mock,需要有 `.pages` 属性)
+            keep_latest: 保留最新的多少个扩展页(默认 1)
+
+        Returns:
+            实际关闭的页面数。close() 抛错不阻塞,只 log debug。
+        """
+        pages_attr = getattr(ctx, "pages", None)
+        if pages_attr is None:
+            return 0
+        try:
+            pages = list(pages_attr)
+        except TypeError:
+            return 0
+
+        ext_pages = [p for p in pages if (getattr(p, "url", "") or "").startswith("chrome-extension://")]
+        if len(ext_pages) <= keep_latest:
+            return 0
+
+        to_close = ext_pages[:-keep_latest] if keep_latest > 0 else ext_pages
+        closed = 0
+        for p in to_close:
+            try:
+                p.close()
+                closed += 1
+            except Exception as e:
+                logger.debug("关闭扩展页失败 %s: %s", getattr(p, "url", "?"), e)
+        if closed:
+            logger.info("🧹 关闭 %d 个旧扩展 popup(保留最新 %d 个)", closed, keep_latest)
+        return closed
 
     # ---- 4 种 JS 探测 ----
 

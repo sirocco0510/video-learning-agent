@@ -79,12 +79,15 @@ video-learning-agent/
 │   ├── config.py                # 配置加载
 │   ├── models.py                # pydantic 数据模型
 │   ├── llm/client.py            # 统一 LLM 客户端
-│   ├── source/video_source.py   # 下载 OR 录屏
+│   ├── audio/source_factory.py  # 音频源工厂(yt-dlp -x / Puppeteer,FR-2.16a/b)
+│   ├── audio/queue.py           # AudioQueue(asyncio.Queue,容量 10,FR-2.27)
+│   ├── audio/worker_pool.py     # WhisperWorkerPool(默认 2 worker,FR-2.27)
 │   ├── subtitle/
-│   │   ├── strategy.py          # 三级调度(含插件状态机)
+│   │   ├── strategy.py          # 三级调度(含 TabAudioRecorder 状态机)
 │   │   ├── bilibili_official.py # 策略 ①
-│   │   └── browser_plugin.py    # 策略 ②
-│   ├── transcribe/streaming.py  # faster-whisper
+│   │   ├── browser_plugin.py    # 策略 ②
+│   │   └── tab_audio_recorder.py# 策略 ③(Tab Audio Recorder + yt-dlp,FR-2.24/2.25)
+│   ├── transcribe/streaming.py  # faster-whisper(异步 worker 消费)
 │   ├── quality/checker.py       # 质量检查
 │   ├── summary/llm_summarizer.py# 批量总结(summarize_batch)
 │   ├── ui/macos_notify.py       # macOS 通知
@@ -93,7 +96,7 @@ video-learning-agent/
 │   └── state/                   # FR-9/10 + FR-2.10 状态管理
 │       ├── quota.py             # 累计时长配额
 │       ├── history.py           # 去重历史(jsonl)
-│       └── plugin_status.py     # 插件状态机
+│       └── plugin_status.py     # TabAudioRecorder 状态机(FR-2.21)
 ├── config/vla.yaml              # 默认配置
 ├── videos.yaml                  # 视频组输入(FR-10)
 └── tests/
@@ -181,15 +184,23 @@ video_groups:
 
 ---
 
-## 视频源双路径
+## 音频源三级路径(FR-2.14,2026-09-03 重构)
 
 ```text
-yt-dlp simulate 检测
-  ├─ OK  → yt-dlp download(最低画质)
-  └─ FAIL → ffmpeg + avfoundation 录屏(策略 B:含系统音频)
+① yt-dlp -x 抽音频(可下载视频)
+    yt-dlp -x --audio-format wav --postprocessor-args "-ac 1 -ar 16000" <url>
+    ↓ 失败
+② Puppeteer page.evaluate 抓音频流(getUserMedia + MediaRecorder)
+    ↓ 失败
+③ Tab Audio Recorder 扩展(扩展 ID: hanfcigjijjcbdbfoplddndcblmlfiio)
+    bg page evaluate 启动 → editor.html?id=<audio_id> → 点下载按钮
+    ↓ 失败
+quality_skip.csv(不记 transcribe_fail,Whisper 还没启动)
 ```
 
-详细规格见 [[requirements#FR-1 视频源管理]] 与 [[requirements#FR-8 录屏与音频]]。
+**关键**:**Whisper 永不接收视频信号**,只接收音频(.wav / .webm)。磁盘占用 ≈60 MB/h,256 GB 硬盘友好。
+
+详细规格见 [[requirements#FR-2.14 策略 ③ 音频三级降级总览]]。
 
 ---
 
@@ -352,9 +363,10 @@ bilibili://group/{group_id}/{bvid}
 
 | 权限 | 触发场景 | 设置路径 |
 |------|----------|----------|
-| 屏幕录制 | ffmpeg 录屏时 | 系统设置 → 隐私与安全性 → 屏幕录制 |
-| 通知 | `display notification` | 系统设置 → 通知 → 允许终端 / osascript |
-| 辅助功能 | AppleScript 弹窗 | 系统设置 → 辅助功能 |
+| 通知 | `display notification`(B 级) | 系统设置 → 通知 → 允许终端 / osascript |
+| 辅助功能 | AppleScript 弹窗(A 级) | 系统设置 → 辅助功能 |
+
+> **已移除**:屏幕录制权限(2026-09-03 重构,不再录屏,只抽音频)。
 
 ---
 

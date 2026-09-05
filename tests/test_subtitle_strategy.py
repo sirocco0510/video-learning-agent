@@ -102,11 +102,34 @@ def log() -> MagicMock:
 
 
 @pytest.fixture
-def strategy(adapter, driver, recorder, log) -> SubtitleStrategy:
+def notifier() -> MagicMock:
+    """Stub notifier — 默认 ask_open_browser 返回 'enabled'(让流程走到 ② retry)。
+
+    测试可单独覆盖 return_value 测试 skip/timeout 路径。
+    """
+    n = MagicMock()
+    n.ask_open_browser.return_value = "enabled"
+    return n
+
+
+@pytest.fixture
+def plugin_status() -> MagicMock:
+    """Stub PluginStatus — 默认 unknown/available(由具体测试覆盖 unavailable)。"""
+    ps = MagicMock()
+    ps.is_unavailable.return_value = False
+    ps.is_known.return_value = False
+    return ps
+
+
+@pytest.fixture
+def strategy(adapter, driver, recorder, notifier, plugin_status, log) -> SubtitleStrategy:
     return SubtitleStrategy(
         registry=StubRegistry(adapter),
         driver=driver,
         recorder=recorder,
+        notifier=notifier,
+        plugin_status=plugin_status,
+        remind_timeout_sec=30,
         log=log,
     )
 
@@ -221,11 +244,14 @@ class TestAllMiss:
 
 class TestFallbackAdapter:
     @pytest.fixture
-    def fb_strategy(self, driver, recorder, log) -> SubtitleStrategy:
+    def fb_strategy(self, driver, recorder, notifier, plugin_status, log) -> SubtitleStrategy:
         return SubtitleStrategy(
             registry=EmptyRegistry(),
             driver=driver,
             recorder=recorder,
+            notifier=notifier,
+            plugin_status=plugin_status,
+            remind_timeout_sec=30,
             log=log,
         )
 
@@ -296,19 +322,107 @@ class TestFallbackAdapterUnit:
         result = fb.fetch_via_recording(driver, "url", 30)
         assert result is None
 
-    def test_recording_uses_recorder(self):
+
+def _write_transcript(tmp_path: Path, name: str, text: str) -> Path:
+    """造一个 transcript 文件,返回路径(recorder 新规:返回 Path 不返回 text)。"""
+    path = tmp_path / name
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+class TestFallbackRecorderReturnsPath:
+    """recorder 新规:返回 transcript 文件路径,不是 text。
+    兜底要读文件 + metadata 暴露 transcript_path。"""
+
+    def test_recording_uses_recorder(self, tmp_path):
         driver = MagicMock()
         recorder = MagicMock()
-        recorder.record_and_transcribe.return_value = "whisper"
+        path = _write_transcript(tmp_path, "transcript.txt", "whisper 转写文本")
+        recorder.record_and_transcribe.return_value = path
         page = MagicMock()
         driver.new_background_page.return_value = page
 
         fb = FallbackAdapter(driver=driver, recorder=recorder)
         text, meta = fb.fetch_via_recording(driver, "url", 30)
 
-        assert text == "whisper"
+        # 读文件读到 text
+        assert text == "whisper 转写文本"
         assert meta["method"] == "recording"
+        # metadata 暴露 transcript_path 给下游
+        assert meta["transcript_path"] == str(path)
         recorder.record_and_transcribe.assert_called_once()
+
+    def test_recording_reuses_video_page_when_set(self, tmp_path):
+        """set_video_page 注入 page 后,③ 不开新页、不 goto,直接复用。"""
+        driver = MagicMock()
+        recorder = MagicMock()
+        path = _write_transcript(tmp_path, "transcript.txt", "whisper")
+        recorder.record_and_transcribe.return_value = path
+        existing_page = MagicMock(name="existing_bilibili_page")
+
+        fb = FallbackAdapter(driver=driver, recorder=recorder)
+        fb.set_video_page(existing_page)
+
+        text, meta = fb.fetch_via_recording(driver, "https://x", 60)
+
+        assert text == "whisper"
+        # 关键断言:没开新页、没 goto
+        driver.new_background_page.assert_not_called()
+        existing_page.goto.assert_not_called()
+        # recorder 拿到的是已加载 B站 的 existing_page
+        recorder.record_and_transcribe.assert_called_once()
+        call_args = recorder.record_and_transcribe.call_args
+        assert call_args.args[0] is existing_page
+
+    def test_recording_falls_back_to_goto_when_no_video_page(self, tmp_path):
+        """_video_page=None → 新开 page + goto URL(避免录到空白页静音)。"""
+        driver = MagicMock()
+        recorder = MagicMock()
+        path = _write_transcript(tmp_path, "transcript.txt", "whisper")
+        recorder.record_and_transcribe.return_value = path
+        new_page = MagicMock()
+        driver.new_background_page.return_value = new_page
+
+        fb = FallbackAdapter(driver=driver, recorder=recorder)
+        text, meta = fb.fetch_via_recording(driver, "https://x/video", 60)
+
+        assert text == "whisper"
+        driver.new_background_page.assert_called_once()
+        new_page.goto.assert_called_once()
+        # goto URL 是 B站
+        assert "video" in new_page.goto.call_args.args[0]
+        # Fix 3:跳转后立即暂停视频
+        # pause_page_video 通过 evaluate 调,新 page 应收到 evaluate 调用
+        assert new_page.evaluate.called
+
+    def test_recording_continues_when_goto_fails(self, tmp_path):
+        """goto 失败(超时 / 网络)→ 仍跑录屏,只是可能录到静音。"""
+        driver = MagicMock()
+        recorder = MagicMock()
+        path = _write_transcript(tmp_path, "transcript.txt", "whisper")
+        recorder.record_and_transcribe.return_value = path
+        new_page = MagicMock()
+        new_page.goto.side_effect = RuntimeError("net timeout")
+        driver.new_background_page.return_value = new_page
+
+        fb = FallbackAdapter(driver=driver, recorder=recorder)
+        # 不抛
+        text, meta = fb.fetch_via_recording(driver, "https://x", 30)
+
+        assert text == "whisper"
+        recorder.record_and_transcribe.assert_called_once()
+
+    def test_recording_returns_none_when_transcript_file_missing(self, tmp_path):
+        """recorder 返回的 transcript 路径不存在 / 读失败 → 返回 None(不抛)。"""
+        driver = MagicMock()
+        recorder = MagicMock()
+        recorder.record_and_transcribe.return_value = tmp_path / "nope.txt"
+        page = MagicMock()
+        driver.new_background_page.return_value = page
+
+        fb = FallbackAdapter(driver=driver, recorder=recorder)
+        result = fb.fetch_via_recording(driver, "https://x", 30)
+        assert result is None
 
 
 # ---------------- duration_sec 传递给 ③ ----------------

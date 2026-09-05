@@ -142,19 +142,24 @@ class TestFetchRecording:
         assert result is None
         driver.new_background_page.assert_not_called()
 
-    def test_uses_recorder_to_record_and_transcribe(self, adapter, recorder: MagicMock, driver: MagicMock):
-        recorder.record_and_transcribe.return_value = "录屏字幕"
+    def test_uses_recorder_to_record_and_transcribe(self, adapter, recorder: MagicMock, driver: MagicMock, tmp_path):
+        """recorder 新规:返回 transcript 文件路径,adapter 读一次得 text。"""
+        transcript_file = tmp_path / "transcript.txt"
+        transcript_file.write_text("录屏字幕", encoding="utf-8")
+        recorder.record_and_transcribe.return_value = transcript_file
 
         text, meta = adapter.fetch_via_recording(driver, "https://www.bilibili.com/video/BV1xxx", 30)
 
         assert text == "录屏字幕"
         assert meta["method"] == "recording"
         assert meta["platform"] == "bilibili"
+        # metadata 暴露 transcript_path 给下游
+        assert meta["transcript_path"] == str(transcript_file)
         recorder.record_and_transcribe.assert_called_once()
         driver.new_background_page.assert_called_once()
 
-    def test_passes_duration_to_recorder(self, adapter, recorder: MagicMock, driver: MagicMock):
-        recorder.record_and_transcribe.return_value = "x"
+    def test_passes_duration_to_recorder(self, adapter, recorder: MagicMock, driver: MagicMock, tmp_path):
+        recorder.record_and_transcribe.return_value = tmp_path / "t.txt"
 
         adapter.fetch_via_recording(driver, "url", 45)
 
@@ -164,9 +169,9 @@ class TestFetchRecording:
         assert args[2] == 45
         assert "url" in args[1]
 
-    def test_save_dir_under_storage_tmp(self, adapter, recorder: MagicMock, driver: MagicMock):
+    def test_save_dir_under_storage_tmp(self, adapter, recorder: MagicMock, driver: MagicMock, tmp_path):
         """save_dir 默认在 config.storage.tmp_dir/recordings 下。"""
-        recorder.record_and_transcribe.return_value = "x"
+        recorder.record_and_transcribe.return_value = tmp_path / "t.txt"
 
         adapter.fetch_via_recording(driver, "url", 10)
 

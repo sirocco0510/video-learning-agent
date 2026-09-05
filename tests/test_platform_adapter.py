@@ -112,3 +112,51 @@ class TestListAdapters:
         reg.register(FakeBilibiliAdapter)
         reg.register(FakeInternalAdapter)
         assert reg.list_adapters() == [FakeBilibiliAdapter, FakeInternalAdapter]
+
+
+class TestRegisterInstance:
+    """2026-09-02 新增:支持 pre-built adapter 实例注册(带 deps)。"""
+
+    def test_register_instance_returns_same_object(self):
+        """带 deps 的 adapter(构造需要参数)用 register_instance 注册,
+        get_for_url 应返回同一实例(共享 deps),不是新实例。"""
+        reg = PlatformAdapterRegistry()
+        instance = FakeBilibiliAdapter()
+        instance.deps = {"injected": True}  # 模拟 deps
+        reg.register_instance(instance)
+
+        result = reg.get_for_url("https://www.bilibili.com/video/BV1xxx")
+        assert result is instance
+        assert result.deps == {"injected": True}
+
+    def test_instance_takes_priority_over_class(self):
+        """实例先匹配;类 fallback。"""
+        reg = PlatformAdapterRegistry()
+        instance = FakeBilibiliAdapter()
+        instance.tag = "instance"
+        reg.register_instance(instance)
+        reg.register(FakeBilibiliAdapter)  # class also registered
+
+        result = reg.get_for_url("https://www.bilibili.com/video/BV1xxx")
+        assert result is instance  # 实例优先,不是新 class 实例
+        assert getattr(result, "tag", None) == "instance"
+
+    def test_list_adapters_excludes_instances(self):
+        """list_adapters() 只返回 class,instance 通过 list_instances() 看。
+        保持 legacy 测试不破。"""
+        reg = PlatformAdapterRegistry()
+        reg.register(FakeBilibiliAdapter)
+        reg.register_instance(FakeBilibiliAdapter())
+
+        assert reg.list_adapters() == [FakeBilibiliAdapter]
+        assert len(reg.list_instances()) == 1
+
+    def test_instance_only_no_class_registered(self):
+        """只注册实例时,get_for_url 仍能匹配。"""
+        reg = PlatformAdapterRegistry()
+        instance = FakeInternalAdapter()  # 不通过 register() 注册
+        # 显式 instance 注册
+        reg._instances.append(instance)
+
+        result = reg.get_for_url("https://internal.example.com/v/123")
+        assert result is instance

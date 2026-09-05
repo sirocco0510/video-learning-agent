@@ -14,11 +14,9 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from collections import Counter
-from typing import Any
 
 from vla.config import VLAConfig
 from vla.llm.client import LLMClientLike

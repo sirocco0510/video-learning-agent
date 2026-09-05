@@ -320,3 +320,163 @@ class TestFetchSubtitleText:
 
         result = driver._fetch_subtitle_text(page, "https://broken.example.com/x")
         assert result is None
+
+
+# ---------------- cleanup_stale_extension_pages() ----------------
+
+
+class FakePageForCleanup:
+    """minimal mock for cleanup test — 只关心 .url 和 .close()。"""
+
+    def __init__(self, url: str):
+        self.url = url
+        self.close_calls = 0
+        self.close_error: Exception | None = None
+
+    def close(self):
+        self.close_calls += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
+class FakeContextWithPages:
+    """带 .pages 列表的 mock context(playwright pattern)。"""
+
+    def __init__(self, pages: list):
+        self.pages = pages
+
+
+class TestCleanupStaleExtensionPages:
+    def test_closes_all_but_latest_extension_page(self):
+        """3 个扩展页 → 关闭前 2 个,保留最新的 1 个。"""
+        p1 = FakePageForCleanup("chrome-extension://abc/popup.html")
+        p2 = FakePageForCleanup("chrome-extension://abc/popup.html")
+        p3 = FakePageForCleanup("chrome-extension://abc/popup.html")
+        ctx = FakeContextWithPages([p1, p2, p3])
+
+        closed = BrowserDriver.cleanup_stale_extension_pages(ctx, keep_latest=1)
+
+        assert closed == 2
+        assert p1.close_calls == 1
+        assert p2.close_calls == 1
+        assert p3.close_calls == 0  # 最新,保留
+
+    def test_noop_when_single_extension_page(self):
+        """只有 1 个扩展页 → 不动(已经是最新的了)。"""
+        p = FakePageForCleanup("chrome-extension://abc/popup.html")
+        ctx = FakeContextWithPages([p])
+
+        closed = BrowserDriver.cleanup_stale_extension_pages(ctx, keep_latest=1)
+
+        assert closed == 0
+        assert p.close_calls == 0
+
+    def test_noop_when_no_extension_pages(self):
+        """没扩展页 → 不动(B站 / other 都保留)。"""
+        bilibili = FakePageForCleanup("https://www.bilibili.com/")
+        newtab = FakePageForCleanup("chrome://newtab/")
+        ctx = FakeContextWithPages([bilibili, newtab])
+
+        closed = BrowserDriver.cleanup_stale_extension_pages(ctx, keep_latest=1)
+
+        assert closed == 0
+        assert bilibili.close_calls == 0
+        assert newtab.close_calls == 0
+
+    def test_ignores_non_extension_pages(self):
+        """混合页面:只关扩展页,其他保留。"""
+        b1 = FakePageForCleanup("https://www.bilibili.com/video/BV1")
+        ext1 = FakePageForCleanup("chrome-extension://x/popup.html")
+        b2 = FakePageForCleanup("https://search.bilibili.com/")
+        ext2 = FakePageForCleanup("chrome-extension://x/popup.html")
+
+        ctx = FakeContextWithPages([b1, ext1, b2, ext2])
+
+        closed = BrowserDriver.cleanup_stale_extension_pages(ctx, keep_latest=1)
+
+        assert closed == 1
+        assert ext1.close_calls == 1  # 旧扩展页关闭
+        assert ext2.close_calls == 0   # 新的扩展页保留
+        assert b1.close_calls == 0
+        assert b2.close_calls == 0
+
+    def test_keep_latest_zero_closes_all_extension_pages(self):
+        """keep_latest=0 → 所有扩展页都关(用极端场景)。"""
+        p1 = FakePageForCleanup("chrome-extension://x/popup.html")
+        p2 = FakePageForCleanup("chrome-extension://x/popup.html")
+        ctx = FakeContextWithPages([p1, p2])
+
+        closed = BrowserDriver.cleanup_stale_extension_pages(ctx, keep_latest=0)
+
+        assert closed == 2
+        assert p1.close_calls == 1
+        assert p2.close_calls == 1
+
+    def test_graceful_when_ctx_has_no_pages_attribute(self):
+        """ctx 没 .pages 属性 → 0 个关闭,不抛。"""
+        class CtxNoPages:
+            pass
+
+        closed = BrowserDriver.cleanup_stale_extension_pages(CtxNoPages(), keep_latest=1)
+        assert closed == 0
+
+    def test_close_failure_does_not_block(self):
+        """某个 page.close() 抛错 → log debug 继续,不影响别的关闭。"""
+        p1 = FakePageForCleanup("chrome-extension://x/popup.html")
+        p1.close_error = RuntimeError("page already closed")
+        p2 = FakePageForCleanup("chrome-extension://x/popup.html")
+        p3 = FakePageForCleanup("chrome-extension://x/popup.html")
+        ctx = FakeContextWithPages([p1, p2, p3])
+
+        closed = BrowserDriver.cleanup_stale_extension_pages(ctx, keep_latest=1)
+
+        # p1 抛错但 p2 仍然关闭
+        assert closed == 1
+        assert p2.close_calls == 1
+        assert p3.close_calls == 0
+
+
+class TestNewBackgroundPageCallsCleanup:
+    def test_cleanup_happens_before_new_page(self):
+        """new_background_page() 必须先 cleanup 再 new_page。"""
+        ext_old = FakePageForCleanup("chrome-extension://x/popup.html")
+        ext_new = FakePageForCleanup("chrome-extension://x/popup.html")
+        ctx = FakeContextWithPages([ext_old, ext_new])
+
+        new_page_called = []
+
+        def new_page():
+            new_page_called.append(True)
+            return MagicMock()
+
+        ctx.new_page = new_page
+
+        browser = FakeBrowser(contexts=[ctx])
+        cfg = VLAConfig.model_construct()  # 只走 connect / new_background_page,不读其他字段
+        driver = BrowserDriver(cfg)
+        driver.set_browser_provider(lambda: browser)
+        driver.connect()
+
+        # 关键: 在 new_page 之前 cleanup 已经把 ext_old 关了
+        result = driver.new_background_page()
+
+        assert new_page_called == [True]
+        assert ext_old.close_calls == 1
+        assert ext_new.close_calls == 0
+        assert result is not None
+
+    def test_new_background_page_when_no_extension_pages(self):
+        """没有扩展页时,new_page 仍正常创建。"""
+        b_page = FakePageForCleanup("https://www.bilibili.com/")
+        ctx = FakeContextWithPages([b_page])
+        ctx.new_page = lambda: MagicMock()
+
+        browser = FakeBrowser(contexts=[ctx])
+        cfg = VLAConfig.model_construct()
+        driver = BrowserDriver(cfg)
+        driver.set_browser_provider(lambda: browser)
+        driver.connect()
+
+        result = driver.new_background_page()
+        assert result is not None
+        assert b_page.close_calls == 0  # B站页不会被误关

@@ -26,7 +26,6 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any
 
 from vla.config import VLAConfig
 from vla.llm.client import LLMClientLike
