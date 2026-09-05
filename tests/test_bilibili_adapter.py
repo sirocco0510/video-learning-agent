@@ -187,7 +187,7 @@ class TestFetchViaRecording:
     """F2-7:BilibiliAdapter.fetch_via_recording 转发到 PlatformAdapter base impl。
 
     验证:
-    - 不再依赖 BrowserRecorder(F2-8 才删,但本 adapter 已不用)
+    - 不再依赖旧 Screen Recorder 模块(F2-8 后已删;本 adapter F2-7 已切到 4 deps 架构)
     - 转发 self 持有的 4 deps 到 super().fetch_via_recording
     - 调用方可覆盖 kwargs(setdefault 语义)
     - B站 _make_stem override 用 bvid

@@ -45,10 +45,13 @@ class TestFromYaml:
         assert cfg.whisper.language == "zh"
 
         # 嵌套:video_source.download.format
-        assert cfg.video_source.download.format == "worst"
-        # 嵌套:video_source.record
-        assert cfg.video_source.record.enabled is True
-        assert cfg.video_source.record.screen_index == 2  # MacBook Air:0/1=相机,2=屏幕
+        # 2026-09-02:从 "worst" 升级为 yt-dlp format selector(B站 audio-only 兼容)
+        fmt = cfg.video_source.download.format
+        assert "bestvideo" in fmt
+        assert "bestaudio" in fmt
+        # F2-8:video_source.record 块已从 VideoSourceConfig 移除(FR-2.14 v3:录屏
+        # 兜底走策略 ③ adapter.fetch_via_recording,不再需要录屏子配置)。
+        assert not hasattr(cfg.video_source, "record")
 
         # 嵌套:summary 数值
         assert cfg.summary.target_words_min == 500

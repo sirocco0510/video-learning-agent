@@ -116,7 +116,7 @@ def build_text_provider(
     plugin_status: Any,
     save_dir: Path | None = None,
     driver: Any = None,
-    recorder: Any = None,
+    recorder: Any = None,  # F2-8:deprecated,保留以兼容老调用方(始终 None)
 ) -> Callable[[VideoTask], tuple[str, str, Path | None]]:
     """工厂函数:装配一个完整的 RealTextProvider,供 CLI / E2E 使用。
 
@@ -126,7 +126,7 @@ def build_text_provider(
         plugin_status: PluginStatus(必填 — session 单例)
         save_dir: 临时文件目录(默认 cfg.storage.tmp_dir)
         driver: BrowserDriver(可选,字幕策略需要)
-        recorder: BrowserRecorder(可选)
+        recorder: deprecated(F2-8:旧 Screen Recorder 已删,传参保留但运行时忽略)
 
     Returns:
         可调用对象:(task) → (text, source, audio_path)
@@ -143,19 +143,16 @@ def build_text_provider(
     source_factory = VideoSourceFactory(tmp_dir=save_dir, log=log, config=cfg)
     transcriber = StreamingTranscriber(cfg)
 
-    # 自动连 Chrome(如果 CDP 端口可达):没有时弹窗 enabled 路径走不通,
-    # 但仍能用策略 ③ ffmpeg 兜底。这样 E2E / CLI 不需要手动注入 driver。
-    if driver is None or recorder is None:
-        auto_driver, auto_recorder = _try_connect_chrome(
-            cfg, transcriber, notifier,
-        )
-        driver = driver or auto_driver
-        recorder = recorder or auto_recorder
+    # F2-8:不再自动构造旧 Screen Recorder。弹窗 enabled 路径已废弃 —
+    # 真实录屏兜底走策略 ③ adapter.fetch_via_recording(yt-dlp / Tab Audio Recorder)。
+    # driver 仍按需自动连 Chrome CDP。
+    if driver is None:
+        driver = _try_connect_chrome(cfg, transcriber, notifier)
 
     strategy = SubtitleStrategy(
-        registry=_build_registry(cfg, recorder=recorder, save_dir=save_dir),
+        registry=_build_registry(cfg, save_dir=save_dir),
         driver=driver,
-        recorder=recorder,
+        recorder=recorder,  # 保留(测试 fixture 注入 MagicMock,enabled 路径 stub)
         notifier=notifier,
         plugin_status=plugin_status,
         remind_timeout_sec=cfg.browser_plugin.remind_timeout_sec,
@@ -177,17 +174,17 @@ def build_text_provider(
 def _build_registry(
     cfg: VLAConfig,
     *,
-    recorder: Any,
     save_dir: Path,
 ) -> Any:
     """装配 PlatformAdapterRegistry(2026-09-02 修复:之前一直是空的!)
 
     装配顺序:
-    1. BilibiliAdapter(cfg.platforms.bilibili.enabled) — 实例注册(带 deps)
+    1. BilibiliAdapter(cfg.platforms.bilibili.enabled) — 实例注册(带 F2-7 4 deps)
     2. InternalSiteAdapter(cfg.platforms.internal_site.enabled) — 类注册(无 deps)
 
     B站 → 实例注册的原因:BilibiliAdapter 构造需要 `official`(B站官方 API 客户端)
-    和 `recorder`(Screen Recorder 兜底),没法用 registry 默认的无参构造。
+    和 4 REQUIRED deps(audio_factory/tab_recorder/transcriber/screenshot_controller),
+    没法用 registry 默认的无参构造。
     """
     from vla.subtitle.bilibili_adapter import BilibiliAdapter
     from vla.subtitle.bilibili_official import BilibiliOfficialSubtitle
@@ -200,14 +197,12 @@ def _build_registry(
         official = BilibiliOfficialSubtitle()
         adapter = BilibiliAdapter(
             official=official,
-            recorder=recorder,
             save_dir=save_dir,
         )
         registry.register_instance(adapter)
         logger.info(
-            "✓ B站 adapter 已注册(official=%s, recorder=%s)",
+            "✓ B站 adapter 已注册(official=%s)",
             type(official).__name__,
-            type(recorder).__name__ if recorder else "None",
         )
 
     if cfg.platforms.internal_site.enabled:
@@ -217,11 +212,15 @@ def _build_registry(
     return registry
 
 
-def _try_connect_chrome(cfg, transcriber, notifier) -> tuple[Any, Any]:
-    """尝试连本地 Chrome CDP(cfg.puppeteer.debugging_port),成功返回 (driver, recorder)。
+def _try_connect_chrome(cfg, transcriber, notifier) -> Any:
+    """尝试连本地 Chrome CDP(cfg.puppeteer.debugging_port),成功返回 driver。
 
-    失败(端口未监听 / playwright 未装 / connect 异常)→ 返回 (None, None),
-    调用方继续用 None driver/recorder 走 ffmpeg 兜底。
+    F2-8:不再构造旧 Screen Recorder(已删)。新架构下,driver 仅给策略 ②
+    BrowserDriver.fetch_subtitle_via_browser 用;录屏兜底走策略 ③
+    adapter.fetch_via_recording(audio_factory + tab_recorder)。
+
+    失败(端口未监听 / playwright 未装 / connect 异常)→ 返回 None,
+    调用方继续走 ffmpeg 兜底。
     """
     import socket
 
@@ -231,46 +230,43 @@ def _try_connect_chrome(cfg, transcriber, notifier) -> tuple[Any, Any]:
             pass
     except (OSError, ConnectionRefusedError):
         logger.info("Chrome CDP 端口 %d 未监听,跳过自动连接", port)
-        return None, None
+        return None
 
     try:
         from vla.subtitle.browser_driver import BrowserDriver
-        from vla.subtitle.browser_record import BrowserRecorder
-        from vla.subtitle.probe_strategy import ProbeRegistry
-        from vla.subtitle.probes import (
-            CookieWarmupProbe,
-            HeadRequestProbe,
-            RefererCheckProbe,
-        )
     except ImportError as e:
-        logger.warning("导入 BrowserDriver/Recorder/Probe 失败:%s", e)
-        return None, None
+        logger.warning("导入 BrowserDriver 失败:%s", e)
+        return None
 
     try:
         driver = BrowserDriver(cfg)
         driver.connect()
-        probe_registry = default_probe_registry()
-        recorder = BrowserRecorder(
-            cfg, transcriber, notifier=notifier,
-            probe_registry=probe_registry,
-        )
         logger.info(
-            "✓ Chrome CDP 已连接 port=%d,driver + recorder 已就绪 "
-            "(probes=%s)",
-            port, [s.name for s in probe_registry.get_all_for("https://x")],
+            "✓ Chrome CDP 已连接 port=%d,driver 已就绪", port,
         )
-        return driver, recorder
+        return driver
     except Exception as e:
         logger.warning("Chrome CDP 连接失败 port=%d:%s", port, e)
-        return None, None
+        return None
 
 
-def default_probe_registry() -> ProbeRegistry:
+def default_probe_registry() -> Any:
     """组装默认的探针注册表(R-14 SSOT)。
 
+    F2-8:Probes 暂时不再被旧 Screen Recorder 装配触发(该类已删);
+    但 ProbeRegistry / 各 Probe 类仍保留,供后续 F2-14 ProbeStrategy 重构
+    接入 PlatformAdapter.prefetch_url(预探测 URL 是否能拿到 cookie / referer)。
+
     顺序 = head → referer → cookie(SSOT:R-14 plan task 3)。
-    新增平台探针 = 一个新类 + 一次 register(),不动 BrowserRecorder。
+    新增平台探针 = 一个新类 + 一次 register(),不动已有逻辑。
     """
+    from vla.subtitle.probe_strategy import ProbeRegistry
+    from vla.subtitle.probes import (
+        CookieWarmupProbe,
+        HeadRequestProbe,
+        RefererCheckProbe,
+    )
+
     reg = ProbeRegistry()
     reg.register(HeadRequestProbe())
     reg.register(RefererCheckProbe())
