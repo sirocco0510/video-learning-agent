@@ -19,3 +19,6 @@ notes/
 .DS_Store
 *.wav
 *.mp4
+
+# Spike / 一次性探针脚本(不进仓;git history 中 spike_*.py 仍可找回)
+scripts/
