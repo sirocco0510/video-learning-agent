@@ -30,9 +30,15 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vla.models import SubtitleResult
+
+if TYPE_CHECKING:
+    from vla.audio.source_factory import AudioSourceFactory
+    from vla.capture.screenshot_phase_controller import ScreenshotPhaseController
+    from vla.subtitle.tab_audio_recorder import TabAudioRecorder
+    from vla.transcribe.streaming import AudioTranscriber
 
 
 logger = logging.getLogger(__name__)
@@ -97,8 +103,15 @@ class FallbackAdapter:
         return text, {**(meta or {}), "platform": "fallback"}
 
     def fetch_via_recording(
-        self, driver: Any, url: str, duration_sec: int
+        self,
+        driver: Any,
+        url: str,
+        duration_sec: int,
+        **_kwargs: Any,
     ) -> tuple[str, dict] | None:
+        """F2-7:接受 **kwargs(由 strategy 传 4 deps)但忽略 —— FallbackAdapter
+        内部仍用旧 BrowserRecorder 路径,F2-8 才统一删。
+        """
         if self.recorder is None:
             return None
         # 优先复用策略 ② 已开过 URL 的 page(避免空白页录音频为静音)
@@ -174,6 +187,11 @@ class SubtitleStrategy:
         notifier: Any,
         plugin_status: Any,
         remind_timeout_sec: int,
+        *,
+        audio_factory: "AudioSourceFactory",
+        tab_recorder: "TabAudioRecorder",
+        transcriber: "AudioTranscriber",
+        screenshot_controller: "ScreenshotPhaseController | None" = None,
         plugin_name: str = "VideoTrans",
         log: logging.Logger | None = None,
         save_dir: Path | None = None,
@@ -182,10 +200,14 @@ class SubtitleStrategy:
         Args:
             registry: PlatformAdapterRegistry
             driver: BrowserDriver(可选)
-            recorder: BrowserRecorder(可选)
+            recorder: BrowserRecorder(F2-8 才删,目前仍需给 _try_browser 旧路径用)
             notifier: MacOSNotifier(必填 — FR-2.5/2.6 弹窗)
             plugin_status: PluginStatus(必填 — FR-2.9/2.10 session 单例)
             remind_timeout_sec: 弹窗超时(秒),默认 30
+            audio_factory: F2-7 必填 — 传给 adapter.fetch_via_recording path ①
+            tab_recriber: F2-7 必填 — 传给 adapter.fetch_via_recording path ②
+            transcriber: F2-7 必填 — 传给 adapter.fetch_via_recording
+            screenshot_controller: F2-7 可选 — FR-2.28 PHASE A/B/C/D 触发器
             plugin_name: 弹窗里展示的插件名
             log: logger
             save_dir: 录制目录
@@ -196,6 +218,11 @@ class SubtitleStrategy:
         self.notifier = notifier
         self.plugin_status = plugin_status
         self.remind_timeout_sec = remind_timeout_sec
+        # F2-7:4 deps 必填,get_subtitle 转发给 adapter.fetch_via_recording
+        self.audio_factory = audio_factory
+        self.tab_recorder = tab_recorder
+        self.transcriber = transcriber
+        self.screenshot_controller = screenshot_controller
         self.plugin_name = plugin_name
         self.log = log or logging.getLogger(__name__)
         self._save_dir = save_dir
@@ -239,14 +266,20 @@ class SubtitleStrategy:
             except Exception as e:
                 self.log.warning("策略 ② SubtitleResult 构造失败: %s", e)
 
-        # ③ Recording(ffmpeg 兜底)
+        # ③ Recording(F2-7:传 4 REQUIRED kwargs 给 base impl)
         try:
             result = adapter.fetch_via_recording(
-                self.driver, url, duration_sec
+                self.driver,
+                url,
+                duration_sec,
+                audio_factory=self.audio_factory,
+                tab_recorder=self.tab_recorder,
+                transcriber=self.transcriber,
+                screenshot_controller=self.screenshot_controller,
             )
             if result:
                 text, meta = result
-                self.log.info("✓ 策略 ③ 命中(whisper, ffmpeg)")
+                self.log.info("✓ 策略 ③ 命中(whisper)")
                 return SubtitleResult(
                     text=text, source="whisper", metadata=meta
                 )

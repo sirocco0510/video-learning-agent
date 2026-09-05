@@ -648,6 +648,11 @@ def _build_real_strategy(cfg, *, popup_response, recorder=None):
         remind_timeout_sec=cfg.browser_plugin.remind_timeout_sec,
         plugin_name=cfg.browser_plugin.name,
         save_dir=tmp_path_factory_mkdir(),
+        # F2-7:4 deps(测试用 MagicMock)
+        audio_factory=MagicMock(),
+        tab_recorder=MagicMock(),
+        transcriber=MagicMock(),
+        screenshot_controller=MagicMock(),
     )
     return strategy, notifier, plugin_status
 
@@ -835,6 +840,11 @@ def test_e2e_2h_session_single_popup_no_repeat_for_subsequent_videos(cfg, tmp_pa
         driver=None, recorder=None,
         notifier=notifier, plugin_status=plugin_status,
         remind_timeout_sec=cfg.browser_plugin.remind_timeout_sec,
+        # F2-7:4 deps(测试用 MagicMock)
+        audio_factory=MagicMock(),
+        tab_recorder=MagicMock(),
+        transcriber=MagicMock(),
+        screenshot_controller=MagicMock(),
     )
     provider1 = make_text_provider(
         strategy1, FakeSF(), tr, cfg,
@@ -853,6 +863,11 @@ def test_e2e_2h_session_single_popup_no_repeat_for_subsequent_videos(cfg, tmp_pa
         driver=None, recorder=None,
         notifier=notifier, plugin_status=plugin_status,
         remind_timeout_sec=cfg.browser_plugin.remind_timeout_sec,
+        # F2-7:4 deps(测试用 MagicMock)
+        audio_factory=MagicMock(),
+        tab_recorder=MagicMock(),
+        transcriber=MagicMock(),
+        screenshot_controller=MagicMock(),
     )
     provider2 = make_text_provider(
         strategy2, FakeSF(), tr, cfg,

@@ -51,7 +51,8 @@ class FakeAdapter:
             raise self.browser_exception
         return self.browser_return
 
-    def fetch_via_recording(self, driver, url: str, duration_sec: int):
+    def fetch_via_recording(self, driver, url: str, duration_sec: int, **_kwargs):
+        """F2-7:strategy 调 fetch_via_recording 时会传 4 deps kwargs,本 mock 忽略。"""
         self.recording_calls += 1
         if self.recording_exception:
             raise self.recording_exception
@@ -131,6 +132,10 @@ def strategy(adapter, driver, recorder, notifier, plugin_status, log) -> Subtitl
         plugin_status=plugin_status,
         remind_timeout_sec=30,
         log=log,
+        audio_factory=MagicMock(),       # F2-7 必填
+        tab_recorder=MagicMock(),        # F2-7 必填
+        transcriber=MagicMock(),         # F2-7 必填
+        screenshot_controller=MagicMock(),
     )
 
 
@@ -253,6 +258,10 @@ class TestFallbackAdapter:
             plugin_status=plugin_status,
             remind_timeout_sec=30,
             log=log,
+            audio_factory=MagicMock(),       # F2-7 必填
+            tab_recorder=MagicMock(),        # F2-7 必填
+            transcriber=MagicMock(),         # F2-7 必填
+            screenshot_controller=MagicMock(),
         )
 
     def test_uses_fallback_when_no_adapter(self, fb_strategy, driver, recorder):
@@ -436,9 +445,9 @@ class TestDurationSecPassed:
         recorded: list[int] = []
         original = adapter.fetch_via_recording
 
-        def spy(driver, u, d):
+        def spy(driver, u, d, **_kwargs):
             recorded.append(d)
-            return original(driver, u, d)
+            return original(driver, u, d, **_kwargs)
 
         adapter.fetch_via_recording = spy  # type: ignore[method-assign]
 
