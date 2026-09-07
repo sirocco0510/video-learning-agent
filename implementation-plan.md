@@ -1910,6 +1910,82 @@ Phase 9(E2E 测试)
 
 ---
 
+## F2-5:截图模块增强(2026-09-07 长视频 spike → 业务落地)
+
+### 必读
+- [[requirements#FR-2.28.2f]] 跨 context 找 B站 tab(P0)
+- [[requirements#FR-2.28.2g]] 长视频末尾 re-establish(P0)
+- [[requirements#FR-2.28.2h]] 通知可点 → 打开 Finder 目录(P1)
+- [[requirements#FR-2.28.2i]] 多帧模式 3 start + 3 end-window + 1 end-final(P1)
+- spike 原型:`/tmp/hover_screenshot_v4.py`(已验证 7 帧 + re-establish)
+
+### 文件清单
+- `src/vla/capture/tab_finder.py` (FR-2.28.2f 新建)
+- `src/vla/capture/reestablish.py` (FR-2.28.2g 新建)
+- `src/vla/ui/macos_notify.py` (FR-2.28.2h 扩展:`notify(... click_path=...)`)
+- `src/vla/capture/screenshot_phase_controller.py` (FR-2.28.2i 扩展 + `frame_role` 字段)
+- `config/vla.yaml` 新增 `screenshot.notify_clickable / multi_frame / frame_count_start / frame_count_end_window`
+- `tests/test_tab_finder.py` / `tests/test_reestablish.py` / `tests/test_macos_notify.py` (扩展) / `tests/test_screenshot_phase_controller.py` (扩展)
+
+### 子任务
+
+#### F2-5.1 跨 context 找 B站 tab(FR-2.28.2f,P0)
+- 新建 `tab_finder.py::find_bilibili_page(browser, bvid) -> Optional[Page]`
+- 遍历 `for ctx in browser.contexts: for p in ctx.pages: if bvid in p.url: return p`
+- **TDD 顺序**:`tests/test_tab_finder.py` 写 happy(单 context 单 tab 命中)+ 多 context 命中 + 找不到返回 None → RED → 实现 → GREEN
+- **接入点**:`ScreenshotPhaseController.phase_a_start` + `phase_b_then_c` 末尾 + `reestablish_video_page` 内部都先调一次
+
+#### F2-5.2 长视频末尾 re-establish(FR-2.28.2g,P0)
+- 新建 `reestablish.py::reestablish_video_page(page, browser, bvid) -> Page`
+- 5 步骤:① osascript 检测 frontmost → activate Chrome;② 重走 F2-5.1 find_bilibili_page;③ `page.bring_to_front() + window.focus()`;④ `video.requestFullscreen()`;⑤ `video.paused → play()`
+- **失败降级**:任一步异常 → log warning + 仍继续 screencapture + `partial_flags=["re_establish_failed"]`,返回原 page 兜底
+- **TDD 顺序**:`tests/test_reestablish.py` mock `osascript / page.evaluate` → 测试 5 步调用顺序 + 异常降级 → 实现 → GREEN
+- **接入点**:`ScreenshotPhaseController.phase_b_then_c` 的 PHASE C 调用前(短于 30s 视频可跳过)
+
+#### F2-5.3 通知可点(FR-2.28.2h,P1)
+- 扩展 `MacOSNotifier.notify(subtitle, message, click_path: Optional[Path] = None)`
+- click_path 给 → `terminal-notifier -open "file:///<dir>"`(brew macOS 通知 CLI,支持 click)
+- click_path 缺 / terminal-notifier 不在 / 未授权 → 降级 osascript 不可点 + 消息体附 `open "<dir>"` 命令
+- **截图前必调**:`dismiss_notifications(group)`(`terminal-notifier -remove <group>`)→ sleep(0.3) → screencapture,避免通知横幅被截进图
+- **配置**:`screenshot.notify_clickable: true`(默认 true)
+- **TDD 顺序**:`tests/test_macos_notify.py` 新增:`click_path + terminal-notifier 在 PATH → 调 terminal-notifier` / `click_path + terminal-notifier 不在 → 降级 osascript` / `click_path=None → 走老路径` / `dismiss_notifications(group) → 调 -remove`
+
+#### F2-5.4 多帧模式(FR-2.28.2i,P1)
+- 扩展 `ScreenshotPhaseController`:
+  - **start 阶段**:3 帧(cur≈0.0/0.6/1.5s,B站 `requestFullscreen()` 会触发 play,允许 ±0.5s)
+  - **end-window 阶段**:3 帧(cur≈duration-10/7/4,polling currentTime 达到目标值才截,允许 ±2s)
+  - **end-final 阶段**:1 帧(等 `ended` 事件,cur=duration)
+  - 短视频兼容:duration < 13s → end-window 退到 [duration*0.5, duration-1] 3 帧
+- `ScreenshotIndexEntry` 加 `frame_role: Literal["start", "end", "end_final"]` 字段
+- **文件名**:`<bvid>__<role>__t<TIMESTAMP>.png`,<TIMESTAMP> 用 `video.currentTime` 实际值
+- **失败降级**:任一帧失败 → log warning + 跳过 + 后续帧继续
+- **配置**:`screenshot.multi_frame: true`(默认 true;`false` 走老 single-frame 路径)
+- **TDD 顺序**:`tests/test_screenshot_phase_controller.py` 扩展:mock currentTime 序列(0.0→0.6→1.5→...→duration-10→duration-7→duration-4→duration) → 断言 7 次 `capture_full_screen` 调用 + 文件名 + index.jsonl 的 `frame_role` 字段 → 短视频兼容路径单独 case
+
+### 验收
+
+```bash
+# 1. 4 个新测试全过
+uv run pytest tests/test_tab_finder.py tests/test_reestablish.py \
+  tests/test_macos_notify.py tests/test_screenshot_phase_controller.py -v
+
+# 2. 整 suite 不回归
+uv run pytest -q
+
+# 3. doctor 通过(terminal-notifier 检测加入)
+uv run vla doctor
+
+# 4. 真实 spike 对照(可选,需 Chrome 启 debug)
+uv run python /tmp/hover_screenshot_v4.py
+# 期望:7 帧 PNG 落 tmp/screenshots-frames/,通知点击 → Finder 打开目录
+```
+
+### SSOT 同步
+- 本节 4 子任务 ↔ `requirements.md` FR-2.28.2f/2g/2h/2i 一一对应
+- 任何调整先改 `requirements.md` → 同步本节 → 改代码 → 跑验收
+
+---
+
 ## 进度跟踪
 
 每完成一个 Phase,在本文件追加状态:
