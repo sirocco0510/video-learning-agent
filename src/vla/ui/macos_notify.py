@@ -19,7 +19,7 @@ import logging
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 
 logger = logging.getLogger(__name__)
@@ -222,6 +222,71 @@ class MacOSNotifier:
         if result == "timeout":
             return "timeout"
         return "ok"
+
+    # ---------------- A 级阻塞弹窗(FR-6.6 失败上限) ----------------
+
+    def alert_blocking(
+        self,
+        title: str,
+        message: str,
+        detail_button: str | None = None,
+        detail_action: Callable[[], None] | None = None,
+        timeout_sec: int = 60,
+    ) -> None:
+        """FR-6.6:阻塞式弹窗(失败日志上限时使用)。
+
+        Args:
+            title: 弹窗标题
+            message: 弹窗正文
+            detail_button: 可选的第二按钮(如"查看 logs/");点击 → 触发 detail_action
+            detail_action: detail_button 被点击时调用(如打开 Finder)
+            timeout_sec: 超时秒数,默认 60s
+
+        与 ask_open_browser 同款:
+        - display dialog with giving up after N
+        - 用户点 detail_button → 调 detail_action
+        - 超时(gave up:true) → 静默返回,不调 action
+        - enabled=False → 直接返回,不调 osascript
+        """
+        if not self.enabled:
+            return
+
+        btn_ok = "OK"
+        buttons = (btn_ok,) + ((detail_button,) if detail_button else ())
+        btns_str = ", ".join(f'"{_escape(b)}"' for b in buttons)
+        script = (
+            f'display dialog "{_escape(message)}" '
+            f'with title "{_escape(title)}" '
+            f'buttons {{{btns_str}}} '
+            f'default button "{_escape(btn_ok)}" '
+            f'giving up after {timeout_sec}'
+        )
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=timeout_sec + 5, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            logger.info("⏱️ alert_blocking 超时未响应(%ds):%s", timeout_sec, title)
+            return
+
+        if result.returncode != 0:
+            logger.warning("alert_blocking rc=%s stderr=%s", result.returncode, result.stderr)
+            return
+
+        # 解析按钮名 — 用户点 detail_button 时触发 action
+        if detail_button and detail_action:
+            stdout = result.stdout or ""
+            # 找 "button returned:X" 行
+            for line in stdout.splitlines():
+                if line.startswith("button returned:"):
+                    clicked = line.split(":", 1)[1].strip()
+                    if clicked == detail_button:
+                        try:
+                            detail_action()
+                        except Exception as e:
+                            logger.warning("detail_action 失败: %s", e)
+                    break
 
 
 # ---------------- helpers ----------------

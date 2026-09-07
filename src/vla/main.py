@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from vla.config import VLAConfig
+from vla.log.failure_alert import FailureAlert
 from vla.models import QualityResult, VideoTask
 from vla.state.history import HistoryManager
 from vla.state.plugin_status import PluginStatus
@@ -64,6 +65,7 @@ class VideoLearningAgent:
         notifier: NotifierLike,
         text_provider: TextProvider,
         plugin_status: PluginStatus | None = None,
+        failure_alert: FailureAlert | None = None,
     ) -> None:
         self.cfg = cfg
         self.checker = checker
@@ -76,6 +78,13 @@ class VideoLearningAgent:
         self.plugin_status = plugin_status or PluginStatus()
         # transcribed_dir(Phase 7 读盘需要)
         self.transcribed_dir = log.transcribed_dir
+        # FR-6.6:失败上限弹窗(默认按 cfg.logging 构造)
+        self.failure_alert = failure_alert or FailureAlert(
+            threshold=cfg.logging.log_alert_threshold,
+            log=log,  # type: ignore[arg-type]  # duck typing:TranscriptionLog 满足 _TranscriptionLogLike
+            notifier=notifier,  # type: ignore[arg-type]  # MacOSNotifier 满足 _NotifierLike
+            enabled=cfg.logging.log_alert_enabled,
+        )
 
     # ---------------- 主流程 ----------------
 
@@ -142,6 +151,8 @@ class VideoLearningAgent:
                 task.id, task.title, str(task.url),
                 "text_provider", str(e),
             )
+            # FR-6.6:累计失败倍数边界检查
+            self.failure_alert.check_after_write()
             return None
 
         # 2. 质量门控
@@ -157,6 +168,8 @@ class VideoLearningAgent:
             self.log.log_quality_fail(
                 task.id, task.title, str(task.url), qr, text,
             )
+            # FR-6.6:累计失败倍数边界检查
+            self.failure_alert.check_after_write()
             # FR-2.11:插件字幕质量不过关 → 标 unavailable
             # (source 取值:"api"/"browser"/"whisper";浏览器源 = 插件字幕)
             if source == "browser":

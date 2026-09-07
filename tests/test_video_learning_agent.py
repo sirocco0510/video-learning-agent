@@ -409,3 +409,103 @@ class TestEmpty:
         stats = agent.run([])
 
         assert stats == {"processed": 0, "passed": 0, "failed": 0, "skipped": 0, "summarized": 0}
+
+
+# ---------------- FR-6.6 FailureAlert 集成 ----------------
+
+
+class TestFailureAlertIntegration:
+    """VideoLearningAgent 与 FailureAlert 集成 — 失败后 check_after_write 被调。"""
+
+    def test_quality_fail_triggers_check_after_write(self, cfg, monkeypatch):
+        """质量失败 → failure_alert.check_after_write() 被调(FR-6.6)。"""
+        from unittest.mock import MagicMock
+        from vla.log.failure_alert import FailureAlert
+
+        checker = StubChecker(passed=False, score=30, issues=["low_cps"])
+        notifier = StubNotifier()
+        summarizer = StubSummarizer()
+
+        # 用 mock FailureAlert 注入,验证 check_after_write 被调
+        alert = MagicMock(spec=FailureAlert)
+        log = TranscriptionLog(cfg.logging.log_dir)
+        history = HistoryManager(cfg.history.file)
+        quota = QuotaManager(cfg)
+        agent = VideoLearningAgent(
+            cfg=cfg,
+            checker=checker,
+            log=log,
+            history=history,
+            quota=quota,
+            summarizer=summarizer,
+            notifier=notifier,
+            text_provider=make_text_provider({"BV1": ("quality fail text", "whisper", None)}),
+            failure_alert=alert,
+        )
+
+        tasks = [make_task("BV1", "fail video")]
+        agent.run(tasks)
+
+        # 失败 1 次 → check_after_write 至少调 1 次(FR-6.6)
+        assert alert.check_after_write.call_count >= 1
+
+    def test_transcribe_fail_triggers_check_after_write(self, cfg):
+        """text_provider 抛异常(转写失败) → check_after_write 也被调。"""
+        from unittest.mock import MagicMock
+        from vla.log.failure_alert import FailureAlert
+
+        checker = StubChecker()
+        notifier = StubNotifier()
+        summarizer = StubSummarizer()
+
+        alert = MagicMock(spec=FailureAlert)
+
+        def failing_provider(task):
+            raise RuntimeError("network blip")
+
+        log = TranscriptionLog(cfg.logging.log_dir)
+        history = HistoryManager(cfg.history.file)
+        quota = QuotaManager(cfg)
+        agent = VideoLearningAgent(
+            cfg=cfg,
+            checker=checker,
+            log=log,
+            history=history,
+            quota=quota,
+            summarizer=summarizer,
+            notifier=notifier,
+            text_provider=failing_provider,
+            failure_alert=alert,
+        )
+
+        tasks = [make_task("BV1", "fail video")]
+        agent.run(tasks)
+
+        assert alert.check_after_write.call_count >= 1
+
+    def test_default_failure_alert_uses_config_threshold(self, cfg):
+        """不传 failure_alert → 默认按 cfg.logging.log_alert_threshold 构造。"""
+        checker = StubChecker()
+        notifier = StubNotifier()
+        summarizer = StubSummarizer()
+
+        agent = make_agent(
+            cfg, checker=checker, notifier=notifier, summarizer=summarizer,
+            text_provider=make_text_provider({}),
+        )
+        assert agent.failure_alert is not None
+        assert agent.failure_alert.threshold == cfg.logging.log_alert_threshold
+        assert agent.failure_alert.enabled == cfg.logging.log_alert_enabled
+
+    def test_log_alert_disabled_via_config(self, cfg):
+        """cfg.logging.log_alert_enabled=False → FailureAlert.enabled=False。"""
+        cfg.logging.log_alert_enabled = False
+        checker = StubChecker()
+        notifier = StubNotifier()
+        summarizer = StubSummarizer()
+
+        agent = make_agent(
+            cfg, checker=checker, notifier=notifier, summarizer=summarizer,
+            text_provider=make_text_provider({}),
+        )
+        assert agent.failure_alert.enabled is False
