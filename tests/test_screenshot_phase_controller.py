@@ -202,3 +202,197 @@ class TestDoctorPreWarm:
         ok, msg = _check_screenshot_tcc(fake_driver)
         assert ok is False
         assert "WARN" in msg or "权限" in msg
+
+
+# ---------------- FR-2.28.2i: 多帧模式(3 start + 3 end-window + 1 end-final) ----------------
+
+
+def _make_stateful_evaluate(time_sequence: list[float], ended: bool = True):
+    """构造 evaluate side_effect:按 script 内容区分。
+
+    - 含 'addEventListener' + 'ended' → 返回 ended (Promise resolve)
+    - 含 'currentTime' 且其后**无** ' = ' (read) → 返回 next(time_sequence)
+    - 含 'currentTime' 且其后**有** ' = ' (write/assign) → 返回 None
+    - 其它 action (pause/play/requestFullscreen) → 返回 None
+    """
+    queue = list(time_sequence)
+
+    async def fake_evaluate(script: str):
+        # ended 事件 Promise
+        if "addEventListener" in script and "ended" in script:
+            return ended
+        # currentTime 读/写 区分
+        if "currentTime" in script:
+            after = script.split("currentTime", 1)[1]
+            if "= " not in after:  # 读(?.,?.currentTime)
+                return queue.pop(0) if queue else 0.0
+            # 写(v.currentTime = 0)→ action
+        return None
+
+    return fake_evaluate
+
+
+class TestMultiFrame:
+    def test_index_entry_has_frame_role_field(self) -> None:
+        """ScreenshotIndexEntry 加 frame_role 字段。"""
+        entry = ScreenshotIndexEntry(
+            bvid="Bv1", start_ts=0.0, end_ts=0.0, duration_estimate=10,
+            partial_flags=[], frame_role="start",
+        )
+        assert entry.frame_role == "start"
+
+    def test_index_entry_default_frame_role_empty(self) -> None:
+        """frame_role 缺省 → '' (向后兼容老 phase_d 路径)。"""
+        entry = ScreenshotIndexEntry(
+            bvid="Bv1", start_ts=0.0, end_ts=0.0, duration_estimate=10,
+            partial_flags=[],
+        )
+        assert entry.frame_role == ""
+
+    def test_multi_frame_long_video_captures_7_frames(
+        self, mock_driver: MagicMock, mock_capture: MagicMock, mock_notifier: MagicMock
+    ) -> None:
+        """duration=300s (长视频) → start 3 + end-window 3 + end-final 1 = 7 帧。"""
+        # currentTime 序列:start 3 (0.0/0.6/1.5) + end-window 3 polls (290/293/296) + final 300
+        time_seq = [0.0, 0.6, 1.5, 290.0, 293.0, 296.0, 300.0]
+        mock_driver.evaluate = AsyncMock(side_effect=_make_stateful_evaluate(time_seq))
+
+        ctrl = ScreenshotPhaseController(mock_driver, mock_notifier, mock_capture)
+        result = asyncio.run(
+            ctrl.phase_multi_frame(mock_driver, audio_id="Bv1_long", bvid="Bv1_long",
+                                    duration_sec=300, poll_interval_sec=0.01)
+        )
+        # 7 capture_full_screen 调用
+        assert mock_capture.capture_full_screen.await_count == 7
+        # 返回 7 帧 (role, currentTime)
+        assert len(result) == 7
+        roles = [r[0] for r in result]
+        assert roles == ["start", "start", "start", "end", "end", "end", "end_final"]
+
+    def test_multi_frame_short_video_uses_adjusted_offsets(
+        self, mock_driver: MagicMock, mock_capture: MagicMock, mock_notifier: MagicMock
+    ) -> None:
+        """duration=10s (<13s) → end-window 退到 [duration*0.5, duration-1] = [5, 7, 9]。"""
+        # currentTime 序列:start 3 + end-window 3 polls (5/7/9) + final 10
+        time_seq = [0.0, 0.6, 1.5, 5.0, 7.0, 9.0, 10.0]
+        mock_driver.evaluate = AsyncMock(side_effect=_make_stateful_evaluate(time_seq))
+
+        ctrl = ScreenshotPhaseController(mock_driver, mock_notifier, mock_capture)
+        asyncio.run(
+            ctrl.phase_multi_frame(mock_driver, audio_id="Bv1_short", bvid="Bv1_short",
+                                    duration_sec=10, poll_interval_sec=0.01)
+        )
+        # 仍然 7 帧
+        assert mock_capture.capture_full_screen.await_count == 7
+
+    def test_multi_frame_writes_index_with_frame_role(
+        self, mock_driver: MagicMock, mock_capture: MagicMock, mock_notifier: MagicMock
+    ) -> None:
+        """每次 capture 后 write_index_entry 调,带 frame_role 字段。"""
+        time_seq = [0.0, 0.6, 1.5, 290.0, 293.0, 296.0, 300.0]
+        mock_driver.evaluate = AsyncMock(side_effect=_make_stateful_evaluate(time_seq))
+
+        ctrl = ScreenshotPhaseController(mock_driver, mock_notifier, mock_capture)
+        asyncio.run(
+            ctrl.phase_multi_frame(mock_driver, audio_id="Bv1_idx", bvid="Bv1_idx",
+                                    duration_sec=300, poll_interval_sec=0.01)
+        )
+        # 7 个 write_index_entry,frame_role 正确
+        write_calls = mock_capture.write_index_entry.call_args_list
+        assert len(write_calls) == 7
+        roles = [c.args[0].frame_role for c in write_calls]
+        assert roles[:3] == ["start", "start", "start"]
+        assert roles[3:6] == ["end", "end", "end"]
+        assert roles[6] == "end_final"
+
+    def test_multi_frame_filenames_contain_role_and_timestamp(
+        self, mock_driver: MagicMock, mock_capture: MagicMock, mock_notifier: MagicMock
+    ) -> None:
+        """文件名格式:<bvid>__<role>__t<timestamp>.png。"""
+        time_seq = [0.0, 0.6, 1.5, 290.0, 293.0, 296.0, 300.0]
+        mock_driver.evaluate = AsyncMock(side_effect=_make_stateful_evaluate(time_seq))
+
+        ctrl = ScreenshotPhaseController(mock_driver, mock_notifier, mock_capture)
+        asyncio.run(
+            ctrl.phase_multi_frame(mock_driver, audio_id="Bv1_fname", bvid="Bv1fname",
+                                    duration_sec=300, poll_interval_sec=0.01)
+        )
+        save_paths = [c.args[0] for c in mock_capture.capture_full_screen.await_args_list]
+        # start 帧 3 个
+        assert any("Bv1fname__start__t" in str(p) for p in save_paths)
+        # end 帧 3 个
+        assert any("Bv1fname__end__t" in str(p) for p in save_paths)
+        # end_final 帧 1 个
+        assert any("Bv1fname__end_final__t" in str(p) for p in save_paths)
+
+    def test_multi_frame_capture_failure_marks_partial(
+        self, mock_driver: MagicMock, mock_capture: MagicMock, mock_notifier: MagicMock
+    ) -> None:
+        """单帧 capture 失败 → partial_flags 含 'capture_failed',继续后续帧。"""
+        time_seq = [0.0, 0.6, 1.5, 290.0, 293.0, 296.0, 300.0]
+        mock_driver.evaluate = AsyncMock(side_effect=_make_stateful_evaluate(time_seq))
+        # 第 2 次 capture 失败
+        mock_capture.capture_full_screen = AsyncMock(
+            side_effect=[True, False, True, True, True, True, True]
+        )
+
+        ctrl = ScreenshotPhaseController(mock_driver, mock_notifier, mock_capture)
+        asyncio.run(
+            ctrl.phase_multi_frame(mock_driver, audio_id="Bv1_partial", bvid="Bv1p",
+                                    duration_sec=300, poll_interval_sec=0.01)
+        )
+        # 7 次 capture 尝试(失败的不抛)
+        assert mock_capture.capture_full_screen.await_count == 7
+        # 7 个 write_index_entry
+        write_calls = mock_capture.write_index_entry.call_args_list
+        assert len(write_calls) == 7
+        # 第 2 个(start idx 1)partial_flags 含 capture_failed
+        second_entry = write_calls[1].args[0]
+        assert "capture_failed" in second_entry.partial_flags
+        # 其它 start 帧 partial_flags=[]
+        assert write_calls[0].args[0].partial_flags == []
+        assert write_calls[2].args[0].partial_flags == []
+
+    def test_multi_frame_ended_timeout_continues(
+        self, mock_driver: MagicMock, mock_capture: MagicMock, mock_notifier: MagicMock
+    ) -> None:
+        """ended 事件超时 → 仍截 end_final 帧,不抛。"""
+        time_seq = [0.0, 0.6, 1.5, 290.0, 293.0, 296.0, 300.0]
+        # ended=False → 走 wait_for 超时分支
+        mock_driver.evaluate = AsyncMock(side_effect=_make_stateful_evaluate(time_seq, ended=False))
+
+        ctrl = ScreenshotPhaseController(mock_driver, mock_notifier, mock_capture)
+        # 用更短的超时参数减少测试时长
+        result = asyncio.run(
+            ctrl.phase_multi_frame(mock_driver, audio_id="Bv1_timeout", bvid="Bv1t",
+                                    duration_sec=300, poll_interval_sec=0.01,
+                                    ended_timeout_sec=0.5)
+        )
+        # 仍然 7 帧
+        assert mock_capture.capture_full_screen.await_count == 7
+        assert result[-1][0] == "end_final"
+
+    def test_multi_frame_does_not_raise_on_evaluate_failure(
+        self, mock_driver: MagicMock, mock_capture: MagicMock, mock_notifier: MagicMock
+    ) -> None:
+        """evaluate 任意一次抛 → log warning + 仍尝试后续帧。"""
+        # currentTime read 抛,其它 action 仍工作
+        async def fake_eval_with_failure(script: str):
+            if "currentTime" in script and "=" not in script:
+                raise Exception("network blip")
+            if "ended" in script and "addEventListener" in script:
+                return True
+            return None
+
+        mock_driver.evaluate = AsyncMock(side_effect=fake_eval_with_failure)
+
+        ctrl = ScreenshotPhaseController(mock_driver, mock_notifier, mock_capture)
+        # 不抛
+        result = asyncio.run(
+            ctrl.phase_multi_frame(mock_driver, audio_id="Bv1_blip", bvid="Bv1b",
+                                    duration_sec=300, poll_interval_sec=0.01,
+                                    poll_max_iterations=10)
+        )
+        # 7 帧仍尝试(capture_full_screen 仍被调 7 次)
+        assert mock_capture.capture_full_screen.await_count == 7
+        assert len(result) == 7
