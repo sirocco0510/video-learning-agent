@@ -2,19 +2,24 @@
 
 策略:
 - 全部走 osascript(B 级 `display notification` / A 级 `display dialog`)
-- 移除 terminal-notifier 路径(3.0+ 移除 -sender + 权限问题多)
+- terminal-notifier 仅在 click_path 给出时启用(FR-2.28.2h, brew macOS 通知 CLI,
+  支持 `-open file://...` 点击 → Finder;未授权时降级 osascript)
 - A 级 dialog 支持 `giving up after N` 超时(30s 等插件开启 / 60s 等录屏完成确认)
 - `enabled=False` 时静默:info/warning 不发,alert / ask_* 返回默认按钮
 
 ⚠️ 首次运行需授权:
   - osascript(系统级):系统设置 → 通知 → 允许终端 / osascript
   - dialog:系统设置 → 辅助功能
+  - terminal-notifier:首次调用会触发 macOS 通知授权弹窗
 """
 
 from __future__ import annotations
 
 import logging
+import shutil
 import subprocess
+from pathlib import Path
+from typing import Optional
 
 
 logger = logging.getLogger(__name__)
@@ -38,15 +43,72 @@ class MacOSNotifier:
 
     # ---------------- B 级非阻塞通知 ----------------
 
-    def info(self, title: str, message: str) -> None:
-        """B 级非阻塞通知:osascript display notification(banner 时长由 macOS 控制)。"""
+    def info(
+        self,
+        title: str,
+        message: str,
+        click_path: Optional[Path] = None,
+    ) -> None:
+        """B 级非阻塞通知。
+
+        Args:
+            title: 通知标题
+            message: 通知正文
+            click_path: 若给出,点击通知 → Finder 打开该文件所在目录
+                (用 `terminal-notifier -open "file:///<dir>"`,FR-2.28.2h)
+                terminal-notifier 不在 PATH / 调失败 → 降级 osascript 不可点,
+                消息体附 `open "<dir>"` 提示供手动复制。
+        """
         if not self.enabled:
             return
+
+        # 路径 1:可点通知 — terminal-notifier + click_path
+        if click_path is not None:
+            sent = _send_clickable_terminal_notifier(
+                title=title, message=message, click_path=click_path,
+            )
+            if sent:
+                return  # 成功
+            # 降级到 osascript(消息体附 open 命令)
+            target_dir = Path(click_path).parent.resolve()
+            fallback_msg = f"{message}\n\nopen \"{target_dir}\""
+            script = (
+                f'display notification "{_escape(fallback_msg)}" '
+                f'with title "{_escape(title)}"'
+            )
+            _run_osascript(script)
+            return
+
+        # 路径 2:不可点 — 老 osascript
         script = (
             f'display notification "{_escape(message)}" '
             f'with title "{_escape(title)}"'
         )
         _run_osascript(script)
+
+    def dismiss_notifications(self, group: str = "vla-screenshot") -> None:
+        """截图前清掉同 group 的通知横幅(best-effort)。
+
+        经验证:macOS 通知会渲染在 screen buffer,screencapture -x 会截进去。
+        在 screencapture 前 0.3s 调,避免截图里出现通知横幅。
+
+        只对 terminal-notifier 发出的通知有效(它支持 -remove <group>);
+        osascript 发出的无可寻址 group,只能等 banner 自动消失。
+
+        Args:
+            group: 通知 group 名(默认 "vla-screenshot", 须和 info 调用时一致)
+        """
+        if not self.enabled:
+            return
+        if shutil.which("terminal-notifier") is None:
+            return
+        try:
+            subprocess.run(
+                ["terminal-notifier", "-remove", group],
+                check=False, capture_output=True, text=True, timeout=2,
+            )
+        except Exception as e:
+            logger.warning("dismiss_notifications 失败: %s", e)
 
     def warning(self, title: str, message: str) -> None:
         """B 级非阻塞警告通知(同 info,语义区分)。"""
@@ -194,6 +256,37 @@ def _run_osascript(script: str, capture: bool = False) -> str | None:
     except subprocess.TimeoutExpired:
         logger.warning("osascript 进程超时")
         return None
+
+
+# ---------------- helpers(模块级,可被 mock) ----------------
+
+
+def _send_clickable_terminal_notifier(
+    title: str, message: str, click_path: Path,
+) -> bool:
+    """调 terminal-notifier -open file:///<dir>。
+
+    Returns:
+        True = 发送成功;False = terminal-notifier 不在 PATH 或 调失败
+    """
+    if shutil.which("terminal-notifier") is None:
+        return False
+    target_dir = Path(click_path).parent.resolve()
+    url = f"file://{target_dir}"
+    cmd = [
+        "terminal-notifier",
+        "-title", title,
+        "-message", message,
+        "-open", url,
+    ]
+    try:
+        subprocess.run(
+            cmd, check=False, capture_output=True, text=True, timeout=3,
+        )
+        return True
+    except Exception as e:
+        logger.warning("terminal-notifier 失败: %s", e)
+        return False
 
 
 def _display_dialog_with_timeout(

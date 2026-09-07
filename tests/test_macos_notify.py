@@ -4,7 +4,10 @@
 测试时用 enabled=False 跳过实际弹窗,只验证 API 契约 + escape + 异常处理。
 """
 
+import shutil
 import subprocess
+
+import pytest
 
 from vla.ui.macos_notify import (
     BROWSER_PLUGIN_TIMEOUT_SEC,
@@ -420,3 +423,249 @@ def test_display_dialog_returns_timeout_on_subprocess_timeout(monkeypatch):
     n = MacOSNotifier(enabled=True)
     result = n.ask_open_browser("https://x", "VideoTrans")
     assert result == "timeout"
+
+
+# ---------------- FR-2.28.2h: 可点通知 (click_path → Finder) ----------------
+
+
+def test_info_with_click_path_uses_terminal_notifier_when_available(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    """click_path + terminal-notifier 在 PATH → 调 terminal-notifier -open file:///<dir>。"""
+    import vla.ui.macos_notify as mod
+
+    monkeypatch.setattr(mod.shutil, "which", lambda x: "/opt/homebrew/bin/terminal-notifier")
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        class R:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+        return R()
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+
+    png_file = tmp_path / "frame.png"
+    png_file.write_text("x")
+    n = MacOSNotifier(enabled=True)
+    n.info("截图完成", "7 帧", click_path=png_file)
+
+    assert calls, "subprocess.run 没被调"
+    cmd = calls[0]
+    assert cmd[0] == "terminal-notifier"
+    assert "-title" in cmd and "截图完成" in cmd
+    assert "-message" in cmd and "7 帧" in cmd
+    assert "-open" in cmd
+    open_url_idx = cmd.index("-open") + 1
+    open_url = cmd[open_url_idx]
+    assert open_url.startswith("file://")
+    # url 应指向 click_path 父目录
+    assert str(tmp_path.resolve()) in open_url
+
+
+def test_info_with_click_path_falls_back_to_osascript_when_terminal_notifier_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    """click_path + terminal-notifier 不在 PATH → 降级 osascript 不可点通知。"""
+    import vla.ui.macos_notify as mod
+
+    monkeypatch.setattr(mod.shutil, "which", lambda x: None)
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        class R:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+        return R()
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+
+    png_file = tmp_path / "frame.png"
+    png_file.write_text("x")
+    n = MacOSNotifier(enabled=True)
+    n.info("截图完成", "7 帧", click_path=png_file)
+
+    # osascript 不可点通知被调
+    assert calls
+    assert calls[0][0] == "osascript"
+    assert "display notification" in calls[0][2]
+    # 消息体应附 `open "<dir>"` 提示(用户可手动复制)
+    assert "open" in calls[0][2]
+
+
+def test_info_with_click_path_falls_back_when_terminal_notifier_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    """terminal-notifier 在 PATH 但调失败 → 降级 osascript,不抛。"""
+    import vla.ui.macos_notify as mod
+
+    monkeypatch.setattr(mod.shutil, "which", lambda x: "/opt/homebrew/bin/terminal-notifier")
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        if cmd[0] == "terminal-notifier":
+            raise FileNotFoundError("not authorized")
+        class R:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+        return R()
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+
+    png_file = tmp_path / "frame.png"
+    png_file.write_text("x")
+    n = MacOSNotifier(enabled=True)
+    n.info("截图完成", "7 帧", click_path=png_file)  # 不抛
+
+    # 第二次调用是 osascript 兜底
+    assert len(calls) == 2
+    assert calls[1][0] == "osascript"
+
+
+def test_info_without_click_path_uses_osascript(monkeypatch: pytest.MonkeyPatch) -> None:
+    """click_path=None → 走老 osascript 路径,不调 terminal-notifier。"""
+    import vla.ui.macos_notify as mod
+
+    monkeypatch.setattr(mod.shutil, "which", lambda x: "/opt/homebrew/bin/terminal-notifier")
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        class R:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+        return R()
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+
+    n = MacOSNotifier(enabled=True)
+    n.info("启动", "请按 hotkey")
+
+    assert len(calls) == 1
+    assert calls[0][0] == "osascript"
+
+
+def test_info_with_click_path_noop_when_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    """enabled=False → click_path 也不发任何东西。"""
+    import vla.ui.macos_notify as mod
+
+    calls: list = []
+
+    def fake_run(*a, **kw):
+        calls.append(1)
+        class R:
+            returncode = 0
+        return R()
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+
+    png_file = tmp_path / "frame.png"
+    n = MacOSNotifier(enabled=False)
+    n.info("截图完成", "7 帧", click_path=png_file)
+
+    assert calls == []
+
+
+# ---------------- dismiss_notifications (screencapture 前清掉) ----------------
+
+
+def test_dismiss_calls_terminal_notifier_remove(monkeypatch: pytest.MonkeyPatch) -> None:
+    """dismiss_notifications → terminal-notifier -remove <group>。"""
+    import vla.ui.macos_notify as mod
+
+    monkeypatch.setattr(mod.shutil, "which", lambda x: "/opt/homebrew/bin/terminal-notifier")
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        class R:
+            returncode = 0
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+
+    n = MacOSNotifier(enabled=True)
+    n.dismiss_notifications("vla-screenshot")
+
+    assert calls
+    cmd = calls[0]
+    assert cmd[0] == "terminal-notifier"
+    assert "-remove" in cmd
+    remove_idx = cmd.index("-remove") + 1
+    assert cmd[remove_idx] == "vla-screenshot"
+
+
+def test_dismiss_skips_when_terminal_notifier_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """terminal-notifier 不在 PATH → dismiss 静默不调。"""
+    import vla.ui.macos_notify as mod
+
+    monkeypatch.setattr(mod.shutil, "which", lambda x: None)
+
+    calls: list = []
+
+    def fake_run(*a, **kw):
+        calls.append(1)
+        class R:
+            returncode = 0
+        return R()
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+
+    n = MacOSNotifier(enabled=True)
+    n.dismiss_notifications()  # 不抛,不调
+
+    assert calls == []
+
+
+def test_dismiss_does_not_raise_on_subprocess_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """terminal-notifier 调失败 → dismiss 静默不抛。"""
+    import vla.ui.macos_notify as mod
+
+    monkeypatch.setattr(mod.shutil, "which", lambda x: "/opt/homebrew/bin/terminal-notifier")
+
+    def fake_run(*a, **kw):
+        raise FileNotFoundError("boom")
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+
+    n = MacOSNotifier(enabled=True)
+    n.dismiss_notifications()  # 不抛
+
+
+def test_dismiss_noop_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """enabled=False → dismiss 静默不调。"""
+    import vla.ui.macos_notify as mod
+
+    calls: list = []
+
+    def fake_run(*a, **kw):
+        calls.append(1)
+        class R:
+            returncode = 0
+        return R()
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+
+    n = MacOSNotifier(enabled=False)
+    n.dismiss_notifications()
+
+    assert calls == []

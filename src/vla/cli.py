@@ -78,6 +78,21 @@ def _parse_env_value(text: str, key: str) -> str | None:
     return value
 
 
+def _check_terminal_notifier() -> tuple[bool, str]:
+    """FR-2.28.2h:检测 terminal-notifier(可点通知 CLI,brew 装)。
+
+    Returns (ok, message)。ok=False 时 caller 只 print warning,不 raise。
+    不在 PATH 不阻塞 doctor(降级到 osascript 不可点通知)。
+    """
+    tn = shutil.which("terminal-notifier")
+    if tn:
+        return True, f"{tn}(截图完成通知可点击 → Finder)"
+    return False, (
+        "未安装(FR-2.28.2h 可点通知不可用,将降级为 osascript 不可点通知;"
+        "安装:brew install terminal-notifier)"
+    )
+
+
 def _check_screenshot_tcc(driver: Any) -> tuple[bool, str]:
     """FR-2.28.2c `vla doctor` pre-warm:Q8=TCC 拒绝 → warn+continue,exit 0。
 
@@ -201,6 +216,12 @@ def doctor(
     # audio_source_factory 单独走 WARN-only:probe 失败不阻塞 doctor
     audio_mark = "WARN" if audio_warn else "OK"
     typer.echo(f"[{audio_mark}] audio_source_factory: {audio_detail}")
+
+    # FR-2.28.2h: terminal-notifier(可点通知 CLI)检测 — WARN-only
+    # 不在 PATH 不阻塞 doctor(降级到 osascript 不可点通知)
+    tn_ok, tn_msg = _check_terminal_notifier()
+    tn_mark = "OK" if tn_ok else "WARN"
+    typer.echo(f"[{tn_mark}] terminal-notifier: {tn_msg}")
 
     if not all_ok:
         raise typer.Exit(code=1)
