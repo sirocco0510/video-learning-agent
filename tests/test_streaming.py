@@ -381,3 +381,257 @@ class TestAudioFileLifecycle:
             transcriber.transcribe(video_file)
 
             assert audio_path.exists()
+
+
+# ---------------- FR-3.8 / FR-2.15c:落盘 transcript.txt + cleaned.txt ----------------
+
+
+class TestTranscriptAndCleanedWrite:
+    """FR-3.8:转写后写 logs/transcripts/<stem>.transcript.txt + .cleaned.txt。"""
+
+    def test_transcribe_writes_transcript_txt(
+        self, tmp_path, mock_model
+    ) -> None:
+        """原始 whisper 输出 → <stem>.transcript.txt(总写,不管 postprocess)。"""
+        cfg = VLAConfig.model_validate({
+            "storage": {"tmp_dir": "./tmp", "auto_cleanup_on_pass": True},
+            "whisper": {
+                "model": "small", "language": "zh", "segment_seconds": 30, "compute_type": "int8",
+                "postprocess_enabled": False,
+            },
+            "video_source": {
+                "prefer_download": True, "download": {"format": "worst"},
+                "record": {"enabled": True, "screen_index": 2, "fps": 30, "crf": 28, "audio_input": "0", "preset": "ultrafast"},
+            },
+            "quality_check": {"enabled": True, "model": "x", "min_score_to_pass": 70, "min_char_per_second": 1.0, "max_char_per_second": 15.0, "refine_enabled": False},
+            "browser_plugin": {"name": "VideoTrans", "enabled": True, "remind_timeout_sec": 30, "plugin_paths": [], "record_hotkey": "Alt+Shift+R", "record_download_timeout_sec": 5, "record_pre_grace_sec": 0, "record_post_buffer_sec": 0},
+            "summary": {"model": "x", "target_words_min": 500, "target_words_max": 800, "notes_file": "./n.md", "cross_video_dedup": True, "trigger_mode": "quota", "notes_section_header": "## x"},
+            "quota": {"summary_threshold_sec": 21600, "on_exhausted": "stop_session"},
+            "history": {"file": str(tmp_path / "h.jsonl")},
+            "logging": {"log_dir": str(tmp_path / "logs"), "notify_on_fail": False, "log_alert_threshold": 50, "log_alert_enabled": True},
+            "llm_client": {"provider": "openai", "api_key_env": "OPENAI_API_KEY", "base_url_env": "OPENAI_BASE_URL", "refine_model": "x"},
+        })
+        cfg.logging.log_dir = tmp_path / "logs"
+        video_file = tmp_path / "test.mp4"
+        video_file.write_bytes(b"x")
+        transcriber = StreamingTranscriber(cfg, model=mock_model)
+
+        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
+            mock_run.return_value = FakeCompletedProcess(returncode=0)
+            video_file.with_suffix(".wav").write_bytes(b"fake wav")
+
+            transcriber.transcribe(video_file)
+
+            transcript_path = tmp_path / "logs" / "transcripts" / f"{video_file.stem}.transcript.txt"
+            assert transcript_path.exists()
+            assert "你好" in transcript_path.read_text(encoding="utf-8")
+            assert "世界" in transcript_path.read_text(encoding="utf-8")
+
+    def test_transcribe_with_postprocess_writes_cleaned_txt(
+        self, tmp_path, mock_model
+    ) -> None:
+        """postprocess_enabled=True → 额外写 .cleaned.txt。"""
+        cfg = VLAConfig.model_validate({
+            "storage": {"tmp_dir": "./tmp", "auto_cleanup_on_pass": True},
+            "whisper": {
+                "model": "small", "language": "zh", "segment_seconds": 30, "compute_type": "int8",
+                "postprocess_enabled": True,
+                "postprocess_min_line_chars": 8,
+                "postprocess_min_overlap_chars": 6,
+            },
+            "video_source": {
+                "prefer_download": True, "download": {"format": "worst"},
+                "record": {"enabled": True, "screen_index": 2, "fps": 30, "crf": 28, "audio_input": "0", "preset": "ultrafast"},
+            },
+            "quality_check": {"enabled": True, "model": "x", "min_score_to_pass": 70, "min_char_per_second": 1.0, "max_char_per_second": 15.0, "refine_enabled": False},
+            "browser_plugin": {"name": "VideoTrans", "enabled": True, "remind_timeout_sec": 30, "plugin_paths": [], "record_hotkey": "Alt+Shift+R", "record_download_timeout_sec": 5, "record_pre_grace_sec": 0, "record_post_buffer_sec": 0},
+            "summary": {"model": "x", "target_words_min": 500, "target_words_max": 800, "notes_file": "./n.md", "cross_video_dedup": True, "trigger_mode": "quota", "notes_section_header": "## x"},
+            "quota": {"summary_threshold_sec": 21600, "on_exhausted": "stop_session"},
+            "history": {"file": str(tmp_path / "h.jsonl")},
+            "logging": {"log_dir": str(tmp_path / "logs"), "notify_on_fail": False, "log_alert_threshold": 50, "log_alert_enabled": True},
+            "llm_client": {"provider": "openai", "api_key_env": "OPENAI_API_KEY", "base_url_env": "OPENAI_BASE_URL", "refine_model": "x"},
+        })
+        cfg.logging.log_dir = tmp_path / "logs"
+        video_file = tmp_path / "test.mp4"
+        video_file.write_bytes(b"x")
+        transcriber = StreamingTranscriber(cfg, model=mock_model)
+
+        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
+            mock_run.return_value = FakeCompletedProcess(returncode=0)
+            video_file.with_suffix(".wav").write_bytes(b"fake wav")
+
+            transcriber.transcribe(video_file)
+
+        transcripts_dir = tmp_path / "logs" / "transcripts"
+        assert (transcripts_dir / "test.transcript.txt").exists()
+        assert (transcripts_dir / "test.cleaned.txt").exists()
+
+
+# ---------------- FR-3.9 / FR-2.15c Level 4:SubtitleRefiner 串接 ----------------
+
+
+class TestRefinerIntegration:
+    """FR-3.9:可选云端 LLM 字幕语义清理(refine_enabled=true 时启用)。"""
+
+    def _make_cfg_with_refiner(
+        self, tmp_path: Path, refine_enabled: bool
+    ) -> VLAConfig:
+        return VLAConfig.model_validate({
+            "storage": {"tmp_dir": "./tmp", "auto_cleanup_on_pass": True},
+            "whisper": {
+                "model": "small", "language": "zh", "segment_seconds": 30, "compute_type": "int8",
+                "postprocess_enabled": True,
+            },
+            "video_source": {
+                "prefer_download": True, "download": {"format": "worst"},
+                "record": {"enabled": True, "screen_index": 2, "fps": 30, "crf": 28, "audio_input": "0", "preset": "ultrafast"},
+            },
+            "quality_check": {
+                "enabled": True, "model": "x", "min_score_to_pass": 70,
+                "min_char_per_second": 1.0, "max_char_per_second": 15.0,
+                "refine_enabled": refine_enabled,
+                "refine_max_chars": 6000,
+            },
+            "browser_plugin": {"name": "VideoTrans", "enabled": True, "remind_timeout_sec": 30, "plugin_paths": [], "record_hotkey": "Alt+Shift+R", "record_download_timeout_sec": 5, "record_pre_grace_sec": 0, "record_post_buffer_sec": 0},
+            "summary": {"model": "x", "target_words_min": 500, "target_words_max": 800, "notes_file": "./n.md", "cross_video_dedup": True, "trigger_mode": "quota", "notes_section_header": "## x"},
+            "quota": {"summary_threshold_sec": 21600, "on_exhausted": "stop_session"},
+            "history": {"file": str(tmp_path / "h.jsonl")},
+            "logging": {"log_dir": str(tmp_path / "logs"), "notify_on_fail": False, "log_alert_threshold": 50, "log_alert_enabled": True},
+            "llm_client": {"provider": "openai", "api_key_env": "OPENAI_API_KEY", "base_url_env": "OPENAI_BASE_URL", "refine_model": "refine-x"},
+        })
+
+    def _fake_segments(self, *texts: str):
+        segs = []
+        for t in texts:
+            s = MagicMock()
+            s.text = t
+            segs.append(s)
+        return segs
+
+    def test_refine_disabled_no_refined_txt(self, tmp_path, mock_model) -> None:
+        """refine_enabled=False → 不写 .refined.txt,返回 cleaned_text。"""
+        cfg = self._make_cfg_with_refiner(tmp_path, refine_enabled=False)
+        cfg.logging.log_dir = tmp_path / "logs"
+        video_file = tmp_path / "BV1disabled.mp4"
+        video_file.write_bytes(b"x")
+        # mock_model 默认 "你好" + "世界",clean_transcript 后是 "你好 世界" 这种
+
+        transcriber = StreamingTranscriber(cfg, model=mock_model)
+        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
+            mock_run.return_value = FakeCompletedProcess(returncode=0)
+            video_file.with_suffix(".wav").write_bytes(b"fake wav")
+
+            result = transcriber.transcribe(video_file)
+
+        transcripts_dir = tmp_path / "logs" / "transcripts"
+        assert not (transcripts_dir / "BV1disabled.refined.txt").exists()
+        # 返回的是 cleaned_text(非 refined)
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+    def test_refine_enabled_writes_refined_txt_and_returns_refined(
+        self, tmp_path, mock_model
+    ) -> None:
+        """refine_enabled=True + 注入 refiner → 写 .refined.txt + 返回 refined_text。"""
+        from vla.quality.refiner import RefinementResult, SubtitleRefiner
+
+        cfg = self._make_cfg_with_refiner(tmp_path, refine_enabled=True)
+        cfg.logging.log_dir = tmp_path / "logs"
+        video_file = tmp_path / "BV1refine.mp4"
+        video_file.write_bytes(b"x")
+
+        # mock SubtitleRefiner.refine → 返回固定 cleaned_text
+        refined_text = "你好世界。(refined)"
+        fake_result = RefinementResult(
+            original_text="raw cleaned",
+            cleaned_text=refined_text,
+            corrections=[],
+            notes="ok",
+            model="refine-x",
+        )
+        mock_refiner = MagicMock(spec=SubtitleRefiner)
+        mock_refiner.enabled = True
+        mock_refiner.refine.return_value = fake_result
+
+        transcriber = StreamingTranscriber(cfg, model=mock_model, refiner=mock_refiner)
+        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
+            mock_run.return_value = FakeCompletedProcess(returncode=0)
+            video_file.with_suffix(".wav").write_bytes(b"fake wav")
+
+            result = transcriber.transcribe(video_file)
+
+        transcripts_dir = tmp_path / "logs" / "transcripts"
+        # refined.txt 写了
+        refined_path = transcripts_dir / "BV1refine.refined.txt"
+        assert refined_path.exists()
+        assert refined_text in refined_path.read_text(encoding="utf-8")
+        # cleaned.txt 也保留供审计
+        assert (transcripts_dir / "BV1refine.cleaned.txt").exists()
+        # transcript.txt 也保留
+        assert (transcripts_dir / "BV1refine.transcript.txt").exists()
+        # 返回 refined_text
+        assert result == refined_text
+        # refiner.refine 被调
+        mock_refiner.refine.assert_called_once()
+
+    def test_refine_failure_falls_back_to_cleaned(self, tmp_path, mock_model) -> None:
+        """refiner 抛异常 → 退化用 cleaned_text,不抛。"""
+        from vla.quality.refiner import RefinementResult, SubtitleRefiner
+
+        cfg = self._make_cfg_with_refiner(tmp_path, refine_enabled=True)
+        cfg.logging.log_dir = tmp_path / "logs"
+        video_file = tmp_path / "BV1fail.mp4"
+        video_file.write_bytes(b"x")
+
+        # refiner 返回 cleaned_text == original → 视为 fallback
+        fallback_result = RefinementResult(
+            original_text="cleaned原文本",
+            cleaned_text="cleaned原文本",
+            corrections=[],
+            notes="LLM 调用失败:RuntimeError",
+            model="refine-x",
+        )
+        mock_refiner = MagicMock(spec=SubtitleRefiner)
+        mock_refiner.enabled = True
+        mock_refiner.refine.return_value = fallback_result
+
+        transcriber = StreamingTranscriber(cfg, model=mock_model, refiner=mock_refiner)
+        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
+            mock_run.return_value = FakeCompletedProcess(returncode=0)
+            video_file.with_suffix(".wav").write_bytes(b"fake wav")
+
+            # 不抛
+            result = transcriber.transcribe(video_file)
+
+        transcripts_dir = tmp_path / "logs" / "transcripts"
+        # refined.txt 仍写(fallback 也落盘供审计)
+        assert (transcripts_dir / "BV1fail.refined.txt").exists()
+        # 返回的是 cleaned_text(fallback 后)
+        assert "cleaned原文本" in result
+        # refined.txt 内容含 notes 标记失败
+        refined_content = (transcripts_dir / "BV1fail.refined.txt").read_text(encoding="utf-8")
+        assert "LLM 调用失败" in refined_content
+
+    def test_refine_enabled_but_no_refiner_injected_skips_gracefully(
+        self, tmp_path, mock_model
+    ) -> None:
+        """refine_enabled=True 但 refiner=None → 跳过(不抛),退化用 cleaned。"""
+        cfg = self._make_cfg_with_refiner(tmp_path, refine_enabled=True)
+        cfg.logging.log_dir = tmp_path / "logs"
+        video_file = tmp_path / "BV1norfnr.mp4"
+        video_file.write_bytes(b"x")
+
+        transcriber = StreamingTranscriber(cfg, model=mock_model, refiner=None)
+        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
+            mock_run.return_value = FakeCompletedProcess(returncode=0)
+            video_file.with_suffix(".wav").write_bytes(b"fake wav")
+
+            # 不抛
+            result = transcriber.transcribe(video_file)
+
+        transcripts_dir = tmp_path / "logs" / "transcripts"
+        # refined.txt 不写(没注入 refiner,跳过整段)
+        assert not (transcripts_dir / "BV1norfnr.refined.txt").exists()
+        # 返回 cleaned 文本
+        assert isinstance(result, str)
+        assert len(result) > 0

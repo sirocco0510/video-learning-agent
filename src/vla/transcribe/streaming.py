@@ -11,6 +11,11 @@
 - ffmpeg 子进程抽音轨(16kHz mono PCM s16le)
 - faster-whisper VAD 过滤静音段(提速)
 - 允许注入 model(测试用)
+- 落盘三份(FR-3.8/3.9):
+  * <stem>.transcript.txt — Whisper 原始(总写)
+  * <stem>.cleaned.txt   — Level 1 本地清理后
+  * <stem>.refined.txt   — Level 4 云端 LLM 后(可选,refine_enabled=true 时)
+  返回 refined_text(refined 优先,fallback cleaned,再 fallback transcript)
 """
 
 from __future__ import annotations
@@ -48,11 +53,11 @@ class AudioTranscriber(Protocol):
 
 
 class StreamingTranscriber:
-    """faster-whisper 流式转写器(FR-3.1/3.2/3.3/3.4/3.5)。
+    """faster-whisper 流式转写器(FR-3.1/3.2/3.3/3.4/3.5/3.8/3.9)。
 
     用法:
-        transcriber = StreamingTranscriber(config)
-        text = transcriber.transcribe(video_path)  # 返回字幕文本
+        transcriber = StreamingTranscriber(config, refiner=refiner)
+        text = transcriber.transcribe(video_path)  # 返回 refined 或 cleaned 文本
         # ... 质量检查 ...
         StreamingTranscriber.cleanup(audio_path)   # 通过后再删
     """
@@ -61,11 +66,14 @@ class StreamingTranscriber:
         self,
         config: VLAConfig,
         model: WhisperModel | None = None,
+        refiner: "SubtitleRefinerLike | None" = None,
     ) -> None:
         self.config = config
         self._model = model  # None = 懒加载
         self._model_size = config.whisper.model
         self._compute_type = config.whisper.compute_type
+        # FR-3.9:可选 SubtitleRefiner(默认 None → skip Level 4)
+        self.refiner = refiner
 
     @property
     def model(self) -> WhisperModel:
@@ -86,11 +94,14 @@ class StreamingTranscriber:
     def transcribe(self, video_path: Path) -> str:
         """把视频文件转写成字幕文本。
 
-        流程:
+        流程(FR-3.1/3.2/3.3/3.8/3.9):
         1. ffmpeg 抽音轨(16kHz 单声道 PCM s16le)
         2. 删除视频源(FR-3.3 边转写边清理 — 音频已就绪,原片冗余)
         3. faster-whisper 转写(beam_size=5, vad_filter=True)
-        4. 返回 \\n 拼接的 segments 文本
+        4. 写 <stem>.transcript.txt(Whisper 原始,FR-3.8)
+        5. 本地后处理(若 enabled)→ 写 <stem>.cleaned.txt(FR-3.8)
+        6. 云端 LLM 整理(若 refine_enabled 且 refiner 注入)→ 写 <stem>.refined.txt(FR-3.9)
+        7. 当作 fallback 链返回:refined > cleaned > transcript
 
         音频文件保留(由 cleanup() 在质量检查通过后删除;失败路径 FR-3.5
         也保留供排查)。
@@ -114,24 +125,86 @@ class StreamingTranscriber:
             beam_size=5,
             vad_filter=True,
         )
-        text = "\n".join(seg.text for seg in segments)
+        raw_text = "\n".join(seg.text for seg in segments)
         logger.info(
             "转写完成: audio=%s language_prob=%.2f segments_chars=%d",
             audio_path.name,
             getattr(info, "language_probability", 0.0),
-            len(text),
+            len(raw_text),
         )
 
-        # 2026-09-02 Level 3 步骤 1:本地后处理(碎片合并 + 重复段去重)
+        # FR-3.8: 写 transcript.txt(原始,总写)
+        transcripts_dir = self.config.logging.log_dir / "transcripts"
+        transcripts_dir.mkdir(parents=True, exist_ok=True)
+        stem = video_path.stem
+        transcript_path = transcripts_dir / f"{stem}.transcript.txt"
+        transcript_path.write_text(raw_text, encoding="utf-8")
+        logger.info("📄 写 transcript.txt: %s", transcript_path)
+
+        # FR-3.8: Level 1 本地清理 → cleaned.txt
+        cleaned_text = raw_text
         if self.config.whisper.postprocess_enabled:
-            text, stats = clean_transcript(text)
+            cleaned_text, stats = clean_transcript(raw_text)
             logger.info(
                 "🧹 后处理生效: %d→%d 字符 (压缩 %.0f%%), %d→%d 行",
                 stats.original_chars, stats.final_chars,
                 stats.char_reduction_ratio * 100,
                 stats.original_lines, stats.final_lines,
             )
-        return text
+            cleaned_path = transcripts_dir / f"{stem}.cleaned.txt"
+            cleaned_path.write_text(cleaned_text, encoding="utf-8")
+            logger.info("📄 写 cleaned.txt: %s", cleaned_path)
+
+        # FR-3.9: Level 4 云端 LLM 可选 → refined.txt + 失败 fallback
+        refined_text = self._maybe_refine(cleaned_text, transcripts_dir, stem)
+        if refined_text is not None:
+            return refined_text
+        # fallback 链:refined 缺失 → cleaned → transcript(理论上 cleaned 已含)
+        return cleaned_text or raw_text
+
+    def _maybe_refine(
+        self,
+        cleaned_text: str,
+        transcripts_dir: Path,
+        stem: str,
+    ) -> str | None:
+        """FR-3.9:可选 Level 4 云端 LLM 字幕语义整理。
+
+        Returns:
+            refined_text (成功 → 含 cleaned_text 或修正后),或 None(未启用 / 失败)
+        """
+        if not self.config.quality_check.refine_enabled:
+            return None
+        if self.refiner is None:
+            logger.warning(
+                "⚠️ refine_enabled=true 但未注入 SubtitleRefiner,跳过 Level 4 云端清理"
+            )
+            return None
+
+        try:
+            result = self.refiner.refine(cleaned_text, title=stem)
+        except Exception as e:
+            logger.warning("⚠️ SubtitleRefiner.refine 抛异常,fallback cleaned_text: %s", e)
+            return None
+
+        refined_path = transcripts_dir / f"{stem}.refined.txt"
+        # 失败 fallback 标记(result.notes 含失败原因时)
+        try:
+            refined_path.write_text(
+                result.cleaned_text
+                + (f"\n\n# notes: {result.notes}" if result.notes else ""),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.warning("⚠️ 写 refined.txt 失败:%s", e)
+            return None
+
+        # 若 LLM 返回了原 cleaned_text(无变化),仍算成功(走 refined 路径)
+        logger.info(
+            "📄 写 refined.txt: %s (%d 字符, model=%s)",
+            refined_path, len(result.cleaned_text), result.model,
+        )
+        return result.cleaned_text
 
     # ---------------- ffmpeg helper ----------------
 
@@ -179,3 +252,31 @@ class StreamingTranscriber:
                     logger.info("🗑️ 清理音频: %s", p)
             except OSError as e:
                 logger.warning("清理音频失败: %s %s", p, e)
+
+
+# ---------------- Protocol(类型注解 + duck typing) ----------------
+
+
+class SubtitleRefinerLike(Protocol):
+    """SubtitleRefiner 子集(避免 streaming.py 反向依赖具体类)。
+
+    streaming.py 只用 .refine(text, title=) → RefinementResult.cleaned_text,
+    所以 Protocol 描述这一段接口就够。
+    """
+
+    enabled: bool
+
+    def refine(self, text: str, title: str = "") -> "RefinementResultLike": ...
+
+
+class RefinementResultLike(Protocol):
+    """RefinementResult 子集(同上)。"""
+
+    @property
+    def cleaned_text(self) -> str: ...
+
+    @property
+    def notes(self) -> str: ...
+
+    @property
+    def model(self) -> str: ...

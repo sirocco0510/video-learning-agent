@@ -14,6 +14,7 @@ tmp/
 logs/*.csv
 logs/*.jsonl
 logs/failed_texts/
+logs/transcripts/
 notes/
 .env
 .DS_Store
