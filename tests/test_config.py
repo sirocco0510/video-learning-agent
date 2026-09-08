@@ -57,6 +57,9 @@ class TestFromYaml:
         assert cfg.summary.target_words_min == 500
         assert cfg.summary.target_words_max == 800
 
+        # v2 (2026-09-08):popup 显示用短名 "Tab Audio Recorder"
+        assert cfg.browser_plugin.name == "Tab Audio Recorder"
+
         # llm_client 配置字段名(不是值)
         assert cfg.llm_client.provider == "minimax"
         assert cfg.llm_client.api_key_env == "OPENAI_API_KEY"
@@ -244,3 +247,41 @@ llm:
         assert cfg.llm.quality_model == "new-quality-model"
         assert cfg.llm.refine_model == "new-refine-model"
         assert cfg.llm.summary_model == "new-summary-model"
+
+
+# ---------------- F2-10 (2026-09-08): audio.downloads_dir 字段 ----------------
+
+
+class TestAudioDownloadsDir:
+    """F2-10:cfg.audio.downloads_dir 给 strategy 扫今天 YYYY-MM-DD/ 用。
+
+    字段是 Optional(老 YAML 无 audio 块也能加载,strategy 用 cfg is None / audio is None
+    防御性降级)。新 YAML 写 audio.downloads_dir 时必须解析成 Path。
+    """
+
+    def test_audio_block_optional_in_yaml(self, tmp_path):
+        """老 YAML(无 audio 块)→ cfg.audio = None(strategy 降级到 ffmpeg 兜底)。"""
+        cfg_path = tmp_path / "vla.yaml"
+        cfg_path.write_text(SAMPLE_YAML)
+        cfg = VLAConfig.from_yaml(cfg_path)
+
+        assert cfg.audio is None
+
+    def test_audio_downloads_dir_loaded(self, tmp_path):
+        """audio.downloads_dir 必须解析成 Path(用户拖 webm 的根目录)。"""
+        cfg_text = SAMPLE_YAML + """
+audio:
+  downloads_dir: "./tmp/audio_downloads"
+"""
+        cfg_path = tmp_path / "vla.yaml"
+        cfg_path.write_text(cfg_text)
+        cfg = VLAConfig.from_yaml(cfg_path)
+
+        assert cfg.audio is not None
+        assert cfg.audio.downloads_dir == Path("./tmp/audio_downloads")
+
+    def test_real_config_has_audio_block(self):
+        """项目自带的 config/vla.yaml 应该有 audio 块(F2-10 已落地配置)。"""
+        cfg = VLAConfig.from_yaml(CONFIG_PATH)
+        assert cfg.audio is not None
+        assert cfg.audio.downloads_dir == Path("./tmp/audio_downloads")

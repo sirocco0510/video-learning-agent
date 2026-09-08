@@ -27,7 +27,7 @@ quality_check:
   enabled: true
   min_score_to_pass: 70
   min_char_per_second: 1.0
-  max_char_per_second: 15.0
+  max_char_per_second: 20.0  # 2026-09-07 v3.2.1 由 15 → 20(tiny 模型中文峰值 19-25 cps)
   # 2026-09-02 Level 4:LLM 语义清理(faster-whisper 输出整理)
   # refine_enabled=true 才调 LLM
   # refine_max_chars=6000 是粗估的输入 token 上限(超出跳过 LLM,只用本地清理)
@@ -38,28 +38,14 @@ quality_check:
   refine_max_output_tokens: 4000
 
 browser_plugin:
-  name: "Screen Recorder"
-  enabled: true
+  # v2 (2026-09-08):popup 显示用短名 "Tab Audio Recorder" — probe_status 仍按
+  # TabAudioRecorder.match_keyword (默认 "tab audio") 匹配 manifest,与此独立。
+  name: "Tab Audio Recorder"
   remind_timeout_sec: 30          # 弹窗等用户响应的超时(秒)
-  plugin_paths:
-    - "~/Documents/VideoTrans/subtitles"
-    - "~/Downloads"
-  # FR-2.14/2.15:录屏触发。
-  # macOS 上 Screen Recorder for Google Chrome™ 用 Command+Shift+R(已 wait_user_hotkey spike 验证)。
-  # 旧 Screencastify(Alt+Shift+R)因 popup 行为不稳定弃用。
-  # 改 hotkey 要同步 chrome://extensions 里 commands。
-  record_hotkey: "Command+Shift+R"
-  # FR-2.17:Screencastify 录完后跳 chrome-extension:// 编辑标签页,
-  # 用户手动点 btn-download → 触发 Chrome download 事件。
-  # 30min 视频用户可能短暂 AFK,默认 180s。
-  record_download_timeout_sec: 180
-  # FR-2.15:BrowserRecorder 按 hotkey(CDP no-op)后给用户的窗口期,
-  # 让用户在真实 Chrome 手动按对应热键 / 操作 popup。0 = 关闭。
-  record_pre_grace_sec: 10
-  # FR-2.15:`录屏到时`通知在 duration_sec + post_buffer_sec 后发出。
-  # 给用户 buffer 处理:浏览器加载延迟 / 手动点 Play / 视频缓冲 / 暂停/重看。
-  # 录屏本身由用户手动 Stop,不影响。
-  record_post_buffer_sec: 30
+  # F2-10 后 BrowserRecorder 流程已删,Tab Audio Recorder 路径改走 strategy._try_browser
+  # 弹窗 enabled 分支(扫今天 YYYY-MM-DD/ 目录)。以下字段已废弃,主流程不再读:
+  #   - enabled / plugin_paths / record_hotkey
+  #   - record_download_timeout_sec / record_pre_grace_sec / record_post_buffer_sec
   # FR-2.9/2.10 插件状态:整个 session 只弹一次
   #   available   用户确认启动 + 等到文件
   #   unavailable 用户跳过 / 弹窗超时 / 字幕质量不过关
@@ -89,6 +75,11 @@ logging:
   notify_on_fail: false                 # FR-6.4:转写/质量失败不通知
   log_alert_threshold: 50               # FR-6.6:每 50 条失败弹窗汇总一次
   log_alert_enabled: true               # 是否启用失败日志上限弹窗
+
+# F2-10 (2026-09-08):用户手动下载音频根目录
+# 用户把 Tab Audio Recorder 录完的 webm 拖到 <downloads_dir>/YYYY-MM-DD/
+audio:
+  downloads_dir: "./tmp/audio_downloads"
 
 llm_client:
   provider: "minimax"     # openai | qwen | deepseek | minimax

@@ -148,10 +148,10 @@ def url() -> str:
 
 
 class TestApiHit:
-    def test_returns_api_source(self, strategy, adapter, url):
+    async def test_returns_api_source(self, strategy, adapter, url):
         adapter.api_return = ("API字幕", {"lang": "zh-CN"})
 
-        result = strategy.get_subtitle(url)
+        result = await strategy.get_subtitle(url)
 
         assert isinstance(result, SubtitleResult)
         assert result.source == "api"
@@ -159,10 +159,10 @@ class TestApiHit:
         assert result.metadata == {"lang": "zh-CN"}
         assert adapter.api_calls == 1
 
-    def test_does_not_call_browser_or_recording(self, strategy, adapter, url):
+    async def test_does_not_call_browser_or_recording(self, strategy, adapter, url):
         adapter.api_return = ("x", {})
 
-        strategy.get_subtitle(url)
+        await strategy.get_subtitle(url)
 
         assert adapter.browser_calls == 0
         assert adapter.recording_calls == 0
@@ -172,11 +172,11 @@ class TestApiHit:
 
 
 class TestBrowserHit:
-    def test_api_miss_then_browser_hit(self, strategy, adapter, url):
+    async def test_api_miss_then_browser_hit(self, strategy, adapter, url):
         adapter.api_return = None
         adapter.browser_return = ("浏览器字幕", {"method": "track", "lang": "zh"})
 
-        result = strategy.get_subtitle(url)
+        result = await strategy.get_subtitle(url)
 
         assert result.source == "browser"
         assert result.text == "浏览器字幕"
@@ -185,11 +185,11 @@ class TestBrowserHit:
 
 
 class TestApiExceptionFallsThrough:
-    def test_api_raises_then_browser_hit(self, strategy, adapter, url):
+    async def test_api_raises_then_browser_hit(self, strategy, adapter, url):
         adapter.api_exception = RuntimeError("api down")
         adapter.browser_return = ("x", {"method": "initial_state"})
 
-        result = strategy.get_subtitle(url)
+        result = await strategy.get_subtitle(url)
 
         assert result.source == "browser"
 
@@ -198,19 +198,19 @@ class TestApiExceptionFallsThrough:
 
 
 class TestRecordingHit:
-    def test_api_browser_miss_then_recording_hit(
+    async def test_api_browser_miss_then_recording_hit(
         self, strategy, adapter, url
     ):
         adapter.api_return = None
         adapter.browser_return = None
         adapter.recording_return = ("whisper字幕", {"method": "recording"})
 
-        result = strategy.get_subtitle(url)
+        result = await strategy.get_subtitle(url)
 
         assert result.source == "whisper"
         assert result.text == "whisper字幕"
 
-    def test_api_hit_browser_exception_then_recording_hit(
+    async def test_api_hit_browser_exception_then_recording_hit(
         self, strategy, adapter, url
     ):
         """异常也应降级到下一级。"""
@@ -218,7 +218,7 @@ class TestRecordingHit:
         adapter.browser_exception = RuntimeError("browser down")
         adapter.recording_return = ("y", {})
 
-        result = strategy.get_subtitle(url)
+        result = await strategy.get_subtitle(url)
 
         assert result.source == "whisper"
 
@@ -227,19 +227,19 @@ class TestRecordingHit:
 
 
 class TestAllMiss:
-    def test_returns_none_when_all_miss(self, strategy, adapter, url):
+    async def test_returns_none_when_all_miss(self, strategy, adapter, url):
         adapter.api_return = None
         adapter.browser_return = None
         adapter.recording_return = None
 
-        result = strategy.get_subtitle(url)
+        result = await strategy.get_subtitle(url)
 
         assert result is None
 
-    def test_returns_none_when_recording_exception(self, strategy, adapter, url):
+    async def test_returns_none_when_recording_exception(self, strategy, adapter, url):
         adapter.recording_exception = RuntimeError("whisper failed")
 
-        result = strategy.get_subtitle(url)
+        result = await strategy.get_subtitle(url)
 
         assert result is None
 
@@ -264,27 +264,27 @@ class TestFallbackAdapter:
             screenshot_controller=MagicMock(),
         )
 
-    def test_uses_fallback_when_no_adapter(self, fb_strategy, driver, recorder):
+    async def test_uses_fallback_when_no_adapter(self, fb_strategy, driver, recorder):
         """无匹配 adapter → FallbackAdapter(直接用 driver/recorder)。"""
-        fb_strategy.get_subtitle("https://unknown.example.com/v/1")
+        await fb_strategy.get_subtitle("https://unknown.example.com/v/1")
         # driver.new_background_page 应该被调用过(② ③)
         assert driver.new_background_page.called
 
-    def test_fallback_api_always_miss(self, fb_strategy, driver, recorder, url):
+    async def test_fallback_api_always_miss(self, fb_strategy, driver, recorder, url):
         """FallbackAdapter.fetch_api_subtitle 总是 None → 降级到 ②。"""
-        result = fb_strategy.get_subtitle(url)
+        result = await fb_strategy.get_subtitle(url)
         # FallbackAdapter ② ③ 都 miss → None
         assert result is None
         assert driver.new_background_page.call_count >= 1
 
-    def test_fallback_browser_hit(self, fb_strategy, driver, url):
+    async def test_fallback_browser_hit(self, fb_strategy, driver, url):
         """FallbackAdapter 通过 BrowserDriver.fetch_subtitle_via_browser 拿字幕。"""
         driver.fetch_subtitle_via_browser.return_value = (
             "fallback字幕",
             {"method": "dom_selector"},
         )
 
-        result = fb_strategy.get_subtitle(url)
+        result = await fb_strategy.get_subtitle(url)
 
         assert result is not None
         assert result.source == "browser"
@@ -438,7 +438,7 @@ class TestFallbackRecorderReturnsPath:
 
 
 class TestDurationSecPassed:
-    def test_duration_passed_to_recording(self, strategy, adapter, url):
+    async def test_duration_passed_to_recording(self, strategy, adapter, url):
         adapter.api_return = None
         adapter.browser_return = None
         adapter.recording_return = ("x", {})
@@ -451,6 +451,115 @@ class TestDurationSecPassed:
 
         adapter.fetch_via_recording = spy  # type: ignore[method-assign]
 
-        strategy.get_subtitle(url, duration_sec=120)
+        await strategy.get_subtitle(url, duration_sec=120)
 
         assert recorded == [120]
+
+
+# ---------------- F2-8:enabled → tab_recorder 路径 ----------------
+
+
+class TestScanTodayDirPath:
+    """F2-10:弹窗 "enabled" 改走扫今天日期目录路径。
+
+    流程:用户手动按 Cmd+Shift+R + 手动点 downloadWavBtn → 拖到
+    <cfg.audio.downloads_dir>/<今天>/。代码扫今天目录 *.webm,过滤 .transcribed.txt,
+    调 transcriber.transcribe(audio_path, out_dir=today_dir) → touch sidecar。
+
+    验证:_try_browser 的 enabled 分支调对了 transcribe + touch,正确返回 metadata。
+    """
+
+    @pytest.fixture
+    def cfg_with_downloads_dir(self, tmp_path):
+        """VLAConfig mock:cfg.audio.downloads_dir 指向 tmp_path(测试用临时根)。"""
+        from vla.config import AudioConfig
+        audio_cfg = AudioConfig(downloads_dir=tmp_path)
+        cfg = MagicMock()
+        cfg.audio = audio_cfg
+        return cfg, tmp_path
+
+    @pytest.fixture
+    def enabled_strategy(
+        self, adapter, driver, notifier, plugin_status, log, cfg_with_downloads_dir
+    ) -> SubtitleStrategy:
+        """SubtitleStrategy w/ transcriber 已 mock,无 tab_recorder 链路依赖。"""
+        cfg, _root = cfg_with_downloads_dir
+        tab_rec = MagicMock()  # 保留(类不删),但 _try_browser 不调 start/click
+        trans = MagicMock()
+        trans.transcribe.return_value = "tab audio 字幕文本"
+        return SubtitleStrategy(
+            registry=StubRegistry(adapter),
+            driver=driver,
+            recorder=None,
+            notifier=notifier,
+            plugin_status=plugin_status,
+            remind_timeout_sec=30,
+            log=log,
+            audio_factory=MagicMock(),
+            tab_recorder=tab_rec,
+            transcriber=trans,
+            screenshot_controller=MagicMock(),
+            cfg=cfg,
+        )
+
+    async def test_enabled_scans_today_dir_and_transcribes(
+        self, enabled_strategy, adapter, url, cfg_with_downloads_dir
+    ):
+        """enabled → 扫到 webm → 调 transcriber.transcribe(audio_path, out_dir=today_dir) + touch sidecar。"""
+        cfg, root = cfg_with_downloads_dir
+        # 预放一个未转写 webm 到今天目录
+        today_dir = root / __import__("datetime").date.today().isoformat()
+        today_dir.mkdir(parents=True, exist_ok=True)
+        webm = today_dir / "1788852384504.webm"
+        webm.write_bytes(b"x" * 16)
+        adapter.api_return = None
+        adapter.browser_return = None  # 触发弹窗
+        result = await enabled_strategy.get_subtitle(url, duration_sec=90)
+
+        assert result is not None
+        assert result.source == "whisper"  # via=tab_audio_recorder → source=whisper
+        assert result.text == "tab audio 字幕文本"
+        # transcriber.transcribe 被调,传 audio_path + out_dir=today_dir
+        enabled_strategy.transcriber.transcribe.assert_called_once_with(
+            webm, out_dir=today_dir,
+        )
+        # sidecar 已 touch
+        sidecar = webm.with_suffix(".transcribed.txt")
+        assert sidecar.exists()
+        # metadata 暴露 audio_path / transcript_path / method
+        assert result.metadata["via"] == "tab_audio_recorder"
+        assert result.metadata["method"] == "scan_today_dir"
+        assert result.metadata["audio_path"] == str(webm)
+        assert result.metadata["transcript_path"] == str(
+            today_dir / "1788852384504.transcript.txt"
+        )
+
+    async def test_enabled_records_plugin_as_available(
+        self, enabled_strategy, adapter, plugin_status, url, cfg_with_downloads_dir
+    ):
+        """成功 enabled → mark_available(FR-2.9 session 单例)。"""
+        cfg, root = cfg_with_downloads_dir
+        today_dir = root / __import__("datetime").date.today().isoformat()
+        today_dir.mkdir(parents=True, exist_ok=True)
+        (today_dir / "x.webm").write_bytes(b"x")
+        adapter.browser_return = None
+        await enabled_strategy.get_subtitle(url)
+
+        plugin_status.mark_available.assert_called_once()
+
+    async def test_enabled_no_audio_falls_back(
+        self, enabled_strategy, adapter, plugin_status, url, cfg_with_downloads_dir
+    ):
+        """今天目录无 webm → 降级 ③ ffmpeg,不 mark_unavailable。"""
+        cfg, root = cfg_with_downloads_dir
+        # root 存在但 today_dir 内部无 .webm(find_today_dir 会自动建,但空)
+        adapter.browser_return = None
+        result = await enabled_strategy.get_subtitle(url)
+
+        # 降级后 ③ 也 miss → 全失败返回 None
+        assert result is None
+        # 关键断言:没 mark_unavailable(避免污染整个 session)
+        plugin_status = enabled_strategy.plugin_status
+        assert not plugin_status.mark_unavailable.called
+        # 关键断言:没调 transcriber.transcribe
+        enabled_strategy.transcriber.transcribe.assert_not_called()

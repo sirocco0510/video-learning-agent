@@ -63,7 +63,7 @@ class RealTextProvider:
         self.plugin_status = plugin_status
         self._save_dir = Path(save_dir) if save_dir else Path("./tmp")
 
-    def __call__(self, task: VideoTask) -> tuple[str, str, Path | None]:
+    async def __call__(self, task: VideoTask) -> tuple[str, str, Path | None]:
         """返回 (text, source, audio_path_or_None)。
 
         audio_path 在走 Whisper 兜底时返回,质量通过后由主调度清理;
@@ -74,7 +74,7 @@ class RealTextProvider:
 
         # 1. 字幕三级策略(含 FR-2.5/2.6 popup 流程)
         try:
-            result = self.strategy.get_subtitle(url, duration_sec)
+            result = await self.strategy.get_subtitle(url, duration_sec)
         except Exception as e:
             logger.warning("策略调用异常,降级到 source_factory: %s", e)
             result = None
@@ -158,6 +158,7 @@ def build_text_provider(
         remind_timeout_sec=cfg.browser_plugin.remind_timeout_sec,
         plugin_name=cfg.browser_plugin.name,
         save_dir=save_dir,
+        cfg=cfg,  # F2-10:扫今天 YYYY-MM-DD/ 用
     )
 
     return RealTextProvider(
@@ -179,25 +180,35 @@ def _build_registry(
     """装配 PlatformAdapterRegistry(2026-09-02 修复:之前一直是空的!)
 
     装配顺序:
-    1. BilibiliAdapter(cfg.platforms.bilibili.enabled) — 实例注册(带 F2-7 4 deps)
+    1. BilibiliAdapter(cfg.platforms.bilibili.enabled) — 实例注册(带 F2-10 2 deps)
     2. InternalSiteAdapter(cfg.platforms.internal_site.enabled) — 类注册(无 deps)
 
     B站 → 实例注册的原因:BilibiliAdapter 构造需要 `official`(B站官方 API 客户端)
-    和 4 REQUIRED deps(audio_factory/tab_recorder/transcriber/screenshot_controller),
-    没法用 registry 默认的无参构造。
+    和 2 REQUIRED deps(audio_factory / transcriber),没法用 registry 默认的无参构造。
+
+    **F2-10 (2026-09-08)**:tab_recorder / screenshot_controller 已从 BilibiliAdapter
+    构造参数删除(分别由 strategy._try_browser 弹窗 enabled 分支和 main.py 的
+    ScreenshotPhaseController 接管)。
     """
+    from vla.audio.source_factory import AudioSourceFactory
     from vla.subtitle.bilibili_adapter import BilibiliAdapter
     from vla.subtitle.bilibili_official import BilibiliOfficialSubtitle
     from vla.subtitle.internal_site_adapter import InternalSiteAdapter
     from vla.subtitle.platform_adapter import PlatformAdapterRegistry
+    from vla.transcribe.streaming import StreamingTranscriber
 
     registry = PlatformAdapterRegistry()
 
     if cfg.platforms.bilibili.enabled:
         official = BilibiliOfficialSubtitle()
+        # F2-10:2 deps(audio_factory + transcriber);tab_recorder 改由 strategy 持有,
+        # screenshot_controller 改由 main.py 持有。
+        audio_factory = AudioSourceFactory(save_dir=save_dir / "audio_raw")
+        transcriber = StreamingTranscriber(cfg)
         adapter = BilibiliAdapter(
             official=official,
-            save_dir=save_dir,
+            audio_factory=audio_factory,
+            transcriber=transcriber,
         )
         registry.register_instance(adapter)
         logger.info(

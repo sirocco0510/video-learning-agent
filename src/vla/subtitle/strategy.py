@@ -28,15 +28,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from vla.models import SubtitleResult
+from vla.subtitle.audio_scan import find_today_dir, scan_untranscribed_audio
 
 if TYPE_CHECKING:
     from vla.audio.source_factory import AudioSourceFactory
     from vla.capture.screenshot_phase_controller import ScreenshotPhaseController
+    from vla.config import VLAConfig
     from vla.subtitle.tab_audio_recorder import TabAudioRecorder
     from vla.transcribe.streaming import AudioTranscriber
 
@@ -195,6 +198,7 @@ class SubtitleStrategy:
         plugin_name: str = "VideoTrans",
         log: logging.Logger | None = None,
         save_dir: Path | None = None,
+        cfg: "VLAConfig | None" = None,
     ) -> None:
         """
         Args:
@@ -212,6 +216,7 @@ class SubtitleStrategy:
             plugin_name: 弹窗里展示的插件名
             log: logger
             save_dir: 录制目录
+            cfg: F2-10 必填 — VLAConfig(cfg.audio.downloads_dir 用于扫今天 YYYY-MM-DD/)
         """
         self.registry = registry
         self.driver = driver
@@ -227,8 +232,10 @@ class SubtitleStrategy:
         self.plugin_name = plugin_name
         self.log = log or logging.getLogger(__name__)
         self._save_dir = save_dir
+        # F2-10:扫今天 YYYY-MM-DD/ 用 — 暂 None 容忍(老测试 + 兜底)
+        self.cfg = cfg
 
-    def get_subtitle(
+    async def get_subtitle(
         self, url: str, duration_sec: int = 600
     ) -> SubtitleResult | None:
         """三级降级。任一命中即返回;全失败返回 None。
@@ -251,15 +258,22 @@ class SubtitleStrategy:
             self.log.warning("策略 ① 失败: %s", e)
 
         # ② Browser(FR-2.5~2.8 字幕探测 + FR-2.14 Screen Recorder + FR-2.21 popup)
-        browser_result = self._try_browser(adapter, url, duration_sec)
+        # v3.2.1.6: _try_browser 内部 run_on_driver_thread + ask_open_browser 同步阻塞,
+        # 直接 await 会冻死 asyncio loop(用户不响应弹窗 → 整个 session 挂起)。
+        # 包 to_thread 隔离到 default executor,event loop 可继续。
+        browser_result = await asyncio.to_thread(
+            self._try_browser, adapter, url, duration_sec,
+        )
         if browser_result is not None:
             text, meta = browser_result
             try:
                 # FR-2.12 enum:source ∈ {api, browser, whisper}
                 # - 字幕探测纯命中 → "browser"
-                # - Screen Recorder + Whisper → "whisper"(metadata.via 区分录制路径)
+                # - 录制路径(Screen Recorder / Tab Audio Recorder)→ "whisper"
+                #   (metadata.via 区分具体路径)
                 source = "whisper" if (
-                    isinstance(meta, dict) and meta.get("via") == "screen_recorder"
+                    isinstance(meta, dict)
+                    and meta.get("via") in ("screen_recorder", "tab_audio_recorder")
                 ) else "browser"
                 return SubtitleResult(
                     text=text, source=source, metadata=meta
@@ -268,15 +282,19 @@ class SubtitleStrategy:
                 self.log.warning("策略 ② SubtitleResult 构造失败: %s", e)
 
         # ③ Recording(F2-7:传 4 REQUIRED kwargs 给 base impl)
+        # v3.2.1.6: fetch_via_recording 内部可能调 run_on_driver_thread(同步阻塞),
+        # 改为 to_thread 隔离到 default executor。
         try:
-            result = adapter.fetch_via_recording(
+            # F2-10:tab_recorder / screenshot_controller 已从 PlatformAdapter.fetch_via_recording
+            # 签名删除 — 不再传。Tab Audio Recorder 路径迁到本类 _try_browser 弹窗 enabled
+            # 分支;截图由 main.py 直接调 ScreenshotPhaseController 触发。
+            result = await asyncio.to_thread(
+                adapter.fetch_via_recording,
                 self.driver,
                 url,
                 duration_sec,
                 audio_factory=self.audio_factory,
-                tab_recorder=self.tab_recorder,
                 transcriber=self.transcriber,
-                screenshot_controller=self.screenshot_controller,
             )
             if result:
                 text, meta = result
@@ -329,7 +347,12 @@ class SubtitleStrategy:
         page = self._new_page_safely()
         if page is not None:
             from vla.subtitle.page_control import pause_page_video
-            pause_page_video(page)
+            # v3.2.1.3: page.evaluate 必须在 dispatcher thread;driver 提供
+            # run_on_driver_thread wrapper,避免 greenlet mismatch。
+            try:
+                self.driver.run_on_driver_thread(pause_page_video, page)
+            except Exception as e:
+                self.log.warning("暂停页面视频失败(best-effort):%s", e)
 
         self.log.info(
             "策略 ② 第一次未拿到字幕,触发弹窗询问用户开启 Screen Recorder"
@@ -351,47 +374,58 @@ class SubtitleStrategy:
             self.log.info("弹窗超时未响应,降级到策略 ③")
             return None
 
-        # 5. "enabled" → 触发已注入的 recorder(FR-2.14/2.15 的 stub)
-        if self.recorder is None or page is None:
+        # 5. "enabled" → F2-10 扫今天日期目录路径(替代 F2-8 模拟 click_download)
+        # 流程:用户按 Cmd+Shift+R 启停 Tab Audio Recorder + 手动点 editor.html
+        # downloadWavBtn 下载 webm → 拖到 <cfg.audio.downloads_dir>/<今天>/。
+        # 代码扫今天目录的 *.webm → 过滤 .transcribed.txt → Whisper 转写 → 标 sidecar。
+        if page is None:
             self.log.warning(
-                "未注入 recorder / 无法创建 page,降级策略 ③(ffmpeg)"
+                "无法创建 page,降级策略 ③(ffmpeg)"
+            )
+            return None
+        if self.cfg is None or not hasattr(self.cfg, "audio") or self.cfg.audio is None:
+            self.log.warning(
+                "未注入 cfg.audio,降级策略 ③(ffmpeg)"
             )
             return None
 
-        self.log.info("用户已开启插件,触发已注入的 recorder 录屏 → Whisper")
-        try:
-            # recorder 返回转写文本的**文件路径**(Path),不是文本本身(用户新规:不存内存)
-            transcript_path = self.recorder.record_and_transcribe(
-                page, url, duration_sec, self._save_dir,
+        _safe_close_page(page)  # 弹窗后 page 用完,关掉释放
+
+        downloads_root = self.cfg.audio.downloads_dir
+        today_dir = find_today_dir(downloads_root)  # 自动 mkdir
+        audio_path = scan_untranscribed_audio(today_dir)
+        if audio_path is None:
+            self.log.warning(
+                "今天文件夹 %s 无 webm(或全部已转写),降级策略 ③(ffmpeg)",
+                today_dir,
             )
+            return None
+
+        self.log.info(
+            "找到用户手动下载的 webm: %s,开始转写(out_dir=%s)",
+            audio_path, today_dir,
+        )
+        try:
+            # out_dir=today_dir → 保留源 webm(用户产物),transcript 落同文件夹
+            text = self.transcriber.transcribe(audio_path, out_dir=today_dir)
         except Exception as e:
-            # recorder 超时 / 抛错 → 不标记 unavailable,降级 ffmpeg(FR-2.20)
-            self.log.warning(
-                "Screen Recorder 录屏失败,降级策略 ③(ffmpeg):%s", e
-            )
-            _safe_close_page(page)
+            self.log.warning("Whisper 转写失败 %s: %s", audio_path, e)
             return None
 
-        # R-15:page lifecycle 由 caller(SubtitleStrategy)拥有 —
-        # recorder 不再 close,我们在 finally 兜底关。
-        _safe_close_page(page)
-
-        # 读一次供 SubtitleResult.text 用(metadata 仍保留 transcript_path 给下游)
+        # 标记已转写(sidecar touch)
         try:
-            text = Path(transcript_path).read_text(encoding="utf-8")
-        except OSError as e:
-            self.log.error(
-                "读 transcript 失败 %s:%s — 转写文件可能丢失",
-                transcript_path, e,
-            )
-            return None
+            audio_path.with_suffix(".transcribed.txt").touch()
+            self.log.info("已标记已转写: %s", audio_path)
+        except Exception as e:
+            self.log.warning("touch sidecar 失败 %s: %s", audio_path, e)
 
         if not self.plugin_status.is_known():
             self.plugin_status.mark_available()
         return text, {
-            "via": "screen_recorder",
-            "method": "recording",
-            "transcript_path": str(transcript_path),
+            "via": "tab_audio_recorder",  # 保留 key,batch 总结 source 判断仍用
+            "method": "scan_today_dir",
+            "audio_path": str(audio_path),
+            "transcript_path": str(today_dir / f"{audio_path.stem}.transcript.txt"),
         }
 
     def _fetch_browser_once(

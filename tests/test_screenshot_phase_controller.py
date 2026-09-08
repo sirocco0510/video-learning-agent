@@ -51,17 +51,57 @@ def mock_notifier() -> MagicMock:
     return n
 
 
+@pytest.fixture
+def mock_browser_driver(mock_driver: MagicMock) -> MagicMock:
+    """Mock BrowserDriver(支持 new_background_page 返回 mock page + goto)。
+
+    F2-6 v3.2.1:phase_a_start_url / phase_c_end_url 需要 BrowserDriver。
+    v3.2.1.1:page.goto 在 asyncio.to_thread 里同步调用,所以这里 page.goto
+    用普通 MagicMock(不是 AsyncMock)— sync 调用 return None。
+    v3.2.1.3: run_on_driver_thread(fn, *args) 在 mock 里直接同步调 fn(*args),
+    这样 side_effect 正常生效。
+    v3.2.1.8:phase_a_start_url / phase_c_end_url 不再调 new_background_page + goto,
+    改调 find_page_by_url_substring。默认返回 mock page(模拟用户已开 B站 tab)。
+    需要"找不到"路径时单独覆盖 bd.find_page_by_url_substring.return_value = None。
+    """
+    bd = MagicMock()
+    page = MagicMock()
+    page.url = "https://www.bilibili.com/video/Bv1"
+    page.goto = MagicMock()  # sync — 走 asyncio.to_thread
+    # v3.2.1.7: phase_a_start_url 现在调 page.is_closed() 区分 page closed vs
+    # video not rendered;默认 False (open) 让 happy path 走 phase_a_start。
+    page.is_closed = MagicMock(return_value=False)
+    bd.new_background_page = MagicMock(return_value=page)
+    # v3.2.1.8: 复用现有 B站 tab(模拟用户已开)
+    bd.find_page_by_url_substring = MagicMock(return_value=page)
+    # 让 mock_driver 作为 page 评估的 evaluate 跟原来保持一致
+    bd._page = page
+    # v3.2.1.3: run_on_driver_thread 模拟 — 直接 sync 调 fn(*args),让 side_effect 生效
+    bd.run_on_driver_thread = MagicMock(side_effect=lambda fn, *a, **kw: fn(*a, **kw))
+    # v3.2.1.3: arun_on_driver_thread(async)— 直接返回 fn(*args) 的结果,await 它即可
+    async def _arun(fn, *a, **kw):
+        return fn(*a, **kw)
+    bd.arun_on_driver_thread = MagicMock(side_effect=_arun)
+    return bd
+
+
 class TestPhaseA:
     def test_phase_a_returns_start_ts_on_success(
-        self, mock_driver: MagicMock, mock_capture: MagicMock, mock_notifier: MagicMock
+        self, mock_browser_driver: MagicMock, mock_capture: MagicMock, mock_notifier: MagicMock
     ) -> None:
-        """PHASE A 成功 → return monotonic time, capture called, notifier.info called."""
-        ctrl = ScreenshotPhaseController(mock_driver, mock_notifier, mock_capture)
-        # asyncio_mode = "auto", so phase_a_start is awaitable
-        start_ts = asyncio.run(ctrl.phase_a_start(mock_driver, "Bv1_test"))
+        """PHASE A 成功 → return monotonic time, capture called, notifier.info called.
+
+        v3.2.1.3: phase_a_start 走 driver.arun_on_driver_thread,所以 mock 用
+        mock_browser_driver(带 arun_on_driver_thread)。
+        """
+        page = mock_browser_driver._page
+        ctrl = ScreenshotPhaseController(mock_browser_driver, mock_notifier, mock_capture)
+        start_ts = asyncio.run(ctrl.phase_a_start(page, "Bv1_test"))
         assert isinstance(start_ts, float)
         assert start_ts > 0
-        mock_capture.prepare_for_screenshot.assert_awaited_once_with(mock_driver)
+        mock_capture.prepare_for_screenshot.assert_awaited_once_with(
+            page, driver=mock_browser_driver,
+        )
         mock_capture.capture_full_screen.assert_awaited_once()
         mock_notifier.info.assert_called_once()
         # notifier 信息必须含"截图"+"稍候"
@@ -70,19 +110,20 @@ class TestPhaseA:
         assert "稍候" in msg
 
     def test_phase_a_returns_zero_on_fullscreen_deny(
-        self, mock_driver: MagicMock, mock_capture: MagicMock, mock_notifier: MagicMock
+        self, mock_browser_driver: MagicMock, mock_capture: MagicMock, mock_notifier: MagicMock
     ) -> None:
-        """Q8: TCC 拒绝 → controller 不 raise,return 0.0 (partial_flags 后续补)。"""
-        # requestFullscreen 抛 NotAllowedError
-        # NOTE: brief verbatim set side_effect to a 3-item list expecting
-        # `prepare_for_screenshot` to be the real impl, but here it is mocked
-        # (AsyncMock), so only the controller's own evaluate call happens.
-        # Raising on every evaluate call is sufficient to trigger the deny path.
-        mock_driver.evaluate.side_effect = Exception(
+        """Q8: TCC 拒绝 → controller 不 raise,return 0.0 (partial_flags 后续补)。
+
+        v3.2.1.3: controller 走 driver.run_on_driver_thread(page.evaluate, ...) —
+        mock_browser_driver 的 run_on_driver_thread 直接 sync 调 fn,让 page 上的
+        side_effect 生效。
+        """
+        page = mock_browser_driver._page
+        page.evaluate.side_effect = Exception(
             "NotAllowedError: requestFullscreen denied by TCC"
         )
-        ctrl = ScreenshotPhaseController(mock_driver, mock_notifier, mock_capture)
-        start_ts = asyncio.run(ctrl.phase_a_start(mock_driver, "Bv1_tcc"))
+        ctrl = ScreenshotPhaseController(mock_browser_driver, mock_notifier, mock_capture)
+        start_ts = asyncio.run(ctrl.phase_a_start(page, "Bv1_tcc"))
         assert start_ts == 0.0
         # 不抛异常,降级到 capture
         mock_capture.capture_full_screen.assert_awaited_once()
@@ -396,3 +437,147 @@ class TestMultiFrame:
         # 7 帧仍尝试(capture_full_screen 仍被调 7 次)
         assert mock_capture.capture_full_screen.await_count == 7
         assert len(result) == 7
+
+
+# ---------------- F2-6 v3.2.1: 接受 url 自己创建 page ----------------
+
+
+class TestUrlBasedPhase:
+    """F2-6 v3.2.1.8:phase_a_start_url / phase_c_end_url 接受 url,
+    **复用用户已开的 B站 tab**,不再 new_background_page + goto。
+
+    设计动机:用户已经在 Chrome 手动打开 B站视频(他要按播放);我们不应再开一个
+    tab 抢资源 + 制造空白页闪一下。复用现有 tab 让截图 = 用户实际看到的画面。
+    """
+
+    def test_phase_a_start_url_reuses_existing_bilibili_page(
+        self, mock_browser_driver: MagicMock, mock_capture: MagicMock, mock_notifier: MagicMock
+    ) -> None:
+        """phase_a_start_url → driver.find_page_by_url_substring(bvid) + delegate。
+
+        v3.2.1.8:不再 new_background_page + goto,改复用用户已开的 B站 tab。
+
+        URL `Bv1_url_a` 的 bvid 正则 `[Bb][Vv][A-Za-z0-9]+` 只匹配 `Bv1`(`_` 不在字符集),
+        所以 find_page_by_url_substring 用 `Bv1` 作 key 找现有 tab。
+        """
+        page = mock_browser_driver._page
+        page.evaluate = AsyncMock()  # phase_a_start 内部会 evaluate
+        ctrl = ScreenshotPhaseController(mock_browser_driver, mock_notifier, mock_capture)
+        url = "https://www.bilibili.com/video/Bv1_url_a"
+        start_ts = asyncio.run(ctrl.phase_a_start_url(url=url, audio_id="Bv1_url_a"))
+        assert isinstance(start_ts, float)
+        # 关键:复用现有 page,**不**调 new_background_page / goto
+        mock_browser_driver.find_page_by_url_substring.assert_called_once_with("Bv1")
+        mock_browser_driver.new_background_page.assert_not_called()
+        page.goto.assert_not_called()
+        # delegate 到 phase_a_start → 触发 capture + notifier
+        mock_capture.prepare_for_screenshot.assert_awaited_once_with(
+            page, driver=mock_browser_driver,
+        )
+        mock_capture.capture_full_screen.assert_awaited_once()
+
+    def test_phase_a_start_url_realistic_bvid_match(
+        self, mock_browser_driver: MagicMock, mock_capture: MagicMock, mock_notifier: MagicMock
+    ) -> None:
+        """真实 B站 URL 形态:`/video/BV1DUgK6cEi3`(无下划线)— bvid == audio_id。"""
+        page = mock_browser_driver._page
+        page.url = "https://www.bilibili.com/video/BV1DUgK6cEi3"
+        page.evaluate = AsyncMock()
+        ctrl = ScreenshotPhaseController(mock_browser_driver, mock_notifier, mock_capture)
+        url = "https://www.bilibili.com/video/BV1DUgK6cEi3"
+        start_ts = asyncio.run(ctrl.phase_a_start_url(url=url, audio_id="BV1DUgK6cEi3"))
+        assert isinstance(start_ts, float)
+        mock_browser_driver.find_page_by_url_substring.assert_called_once_with(
+            "BV1DUgK6cEi3"
+        )
+        mock_browser_driver.new_background_page.assert_not_called()
+        page.goto.assert_not_called()
+        mock_capture.prepare_for_screenshot.assert_awaited_once_with(
+            page, driver=mock_browser_driver,
+        )
+        mock_capture.capture_full_screen.assert_awaited_once()
+
+    def test_phase_c_end_url_reuses_existing_bilibili_page(
+        self, mock_browser_driver: MagicMock, mock_capture: MagicMock, mock_notifier: MagicMock
+    ) -> None:
+        """phase_c_end_url → driver.find_page_by_url_substring + delegate。
+
+        URL `Bv1_url_c` 的 bvid 正则只匹配 `Bv1`。
+        """
+        page = mock_browser_driver._page
+        page.evaluate = AsyncMock()
+        ctrl = ScreenshotPhaseController(mock_browser_driver, mock_notifier, mock_capture)
+        url = "https://www.bilibili.com/video/Bv1_url_c"
+        asyncio.run(ctrl.phase_c_end_url(url=url, audio_id="Bv1_url_c"))
+        mock_browser_driver.find_page_by_url_substring.assert_called_once_with("Bv1")
+        mock_browser_driver.new_background_page.assert_not_called()
+        page.goto.assert_not_called()
+        # phase_c_only 调 capture_full_screen
+        mock_capture.capture_full_screen.assert_awaited_once()
+
+    def test_phase_a_start_url_no_existing_page_returns_zero(
+        self, mock_browser_driver: MagicMock, mock_capture: MagicMock, mock_notifier: MagicMock
+    ) -> None:
+        """v3.2.1.8:用户没在 Chrome 开 B站 tab → find_page 返回 None → 决策 A 跳视频。
+
+        返回 0.0 让 main.py 走决策 A(capture_full_screen 不被调)。
+        """
+        mock_browser_driver.find_page_by_url_substring.return_value = None
+        ctrl = ScreenshotPhaseController(mock_browser_driver, mock_notifier, mock_capture)
+        start_ts = asyncio.run(
+            ctrl.phase_a_start_url(url="https://www.bilibili.com/video/Bv1_noopen",
+                                   audio_id="Bv1_noopen")
+        )
+        assert start_ts == 0.0
+        mock_capture.capture_full_screen.assert_not_awaited()
+        mock_capture.prepare_for_screenshot.assert_not_awaited()
+        # 关键:绝不能 fallback 到 new_background_page
+        mock_browser_driver.new_background_page.assert_not_called()
+
+    def test_phase_a_start_url_page_closed_skips_capture(
+        self, mock_browser_driver: MagicMock, mock_capture: MagicMock, mock_notifier: MagicMock
+    ) -> None:
+        """v3.2.1.7:page.is_closed() == True → Phase A 跳过,return 0.0,
+        capture 不会被调,让 main.py 决策 A 跳视频。"""
+        page = mock_browser_driver._page
+        page.evaluate = AsyncMock()
+        # 模拟 Chrome memory saver 关闭了 background tab
+        page.is_closed = MagicMock(return_value=True)
+        ctrl = ScreenshotPhaseController(mock_browser_driver, mock_notifier, mock_capture)
+        start_ts = asyncio.run(
+            ctrl.phase_a_start_url(url="https://www.bilibili.com/video/Bv1_closed",
+                                   audio_id="Bv1_closed")
+        )
+        assert start_ts == 0.0
+        # 关键:截图链没被触发
+        mock_capture.capture_full_screen.assert_not_awaited()
+        mock_capture.prepare_for_screenshot.assert_not_awaited()
+
+    def test_phase_a_start_url_url_without_bvid_returns_zero(
+        self, mock_browser_driver: MagicMock, mock_capture: MagicMock, mock_notifier: MagicMock
+    ) -> None:
+        """URL 不含 bvid → return 0.0(没匹配 key,无法找 user tab)。"""
+        ctrl = ScreenshotPhaseController(mock_browser_driver, mock_notifier, mock_capture)
+        start_ts = asyncio.run(
+            ctrl.phase_a_start_url(url="https://www.youtube.com/watch?v=abc",
+                                   audio_id="youtube_abc")
+        )
+        assert start_ts == 0.0
+        # 不应找 page(没 bvid)
+        mock_browser_driver.find_page_by_url_substring.assert_not_called()
+        mock_capture.capture_full_screen.assert_not_awaited()
+
+    def test_phase_c_end_url_no_existing_page_skips(
+        self, mock_browser_driver: MagicMock, mock_capture: MagicMock, mock_notifier: MagicMock
+    ) -> None:
+        """v3.2.1.8:Phase C 找不到 tab → log warning,return(决策 A 只对 Phase A)。"""
+        mock_browser_driver.find_page_by_url_substring.return_value = None
+        ctrl = ScreenshotPhaseController(mock_browser_driver, mock_notifier, mock_capture)
+        # 不抛
+        asyncio.run(
+            ctrl.phase_c_end_url(url="https://www.bilibili.com/video/Bv1_noc",
+                                 audio_id="Bv1_noc")
+        )
+        mock_capture.capture_full_screen.assert_not_awaited()
+        mock_browser_driver.new_background_page.assert_not_called()
+

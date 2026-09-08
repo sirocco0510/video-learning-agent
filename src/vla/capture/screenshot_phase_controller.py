@@ -66,13 +66,19 @@ class ScreenshotPhaseController:
 
         Returns: monotonic start_ts (>0 on success, 0.0 on fullscreen deny per Q8).
         Never raises — partial failures all continue.
+
+        v3.2.1.3: page 操作必须跑在 driver executor 内部 thread(connect 时
+        dispatcher fiber 所在 thread)。这里把 driver 传给 prepare_for_screenshot,
+        capture 内部用 driver.run_on_driver_thread 包装。page.evaluate 也走 driver。
         """
         try:
-            await self._capture.prepare_for_screenshot(page)
+            await self._capture.prepare_for_screenshot(page, driver=self._driver)
             fullscreen_ok = True
             try:
-                await page.evaluate(
-                    "video.currentTime=0; video.pause(); video.requestFullscreen()"
+                # v3.2.1.3: page.evaluate 走 driver executor(async 版本不阻塞 loop)
+                await self._driver.arun_on_driver_thread(
+                    page.evaluate,
+                    "video.currentTime=0; video.pause(); video.requestFullscreen()",
                 )
             except Exception:
                 # Q8: Warn, 不抛 — but signal partial via 0.0 return
@@ -83,6 +89,122 @@ class ScreenshotPhaseController:
             save_path = self._capture.save_dir / f"{audio_id}.phase_a.png"
             ok = await self._capture.capture_full_screen(save_path)
             if not ok or not fullscreen_ok:
+                return 0.0
+            return time.monotonic()
+        except Exception:
+            return 0.0
+
+    # ---- 同步包装方法 (用于 sync 代码) ----
+
+    def phase_a_start_sync(self, page: Any, audio_id: str) -> float:
+        """同步版本的 phase_a_start (用于 sync 代码)。
+
+        通过 asyncio.run 在后台运行异步版本。
+        """
+        return asyncio.run(self.phase_a_start(page, audio_id))
+
+    async def phase_a_start_url(self, *, url: str, audio_id: str) -> float:
+        """F2-6 v3.2.1:PHASE A url 入口。
+
+        v3.2.1.8 (2026-09-08):**复用用户已开的 B站 tab**,不再 `new_background_page + goto`。
+        旧实现每次都开空白 tab + 跳 B站 — 浪费时间、抢 Chrome 资源、用户在 tab 栏
+        看到空白页闪一下。修法:从 driver 所有 pages 里找 URL 含目标 bvid 的 page;
+        找不到 → 决策 A 跳过视频(让用户先在 Chrome 手动打开)。
+
+        设计动机:
+        - 用户已经在 Chrome 打开 B站(他自己要点播放);我们不应再加一个 tab
+        - 用户实际看到的视频 = 他手动开的那一个;截图也应是对那个 tab 截
+        - 复用现有 tab 可避免 Chrome memory saver 关闭 background tab 的 race
+
+        Returns: monotonic start_ts 或 0.0(没找到匹配 tab / page 已 closed / 截图失败)。
+        Never raises — 失败时返回 0.0 走决策 A。
+
+        v3.2.1.3 fix: page 操作必须跑在 driver executor 内部 thread(connect 时
+        dispatcher fiber 所在 thread)。search + bring_to_front + is_closed 全走
+        driver.arun_on_driver_thread。
+        """
+        # 1. 从 url 提 bvid 作为匹配 key(case-insensitive,容许 "BV1" / "Bv1")
+        import re
+        bvid_m = re.search(r"([Bb][Vv][A-Za-z0-9]+)", url)
+        if not bvid_m:
+            logger.warning(
+                "phase_a_start_url: URL 不含 bvid (%s) → 决策 A 跳视频", url,
+            )
+            return 0.0
+        bvid = bvid_m.group(1)
+
+        # 2. 找用户已开的 B站 tab
+        page = await self._driver.arun_on_driver_thread(
+            self._driver.find_page_by_url_substring, bvid,
+        )
+        if page is None:
+            logger.warning(
+                "phase_a_start_url: 找不到已开 B站 tab (bvid=%s) → 决策 A 跳视频。"
+                "请先在 Chrome 打开 %s", bvid, url,
+            )
+            return 0.0
+
+        # 3. bring_to_front 让 Chrome 不 unload
+        try:
+            await self._driver.arun_on_driver_thread(page.bring_to_front)
+        except Exception as e:
+            logger.debug("phase_a_start_url: bring_to_front best-effort 失败: %s", e)
+
+        # 4. 检查 page 是否还活着
+        try:
+            is_closed = await self._driver.arun_on_driver_thread(
+                lambda: page.is_closed()
+            )
+        except Exception as e:
+            logger.warning("phase_a_start_url: page.is_closed() 检查失败: %s", e)
+            is_closed = False
+
+        if is_closed:
+            logger.warning(
+                "phase_a_start_url: page 已关闭(Chrome memory saver / 反爬),"
+                "Phase A 失败 → 决策 A 跳过视频"
+            )
+            return 0.0
+
+        # 5. 委托给 phase_a_start(pause + capture)
+        return await self.phase_a_start(page, audio_id)
+
+    async def phase_c_end_url(self, *, url: str, audio_id: str) -> None:
+        """F2-6 v3.2.1:PHASE C url 入口(只截末尾 1 帧)。
+
+        v3.2.1.8:同 phase_a_start_url,复用用户已开的 B站 tab,不再开新空白页。
+        找不到 → log warning,return(决策 A 只对 Phase A,Phase C 失败不阻塞主流程)。
+        """
+        import re
+        bvid_m = re.search(r"([Bb][Vv][A-Za-z0-9]+)", url)
+        if not bvid_m:
+            logger.warning("phase_c_end_url: URL 不含 bvid (%s),跳过截图", url)
+            return
+        bvid = bvid_m.group(1)
+
+        page = await self._driver.arun_on_driver_thread(
+            self._driver.find_page_by_url_substring, bvid,
+        )
+        if page is None:
+            logger.warning(
+                "phase_c_end_url: 找不到已开 B站 tab (bvid=%s),跳过截图", bvid,
+            )
+            return
+        try:
+            await self._driver.arun_on_driver_thread(page.bring_to_front)
+        except Exception:
+            pass
+        await self.phase_c_only(page, audio_id)
+
+    async def phase_c_only(self, page: Any, audio_id: str) -> float:
+        """PHASE C only:只截末尾 1 帧(Phase C 单独入口,不跑 phase_b 轮询)。
+
+        Returns: monotonic end_ts 或 0.0(失败时)。
+        """
+        save_path = self._capture.save_dir / f"{audio_id}.phase_c.png"
+        try:
+            ok = await self._capture.capture_full_screen(save_path)
+            if not ok:
                 return 0.0
             return time.monotonic()
         except Exception:
@@ -127,6 +249,21 @@ class ScreenshotPhaseController:
         except Exception:
             pass
         return end_ts
+
+    # ---- 同步包装方法 (用于 sync 代码) ----
+
+    def phase_b_then_c_sync(
+        self,
+        page: Any,
+        audio_id: str,
+        duration_sec: int,
+        poll_interval_sec: float = 5,
+    ) -> float:
+        """同步版本的 phase_b_then_c (用于 sync 代码)。
+
+        通过 asyncio.run 在后台运行异步版本。
+        """
+        return asyncio.run(self.phase_b_then_c(page, audio_id, duration_sec, poll_interval_sec))
 
     def phase_d_write_index(
         self,

@@ -49,6 +49,9 @@ class QualityCheckConfig(BaseModel):
     min_score_to_pass: int
     min_char_per_second: float
     max_char_per_second: float
+    # 2026-09-07 v3.2:总字数下界 — 文本过短直接 fail,不调 LLM
+    # 避免短文本浪费 LLM token,也避免视频大量静音被误判为低语速
+    min_chars: int = 50
     # 2026-09-02 Level 4:LLM 语义清理(在 quality_check 之前,云端 LLM,
     # 复用 quality_check.model 或独立 model)。
     # 设计目标:把 faster-whisper 输出的繁简混排 + 同音字错字 + 碎片,
@@ -63,25 +66,15 @@ class QualityCheckConfig(BaseModel):
 
 
 class BrowserPluginConfig(BaseModel):
+    """F2-10 简化的浏览器插件配置:只剩 popup 显示相关字段。
+
+    F2-10 已删除 BrowserRecorder 流程,以下字段一并删除(主流程不再读):
+      - enabled / plugin_paths:从未被读取
+      - record_hotkey / record_download_timeout_sec / record_pre_grace_sec /
+        record_post_buffer_sec:F2-7/2-8 BrowserRecorder 流程残留,主流程不用
+    """
     name: str
-    enabled: bool
     remind_timeout_sec: int
-    plugin_paths: list[Path]
-    record_hotkey: str = "Alt+Shift+R"
-    # FR-2.15:Screencastify 录完后跳 chrome-extension:// 编辑标签页,
-    # 用户点 btn-download 触发 Chrome download 事件。30min 长视频用户可能
-    # 短暂 AFK,所以默认 180s。
-    record_download_timeout_sec: int = 180
-    # FR-2.15(legacy):旧 Screen Recorder 流程在按 hotkey(CDP no-op)之后
-    # 给用户的窗口期,让用户有时间在真实 Chrome 里手动按对应热键 / 操作 popup。
-    # F2-8:流程已废弃;字段保留(默认)以兼容旧 config.yaml。
-    # 0 = 关闭(B级批量场景)。
-    record_pre_grace_sec: int = 10
-    # FR-2.15:`duration_sec` 是估计的视频时长;实际录屏结束由用户手动 Stop。
-    # "录屏到时"通知在 duration_sec + post_buffer_sec 后发出,给用户 buffer:
-    # 1) 浏览器加载延迟 2) 用户手动点 Play 3) 视频缓冲 4) 用户暂停/重看。
-    # 录屏本身不受影响(用户控制 Stop),只是通知延后。
-    record_post_buffer_sec: int = 30
 
 
 class SummaryConfig(BaseModel):
@@ -108,6 +101,16 @@ class LoggingConfig(BaseModel):
     notify_on_fail: bool
     log_alert_threshold: int
     log_alert_enabled: bool
+
+
+class AudioConfig(BaseModel):
+    """F2-10 (2026-09-08):用户手动下载音频的根目录。
+
+    约定:用户把 Tab Audio Recorder 录完的 webm 拖到 `<downloads_dir>/YYYY-MM-DD/`。
+    代码侧:扫描今天的 YYYY-MM-DD/ 找未转写 webm,转写后同文件夹落 `<id>.txt`
+    + sidecar `<id>.transcribed.txt` 标记。
+    """
+    downloads_dir: Path
 
 
 class LLMClientConfig(BaseModel):
@@ -149,6 +152,17 @@ class PuppeteerConfig(BaseModel):
 
     def cdp_url(self) -> str:
         return f"http://{self.cdp_host}:{self.debugging_port}"
+
+
+class ChromeSessionConfig(BaseModel):
+    """v3.2 (F2-6.1):Session 级 Chrome + page 槽复用(FR-2.28 关键路径截图)。
+
+    enabled=False → 不启用截图,流程照常(原有 fallback 行为)
+    enabled=True  → Session 启 1 次 Chrome,每条视频复用一个 page 槽(只 page.goto)
+    """
+
+    enabled: bool = False  # 默认关(避免现有调用方未注入 browser_driver 时报错)
+    debug_port: int = 9222
 
 
 # ---------------- 平台 adapter 配置(2026-09-02 新增) ----------------
@@ -196,6 +210,10 @@ class VLAConfig(BaseModel):
     puppeteer: PuppeteerConfig = PuppeteerConfig()
     # 2026-09-02 修复:之前 VLAConfig 没有 platforms 字段,YAML 里写 platforms:.* 是被 pydantic 静默忽略的
     platforms: PlatformsConfig = PlatformsConfig()
+    # F2-6.1 (v3.2):Chrome Session(截图关键路径依赖)
+    chrome_session: ChromeSessionConfig = ChromeSessionConfig()
+    # F2-10 (2026-09-08):用户手动下载音频根目录(扫今天 YYYY-MM-DD/ 路径)
+    audio: AudioConfig | None = None
 
     @model_validator(mode="before")
     @classmethod

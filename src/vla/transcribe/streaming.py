@@ -91,20 +91,29 @@ class StreamingTranscriber:
 
     # ---------------- AudioTranscriber Protocol 实现 ----------------
 
-    def transcribe(self, video_path: Path) -> str:
+    def transcribe(self, video_path: Path, out_dir: Path | None = None) -> str:
         """把视频文件转写成字幕文本。
 
         流程(FR-3.1/3.2/3.3/3.8/3.9):
         1. ffmpeg 抽音轨(16kHz 单声道 PCM s16le)
         2. 删除视频源(FR-3.3 边转写边清理 — 音频已就绪,原片冗余)
+           除非 out_dir 被显式指定(F2-10 用户手动下载路径,源文件 = webm,不可删)
         3. faster-whisper 转写(beam_size=5, vad_filter=True)
         4. 写 <stem>.transcript.txt(Whisper 原始,FR-3.8)
+           out_dir 显式给出 → 落到 out_dir;否则 → 默认 `log_dir/transcripts/`
         5. 本地后处理(若 enabled)→ 写 <stem>.cleaned.txt(FR-3.8)
         6. 云端 LLM 整理(若 refine_enabled 且 refiner 注入)→ 写 <stem>.refined.txt(FR-3.9)
         7. 当作 fallback 链返回:refined > cleaned > transcript
 
         音频文件保留(由 cleanup() 在质量检查通过后删除;失败路径 FR-3.5
         也保留供排查)。
+
+        Args:
+            video_path: 视频或音频文件路径(FFmpeg 直接吃 webm / mp4 / wav)
+            out_dir: F2-10 用户手动下载路径。给出时:
+                - 跳过 FR-3.3 视频源删除(因为是用户已下载的 webm,不能删)
+                - transcript/cleaned/refined 落 `<out_dir>/<stem>.{transcript,cleaned,refined}.txt`
+              不给时:保持原行为(删源 + 落到 log_dir/transcripts/)。
 
         Raises:
             RuntimeError: ffmpeg 抽音轨失败 / 未生成 wav 文件
@@ -114,7 +123,8 @@ class StreamingTranscriber:
         self._extract_audio(video_path, audio_path)
 
         # FR-3.3: 音频就绪后立即删视频源(必须,不能等转写完才删)
-        if video_path.exists():
+        # F2-10 例外:out_dir 显式给出时(webm 是用户已下载产物,不能删)。
+        if out_dir is None and video_path.exists():
             video_path.unlink()
             logger.info("🗑️ 删除视频源(FR-3.3): %s", video_path)
 
@@ -134,8 +144,13 @@ class StreamingTranscriber:
         )
 
         # FR-3.8: 写 transcript.txt(原始,总写)
-        transcripts_dir = self.config.logging.log_dir / "transcripts"
-        transcripts_dir.mkdir(parents=True, exist_ok=True)
+        # F2-10:out_dir 显式给出 → 落 out_dir;否则落默认 log_dir/transcripts/。
+        if out_dir is not None:
+            transcripts_dir = Path(out_dir)
+            transcripts_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            transcripts_dir = self.config.logging.log_dir / "transcripts"
+            transcripts_dir.mkdir(parents=True, exist_ok=True)
         stem = video_path.stem
         transcript_path = transcripts_dir / f"{stem}.transcript.txt"
         transcript_path.write_text(raw_text, encoding="utf-8")

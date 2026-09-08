@@ -163,19 +163,18 @@ class TestRegisterInstance:
 
 
 # ---------------------------------------------------------------------------
-# F2-7: PlatformAdapter.fetch_via_recording 默认实现测试
+# F2-10: PlatformAdapter.fetch_via_recording 默认实现只剩 path ① yt-dlp
 # SSOT: docs/superpowers/specs/2026-09-03-fr2-fr3-impl-design.md §4.1 + §4.5
-# FR-2.14 v3:
-#   - path ① yt-dlp → path ② Tab Audio Recorder → None(Q7 Silent fallback)
-#   - screenshot_controller=None 时不触发 FR-2.28
-#   - path ① 命中 → 不调 tab_recorder.start_recording(省一轮点击)
+#
+# F2-10 (2026-09-08): path ② Tab Audio Recorder 已删(迁到 strategy._try_browser
+# 弹窗 enabled 分支),screenshot_controller 也删(改由 main.py 直接触发)。
+# 本测试只验证 path ① yt-dlp 的命中 / 失败行为。
 # ---------------------------------------------------------------------------
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 from vla.audio.source_factory import AudioExtractionResult
 from vla.subtitle.platform_adapter import PlatformAdapter
-from vla.subtitle.tab_audio_recorder import TabAudioRecorder  # noqa: F401  (type for tests)
 
 
 def _make_audio_factory(*, downloadable: bool, raise_extract: bool = False) -> MagicMock:
@@ -194,16 +193,6 @@ def _make_audio_factory(*, downloadable: bool, raise_extract: bool = False) -> M
     return f
 
 
-def _make_tab_recorder(*, enabled: bool = True) -> MagicMock:
-    r = MagicMock()
-    r.probe_status = AsyncMock(
-        return_value="enabled" if enabled else "disabled"
-    )
-    r.start_recording = AsyncMock(return_value="audio_id_123")
-    r.click_download = AsyncMock(return_value=Path("/tmp/rec.wav"))
-    return r
-
-
 def _make_transcriber(text: str = "transcribed text") -> MagicMock:
     t = MagicMock()
     t.transcribe = MagicMock(return_value=text)
@@ -211,19 +200,17 @@ def _make_transcriber(text: str = "transcribed text") -> MagicMock:
     return t
 
 
-def _make_screenshot() -> MagicMock:
-    s = MagicMock()
-    s.phase_a_start = AsyncMock(return_value=100.0)
-    s.phase_b_then_c = AsyncMock(return_value=400.0)
-    s.phase_d_write_index = MagicMock()
-    return s
-
-
 class TestPathOneHit:
+    """F2-10:PlatformAdapter.fetch_via_recording 只剩 path ① yt-dlp。
+
+    - is_downloadable=True → extract → transcribe → cleanup → return (text, {"via": "yt-dlp", ...})
+    - is_downloadable=True 但 extract 抛 → 静默 return None(Q7 Silent)
+    - is_downloadable=False → return None(直接走人,没有 path ② 兜底)
+    """
+
     def test_path_one_returns_transcribed_text_when_downloadable(self) -> None:
         """is_downloadable=True → extract → transcribe → return (text, meta)。"""
         af = _make_audio_factory(downloadable=True)
-        tr = _make_tab_recorder()
         tx = _make_transcriber("yt-dlp text")
         adapter = PlatformAdapter()
         result = adapter.fetch_via_recording(
@@ -231,96 +218,74 @@ class TestPathOneHit:
             url="https://www.bilibili.com/video/Bv1",
             duration_sec=300,
             audio_factory=af,
-            tab_recorder=tr,
             transcriber=tx,
         )
         assert result is not None
         text, meta = result
         assert text == "yt-dlp text"
         assert meta["via"] == "yt-dlp"
-        # path ② 没被调
-        tr.start_recording.assert_not_called()
         # cleanup 调了(audio_path 已用完)
         tx.cleanup.assert_called_once()
 
     def test_path_one_returns_none_when_extract_fails(self) -> None:
-        """is_downloadable=True 但 extract 抛 → 静默 fallback 到 path ② (Q7)。"""
+        """is_downloadable=True 但 extract 抛 → 静默 return None(Q7)。
+
+        F2-10 后没有 path ② 兜底,直接返回 None。
+        """
         af = _make_audio_factory(downloadable=True, raise_extract=True)
-        tr = _make_tab_recorder(enabled=False)  # path ② 也失败 → None
         tx = _make_transcriber("unused")
         adapter = PlatformAdapter()
         result = adapter.fetch_via_recording(
             driver=MagicMock(), url="https://x.com/v/1", duration_sec=100,
-            audio_factory=af, tab_recorder=tr, transcriber=tx,
+            audio_factory=af, transcriber=tx,
         )
         # Q7: 静默 — 不 raise,只是 None
         assert result is None
-        tr.probe_status.assert_awaited()
 
+    def test_path_one_returns_none_when_not_downloadable(self) -> None:
+        """is_downloadable=False → return None(F2-10 后没 path ② 兜底)。
 
-class TestPathTwoHit:
-    def test_path_two_used_when_not_downloadable(self) -> None:
-        """is_downloadable=False → 自动试 path ② (Q7 Silent,no warning)。"""
+        旧版会 fallback 到 tab_recorder,新版直接 None(由 strategy 层决定后续)。
+        """
         af = _make_audio_factory(downloadable=False)
-        tr = _make_tab_recorder(enabled=True)
-        tx = _make_transcriber("tab text")
+        tx = _make_transcriber("unused")
         result = PlatformAdapter().fetch_via_recording(
             driver=MagicMock(), url="https://x.com/v/2", duration_sec=200,
-            audio_factory=af, tab_recorder=tr, transcriber=tx,
+            audio_factory=af, transcriber=tx,
         )
-        assert result is not None
-        text, meta = result
-        assert text == "tab text"
-        assert meta["via"] == "tab_recorder"
-        tr.probe_status.assert_awaited_once()
-        tr.start_recording.assert_awaited_once()
-        tr.click_download.assert_awaited_once()
+        assert result is None
+        # extract 不应被调(没 download)
+        af.extract.assert_not_called()
 
 
-class TestScreenshotIntegration:
-    def test_screenshot_controller_phase_a_called_only_on_path2(self) -> None:
-        """screenshot_controller=mock → path ② 触发 phase_a_start + phase_b_then_c + phase_d。"""
-        af = _make_audio_factory(downloadable=False)
-        tr = _make_tab_recorder(enabled=True)
-        tx = _make_transcriber("tab text")
-        sc = _make_screenshot()
-        PlatformAdapter().fetch_via_recording(
-            driver=MagicMock(), url="https://x.com/v/3", duration_sec=200,
-            audio_factory=af, tab_recorder=tr, transcriber=tx,
-            screenshot_controller=sc,
-        )
-        sc.phase_a_start.assert_awaited_once()
-        sc.phase_b_then_c.assert_awaited_once()
-        sc.phase_d_write_index.assert_called_once()
+class TestSignatureGuard:
+    """F2-10:fetch_via_recording 不再接受 tab_recorder / screenshot_controller。
 
-    def test_screenshot_controller_none_skips_phases(self) -> None:
-        """screenshot_controller=None → 不调 phase_*(FR-2.28 opt-in)。"""
-        af = _make_audio_factory(downloadable=False)
-        tr = _make_tab_recorder(enabled=True)
-        tx = _make_transcriber("tab text")
-        result = PlatformAdapter().fetch_via_recording(
-            driver=MagicMock(), url="https://x.com/v/4", duration_sec=200,
-            audio_factory=af, tab_recorder=tr, transcriber=tx,
-            screenshot_controller=None,
-        )
-        assert result is not None  # 仍然返回 text
-        # 但 phase_* 不能 mock 验证(没传);用 path ② 命中验证
-        assert result is not None
-        text, meta = result
-        assert text == "tab text"
-        assert meta["via"] == "tab_recorder"
+    传这些 kwarg 应 TypeError(防止误用)。
+    """
 
-    def test_path_one_hit_does_not_trigger_screenshot(self) -> None:
-        """path ① 命中时即使传 screenshot_controller 也不调 phase_*。"""
+    def test_passing_tab_recorder_kwarg_raises(self) -> None:
         af = _make_audio_factory(downloadable=True)
-        tr = _make_tab_recorder()
-        tx = _make_transcriber("yt-dlp text")
-        sc = _make_screenshot()
-        PlatformAdapter().fetch_via_recording(
-            driver=MagicMock(), url="https://x.com/v/5", duration_sec=300,
-            audio_factory=af, tab_recorder=tr, transcriber=tx,
-            screenshot_controller=sc,
-        )
-        sc.phase_a_start.assert_not_called()
-        sc.phase_b_then_c.assert_not_called()
-        sc.phase_d_write_index.assert_not_called()
+        tx = _make_transcriber()
+        tr = MagicMock()
+        with pytest_raises_type_error():
+            PlatformAdapter().fetch_via_recording(
+                driver=MagicMock(), url="https://x.com/v/1", duration_sec=100,
+                audio_factory=af, transcriber=tx, tab_recorder=tr,
+            )
+
+    def test_passing_screenshot_controller_kwarg_raises(self) -> None:
+        af = _make_audio_factory(downloadable=True)
+        tx = _make_transcriber()
+        sc = MagicMock()
+        with pytest_raises_type_error():
+            PlatformAdapter().fetch_via_recording(
+                driver=MagicMock(), url="https://x.com/v/1", duration_sec=100,
+                audio_factory=af, transcriber=tx, screenshot_controller=sc,
+            )
+
+
+def pytest_raises_type_error():
+    """Helper:返回一个 context manager,期望 TypeError。"""
+    import pytest
+    return pytest.raises(TypeError)

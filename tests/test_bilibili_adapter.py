@@ -1,15 +1,21 @@
-"""BilibiliAdapter 测试(SSOT: requirements.md FR-2.0/2.1/2.17 + implementation-plan.md Phase 3.3 + F2-7)。
+"""BilibiliAdapter 测试(SSOT: requirements.md FR-2.0/2.1/2.17 + implementation-plan.md Phase 3.3 + F2-7/F2-10)。
 
 BilibiliAdapter 继承 PlatformAdapter:
 - match(url) 匹配 bilibili.com / b23.tv
 - fetch_api_subtitle(url) → 委托 BilibiliOfficialSubtitle.get_subtitle()
 - fetch_browser_subtitle(driver, url) → 用 BrowserDriver 4 种 JS 探测
 - fetch_via_recording(driver, url, duration_sec, **kwargs) → 转发到 PlatformAdapter
-  默认实现(FR-2.14 v3:path ① yt-dlp → path ② Tab Audio Recorder,Q7 Silent fallback)
+  默认实现(F2-10 后只剩 path ① yt-dlp;path ② Tab Audio Recorder 已迁到 strategy)
+
+F2-10 (2026-09-08) 依赖简化:
+- 旧 F2-7 4 deps:audio_factory / tab_recorder / transcriber / screenshot_controller
+- 新 F2-10 2 deps:audio_factory / transcriber
+  · tab_recorder → 改由 strategy._try_browser 弹窗 enabled 分支持有
+  · screenshot_controller → 改由 main.py 直接调 ScreenshotPhaseController 持有
 """
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -32,7 +38,7 @@ def driver() -> MagicMock:
     return MagicMock(spec=BrowserDriver)
 
 
-# F2-7:4 个 REQUIRED deps(audio_factory / tab_recorder / transcriber / screenshot_controller)
+# F2-10:只剩 2 REQUIRED deps(audio_factory / transcriber)
 @pytest.fixture
 def audio_factory() -> MagicMock:
     af = MagicMock()
@@ -46,15 +52,6 @@ def audio_factory() -> MagicMock:
 
 
 @pytest.fixture
-def tab_recorder() -> MagicMock:
-    tr = MagicMock()
-    tr.probe_status = AsyncMock(return_value="disabled")
-    tr.start_recording = AsyncMock(return_value="audio_id_x")
-    tr.click_download = AsyncMock(return_value=Path("/tmp/audio_id_x.webm"))
-    return tr
-
-
-@pytest.fixture
 def transcriber() -> MagicMock:
     tx = MagicMock()
     tx.transcribe = MagicMock(return_value="unused")
@@ -63,28 +60,15 @@ def transcriber() -> MagicMock:
 
 
 @pytest.fixture
-def screenshot_controller() -> MagicMock:
-    sc = MagicMock()
-    sc.phase_a_start = AsyncMock(return_value=0.0)
-    sc.phase_b_then_c = AsyncMock(return_value=0.0)
-    sc.phase_d_write_index = MagicMock()
-    return sc
-
-
-@pytest.fixture
 def adapter(
     official,
     audio_factory,
-    tab_recorder,
     transcriber,
-    screenshot_controller,
 ) -> BilibiliAdapter:
     return BilibiliAdapter(
         official=official,
         audio_factory=audio_factory,
-        tab_recorder=tab_recorder,
         transcriber=transcriber,
-        screenshot_controller=screenshot_controller,
     )
 
 
@@ -121,93 +105,89 @@ class TestMatch:
 
 class TestInheritance:
     def test_is_platform_adapter_subclass(self):
-        """F2-7:BilibiliAdapter 继承 PlatformAdapter(不再是 duck typing)。"""
         assert issubclass(BilibiliAdapter, PlatformAdapter)
 
     def test_instance_is_platform_adapter(self, adapter: BilibiliAdapter):
         assert isinstance(adapter, PlatformAdapter)
 
 
-# ---------------- fetch_api_subtitle() ----------------
+# ---------------- fetch_api_subtitle ----------------
 
 
 class TestFetchApi:
     def test_delegates_to_official_subtitle(self, adapter: BilibiliAdapter, official: MagicMock):
-        official.get_subtitle.return_value = ("官方字幕", {"language": "zh-CN"})
-
-        text, meta = adapter.fetch_api_subtitle("https://www.bilibili.com/video/BV1xxx")
-
+        official.get_subtitle.return_value = ("官方字幕", {"lang": "zh-CN"})
+        text, meta = adapter.fetch_api_subtitle("https://www.bilibili.com/video/BV1x")
         assert text == "官方字幕"
-        assert meta == {"language": "zh-CN"}
-        official.get_subtitle.assert_called_once_with("https://www.bilibili.com/video/BV1xxx")
+        assert meta == {"lang": "zh-CN"}
+        official.get_subtitle.assert_called_once_with("https://www.bilibili.com/video/BV1x")
 
     def test_returns_none_when_official_returns_none(self, adapter: BilibiliAdapter, official: MagicMock):
         official.get_subtitle.return_value = None
-
-        result = adapter.fetch_api_subtitle("https://www.bilibili.com/video/BV1xxx")
-
+        result = adapter.fetch_api_subtitle("https://www.bilibili.com/video/BV1x")
         assert result is None
 
 
-# ---------------- fetch_browser_subtitle() ----------------
+# ---------------- fetch_browser_subtitle ----------------
 
 
 class TestFetchBrowser:
     def test_creates_page_and_calls_browser_driver(self, adapter, driver: MagicMock):
-        driver.fetch_subtitle_via_browser.return_value = ("browser字幕", {"method": "track"})
+        page = MagicMock()
+        driver.new_background_page.return_value = page
+        driver.fetch_subtitle_via_browser.return_value = ("浏览器字幕", {"method": "track"})
 
-        text, meta = adapter.fetch_browser_subtitle(driver, "https://www.bilibili.com/video/BV1xxx")
+        text, meta = adapter.fetch_browser_subtitle(driver, "https://www.bilibili.com/video/BV1x")
 
-        assert text == "browser字幕"
-        assert meta["method"] == "track"
-        assert meta["platform"] == "bilibili"
+        assert text == "浏览器字幕"
+        assert meta == {"method": "track", "platform": "bilibili"}
         driver.new_background_page.assert_called_once()
 
     def test_returns_none_when_browser_miss(self, adapter, driver: MagicMock):
+        page = MagicMock()
+        driver.new_background_page.return_value = page
         driver.fetch_subtitle_via_browser.return_value = (None, None)
 
-        result = adapter.fetch_browser_subtitle(driver, "https://www.bilibili.com/video/BV1xxx")
-
+        result = adapter.fetch_browser_subtitle(driver, "https://www.bilibili.com/video/BV1x")
         assert result is None
 
     def test_preserves_method_in_meta(self, adapter, driver: MagicMock):
-        driver.fetch_subtitle_via_browser.return_value = ("x", {"method": "initial_state", "lang": "zh"})
+        page = MagicMock()
+        driver.new_background_page.return_value = page
+        driver.fetch_subtitle_via_browser.return_value = ("x", {"method": "initial_state"})
 
-        _, meta = adapter.fetch_browser_subtitle(driver, "url")
-
+        text, meta = adapter.fetch_browser_subtitle(driver, "https://www.bilibili.com/video/BV1x")
         assert meta["method"] == "initial_state"
-        assert meta["lang"] == "zh"
         assert meta["platform"] == "bilibili"
 
 
-# ---------------- fetch_via_recording() — F2-7:转发到 base impl ----------------
+# ---------------- fetch_via_recording(F2-10:只剩 path ① yt-dlp) ----------------
 
 
 class TestFetchViaRecording:
-    """F2-7:BilibiliAdapter.fetch_via_recording 转发到 PlatformAdapter base impl。
+    """F2-10:BilibiliAdapter.fetch_via_recording 转发到 PlatformAdapter base impl,
+    base impl 只剩 path ① yt-dlp(原来 path ② tab_recorder 删了)。
 
     验证:
-    - 不再依赖旧 Screen Recorder 模块(F2-8 后已删;本 adapter F2-7 已切到 4 deps 架构)
-    - 转发 self 持有的 4 deps 到 super().fetch_via_recording
+    - 转发 self 持有的 2 deps(audio_factory / transcriber)到 super().fetch_via_recording
     - 调用方可覆盖 kwargs(setdefault 语义)
     - B站 _make_stem override 用 bvid
     """
 
-    def test_returns_none_when_path12_both_fail(
+    def test_returns_none_when_path1_fails(
         self,
         adapter,
         audio_factory: MagicMock,
-        tab_recorder: MagicMock,
-        transcriber: MagicMock,
     ):
-        """默认 fixture:audio_factory.is_downloadable=False,tab_recorder probe=disabled
-        → path ① miss,path ② miss → return None。
+        """F2-10:只剩 path ① yt-dlp。is_downloadable=False → path ① miss → return None。
+
+        旧版还有 path ②(tab_recorder.probe_status → start_recording → click_download),
+        现在已删,所以不再断言 probe_status 被调。
         """
         result = adapter.fetch_via_recording(MagicMock(), "https://x.com/v/1", 30)
         assert result is None
-        # 验证确实调到 base impl 的两条路径
+        # 验证确实调到 base impl 的 path ①
         audio_factory.is_downloadable.assert_called_once()
-        tab_recorder.probe_status.assert_awaited_once()
 
     def test_path_one_hit_returns_yt_dlp_meta(
         self,
@@ -215,7 +195,7 @@ class TestFetchViaRecording:
         audio_factory: MagicMock,
         transcriber: MagicMock,
     ):
-        """path ① 命中 → return (text, {"via": "yt-dlp", "platform": "bilibili"})。
+        """path ① 命中 → return (text, {"via": "yt-dlp", "audio_path": ...})。
 
         注意:meta 不含 "platform"=bilibili,因为 base impl 不加 platform 标记
         (策略 ② 才加);本测试只验证 base impl 转发行为。
@@ -235,35 +215,29 @@ class TestFetchViaRecording:
         # cleanup 调了(audio_path 已用完)
         transcriber.cleanup.assert_called_once()
 
-    def test_forwards_4_deps_to_base_impl(
+    def test_forwards_2_deps_to_base_impl(
         self,
         adapter,
         audio_factory: MagicMock,
-        tab_recorder: MagicMock,
         transcriber: MagicMock,
-        screenshot_controller: MagicMock,
     ):
-        """super().fetch_via_recording 应收到 self 持有的 4 deps。
+        """super().fetch_via_recording 应收到 self 持有的 2 deps(F2-10 后)。
 
-        path ② 命中时 screenshot_controller 被调到 phase_*(screenshot_controller
-        fixture 默认 path ② 命中后调)。
+        验证 path ① 命中时:audio_factory.extract 被调,transcriber.transcribe 被调。
         """
-        # 触发 path ② 命中(让 screenshot_controller 被调)
-        audio_factory.is_downloadable.return_value = False
-        tab_recorder.probe_status = AsyncMock(return_value="enabled")
-        transcriber.transcribe.return_value = "tab text"
+        audio_factory.is_downloadable.return_value = True
+        transcriber.transcribe.return_value = "yt-dlp text"
 
         adapter.fetch_via_recording(MagicMock(), "https://x.com/v/2", 100)
 
-        # path ② 命中 → screenshot_controller.phase_a_start 应被调
-        screenshot_controller.phase_a_start.assert_awaited_once()
-        screenshot_controller.phase_b_then_c.assert_awaited_once()
-        screenshot_controller.phase_d_write_index.assert_called_once()
+        # path ① 命中 → audio_factory.extract 应被调
+        audio_factory.extract.assert_called_once()
+        transcriber.transcribe.assert_called_once()
+        transcriber.cleanup.assert_called_once()
 
     def test_caller_can_override_kwarg(
         self,
         adapter,
-        transcriber: MagicMock,
     ):
         """kwargs.setdefault 语义:调用方传 audio_factory 覆盖 self 持有的。
 
