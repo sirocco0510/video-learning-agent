@@ -259,6 +259,7 @@ def build_text_provider(
     checker: Any | None = None,
     refiner: Any | None = None,
     strategy: Any | None = None,
+    internal_spider: Any | None = None,  # Phase 9.6:bill-jc 用,注入 InternalSiteSpider
 ) -> tuple[FetchAssetFn, ProcessAssetFn]:
     """工厂函数:装配一个完整的 RealTextProvider,返回 (fetch_asset, process_asset) 两个 callable。
 
@@ -290,6 +291,12 @@ def build_text_provider(
                   monkey-patch 复用;None 时内部 auto-construct)
                   装配后 today_dir 会被算出来传给 RealTextProvider(若 cfg.audio 不为 None),
                   fetch_asset 路径 ④ scan_today_dir(§4.2 ④)才能跑通。
+        internal_spider: InternalSiteSpider(可选 — Phase 9.6:bill-jc 用)。
+                  若传,内部以 `register_instance(InternalSiteAdapter(spider=...))`
+                  注册,让 strategy.get_subtitle 策略 ①-a 命中、fetch_asset
+                  路径 ② 接管抽音。None 时维持旧 class-registered 行为
+                  (spider 未注入,InternalSiteAdapter 的 fetch_via_spider 直接
+                  返回 None,不影响老测试)。
 
     Returns:
         (fetch_asset, process_asset):两个独立 callable,分别对应"取资产"和"处理资产"。
@@ -346,7 +353,9 @@ def build_text_provider(
         )
 
         strategy = SubtitleStrategy(
-            registry=_build_registry(cfg, save_dir=save_dir),
+            registry=_build_registry(
+                cfg, save_dir=save_dir, internal_spider=internal_spider,
+            ),
             driver=driver,
             recorder=recorder,  # 保留(测试 fixture 注入 MagicMock,enabled 路径 stub)
             notifier=notifier,
@@ -381,12 +390,14 @@ def _build_registry(
     cfg: VLAConfig,
     *,
     save_dir: Path,
+    internal_spider: Any | None = None,
 ) -> Any:
     """装配 PlatformAdapterRegistry(2026-09-02 修复:之前一直是空的!)
 
     装配顺序:
     1. BilibiliAdapter(cfg.platforms.bilibili.enabled) — 实例注册(带 F2-10 2 deps)
-    2. InternalSiteAdapter(cfg.platforms.internal_site.enabled) — 类注册(无 deps)
+    2. InternalSiteAdapter(cfg.platforms.internal_site.enabled) — 实例注册(Phase 9.6
+       spider 注入)或 类注册(向后兼容老测试)
 
     B站 → 实例注册的原因:BilibiliAdapter 构造需要 `official`(B站官方 API 客户端)
     和 2 REQUIRED deps(audio_factory / transcriber),没法用 registry 默认的无参构造。
@@ -394,6 +405,10 @@ def _build_registry(
     **F2-10 (2026-09-08)**:tab_recorder / screenshot_controller 已从 BilibiliAdapter
     构造参数删除(分别由 strategy._try_browser 弹窗 enabled 分支和 main.py 的
     ScreenshotPhaseController 接管)。
+
+    **Phase 9.6 (2026-09-09)**:InternalSiteAdapter 改实例注册(spider 注入)— `internal_spider`
+    非 None 时构造 `InternalSiteAdapter(spider=internal_spider, ...)`;None 时 fallback 到
+    原 `register(InternalSiteAdapter)` 行为(spider 未注入,fetch_via_spider 内部 None)。
     """
     from vla.audio.source_factory import AudioSourceFactory
     from vla.subtitle.bilibili_adapter import BilibiliAdapter
@@ -422,8 +437,23 @@ def _build_registry(
         )
 
     if cfg.platforms.internal_site.enabled:
-        registry.register(InternalSiteAdapter)
-        logger.info("✓ 内部网站 adapter 已注册(class)")
+        if internal_spider is not None:
+            # Phase 9.6:spider 注入 → 实例注册(adapter 调 fetch_via_spider 走真实路径)
+            audio_factory = AudioSourceFactory(save_dir=save_dir / "audio_raw")
+            from vla.transcribe.streaming import StreamingTranscriber as _ST
+            transcriber = _ST(cfg)
+            instance = InternalSiteAdapter(
+                audio_factory=audio_factory,
+                tab_recorder=None,
+                transcriber=transcriber,
+                spider=internal_spider,
+            )
+            registry.register_instance(instance)
+            logger.info("✓ 内部网站 adapter 已注册(instance, spider 已注入)")
+        else:
+            # 向后兼容:无 spider 时维持 class 注册(spider=None,fetch_via_spider 返 None)
+            registry.register(InternalSiteAdapter)
+            logger.info("✓ 内部网站 adapter 已注册(class, spider 未注入)")
 
     return registry
 

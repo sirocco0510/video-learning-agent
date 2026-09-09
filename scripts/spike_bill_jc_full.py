@@ -118,11 +118,13 @@ def run(
         typer.echo("ERROR: --kng-id 或 --list-only 至少一个", err=True)
         raise typer.Exit(1)
 
-    _run_endtoend(cfg, spider, kng_id)
+    # 端到端模式:整段包在单个 asyncio.run 里 — fetch_asset / process_asset
+    # 共享 HTTP client / CDP 连接,跨 loop 会 "Event loop is closed"。
+    asyncio.run(_run_endtoend(cfg, spider, kng_id))
 
 
 def _run_list_mode(
-    spider: InternalSiteSpider,
+    spider: "InternalSiteSpider",
     root_label: str | None,
     limit: int,
 ) -> None:
@@ -143,19 +145,24 @@ def _run_list_mode(
         typer.echo(f"  {t.id} | {t.title} | {t.url}")
 
 
-def _run_endtoend(
+async def _run_endtoend(
     cfg: "VLAConfig",  # noqa: F821 - forward ref to avoid runtime import in type hints
-    spider: InternalSiteSpider,
+    spider: "InternalSiteSpider",
     kng_id: str,
 ) -> None:
-    """模式 2 + 3:端到端跑单视频(爬 m3u8 → 抽音 → 转写 → 质量门控)。"""
+    """模式 2 + 3:端到端跑单视频(爬 m3u8 → 抽音 → 转写 → 质量门控)。
+
+    整个流程在调用方的 event loop 里跑(fetch_asset / process_asset 共享
+    HTTP client + CDP 连接 — 跨 loop 会 "Event loop is closed")。
+    """
     from vla.main_provider import build_text_provider
     from vla.models import VideoTask
 
     logger = logging.getLogger("spike.e2e")
 
-    # fetch_asset 路径 ②(InternalSiteSpider → extract_m3u8_audio)需要 InternalSiteSpider
-    # 单例。build_text_provider 内部 auto-construct 一个;为了命中真实 spider,这里注入。
+    # Critical 2:QualityChecker 走启发式过但仍需 LLM 评分(must avoid
+    # "QualityChecker 没有 LLM 客户端…" RuntimeError 在 happy path 上)。
+    from vla.llm.client import LLMClient
     from vla.subtitle.strategy import SubtitleStrategy
     from vla.subtitle.tab_audio_recorder import TabAudioRecorder
     from vla.subtitle.browser_driver import BrowserDriver
@@ -190,13 +197,17 @@ def _run_endtoend(
         driver = None
 
     audio_factory = AudioSourceFactory(save_dir=save_dir / "audio_raw")
+    # Important 3:getattr 不支持 dotted path — 用字面量"tab audio"。
+    # 真实生产用 plugin_path 匹配(f26_pipeline.py:242),spike 不依赖扩展。
     tab_recorder = TabAudioRecorder(
-        match_keyword=getattr(
-            getattr(cfg, "extension", None), "tab_audio_recorder.match_keyword", "tab audio",
-        ),
+        match_keyword="tab audio",
         save_dir=save_dir / "audio_raw",
     )
 
+    # Critical 1 wiring:InternalSiteAdapter 必须以"实例注册 + spider 注入"形式
+    # 装配,这样 strategy.get_subtitle 策略 ①-a 才能命中 bill-jc URL。
+    # 类注册(spider=None) → fetch_via_spider 内部 _spider is None → None,
+    # 策略 ①-a miss → 后续路径不会触发。
     registry = PlatformAdapterRegistry()
     if cfg.platforms.bilibili.enabled:
         official = BilibiliOfficialSubtitle()
@@ -206,7 +217,13 @@ def _run_endtoend(
             transcriber=transcriber,
         ))
     if cfg.platforms.internal_site.enabled:
-        registry.register(InternalSiteAdapter)
+        registry.register_instance(InternalSiteAdapter(
+            audio_factory=audio_factory,
+            tab_recorder=tab_recorder,
+            transcriber=transcriber,
+            spider=spider,  # Phase 9.6:spider 注入,fetch_via_spider 才真走路径
+        ))
+        logger.info("✓ InternalSiteAdapter 已注册(instance, spider 已注入)")
 
     strategy = SubtitleStrategy(
         registry=registry,
@@ -223,10 +240,14 @@ def _run_endtoend(
         cfg=cfg,
     )
 
+    # Critical 2:QualityChecker 需要 LLM 客户端(否则启发式 + LLM 路径在
+    # 启发式全过的 happy path 上抛 RuntimeError)。
+    quality_llm = LLMClient(cfg.llm_client, model=cfg.quality_check.model)
     checker = QualityChecker(cfg)
+    checker.set_llm(quality_llm)
+
     refine_llm = None
     if cfg.quality_check.refine_enabled:
-        from vla.llm.client import LLMClient
         refine_llm = LLMClient(cfg.llm_client, model=cfg.quality_check.refine_model)
     refiner = SubtitleRefiner(cfg, refine_llm) if cfg.quality_check.refine_enabled else None
 
@@ -242,17 +263,22 @@ def _run_endtoend(
         checker=checker,
         refiner=refiner,
         strategy=strategy,
+        internal_spider=spider,  # Phase 9.6:兜底(spike 已自构造 registry,但保
+                                 # 证 build_text_provider 内部 auto-construct 路径也对)
     )
 
     task = VideoTask(
         id=kng_id,
         title=f"bill-jc-{kng_id}",
         url=f"https://b-learning.bill-jc.com/learn/{kng_id}",
+        # TODO(Phase 9.6):brief 强制 3600,quality 会按 3600s 估 char_per_second。
+        # 真实场景应从 spider.list_tasks 拿 expected_duration;spike 阶段
+        # 不阻塞主链路验收,先以 placeholder 跑通。
         expected_duration=3600,
     )
 
     logger.info("[FETCH] kng_id=%s resolution=%s", kng_id, spider.resolution)
-    asset = asyncio.run(fetch_asset(task))
+    asset = await fetch_asset(task)
     if asset is None:
         logger.error("[FAIL] fetch_asset 返回 None — 检查 Chrome debug + cookie")
         raise typer.Exit(1)
@@ -270,7 +296,7 @@ def _run_endtoend(
         )
 
     logger.info("[PROCESS] 转写 + 质量门控 ...")
-    result = asyncio.run(process_asset(asset, task))
+    result = await process_asset(asset, task)
     if result is None:
         logger.error("[FAIL] process_asset 返回 None(质量 fail / 转写异常)")
         raise typer.Exit(1)

@@ -1,30 +1,26 @@
-"""InternalSiteAdapter stub(SSOT: requirements.md FR-2.18 + implementation-plan.md Phase 3.4 + F2-7)。
+"""InternalSiteAdapter(SSOT: requirements.md FR-2.18 + implementation-plan.md Phase 3.4 + F2-7 + Phase 9.6)。
 
-公司内部视频网站 adapter 占位实现。
+公司内部视频网站 adapter。
 
-当前状态:
-- 无 API 格式(等公司下发账号后接入)
-- 无字幕提取逻辑(等拿到页面结构后实现)
-- fetch_api_subtitle / fetch_browser_subtitle / fetch_via_recording stub 返回 None,
-  让 strategy 优雅降级
+Phase 9.6 (2026-09-09) 实装 bill-jc.com 域:`fetch_via_spider` 委托给
+`InternalSiteSpider.fetch_m3u8(kng_id)`,返回 `(None, {"video_url": m3u8_url,
+"via": "internal_spider"})`。`strategy.get_subtitle` 在 ① 与 ② 之间探测这个
+方法,命中后 fetch_asset 路径 ② 走 `extract_m3u8_audio`。
 
-匹配规则:`internal.example.com` / `video.corp.local` 等预定义内部域名集合。
-后续可由配置驱动(platforms.internal.domains)。
-
-F2-7 改造:
+F2-7 历史:
 - 继承 PlatformAdapter(base class),与 BilibiliAdapter 风格一致
-- __init__ 接 4 F2-7 deps(audio_factory / tab_recorder / transcriber / screenshot_controller),
-  存为 private attributes;fetch_via_recording stub 仍返回 None
-  (等内部站真正接入后再考虑 override 转发 base impl)
+- __init__ 接 F2-7 deps(audio_factory / tab_recorder / transcriber /
+  screenshot_controller);tab_recorder / screenshot_controller 已无生产调用,
+  签名保留以兼容 tests/test_internal_site_adapter.py `_stub_deps()` 注入
+  MagicMock(删除会触发 TypeError)。
 
-F2-10 (2026-09-08) 状态:
-- tab_recorder / screenshot_controller 已无生产调用,但 __init__ 签名保留以兼容
-  tests/test_internal_site_adapter.py `_stub_deps()` 注入 MagicMock
-  (删除会触发 TypeError, 安全移除留待后续统一清理 PR)
+匹配规则:`b-learning.bill-jc.com` / `internal.example.com` / `video.corp.local`。
 """
 
 from __future__ import annotations
 
+import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 from vla.subtitle.platform_adapter import PlatformAdapter
@@ -32,19 +28,27 @@ from vla.subtitle.platform_adapter import PlatformAdapter
 if TYPE_CHECKING:
     from vla.audio.source_factory import AudioSourceFactory
     from vla.capture.screenshot_phase_controller import ScreenshotPhaseController
+    from vla.subtitle.internal_site_spider import InternalSiteSpider
     from vla.subtitle.tab_audio_recorder import TabAudioRecorder
     from vla.transcribe.streaming import AudioTranscriber
 
 
+logger = logging.getLogger(__name__)
+
+
 # 预定义内部域名集合;后续可由 config.platforms.internal.domains 覆盖
 _INTERNAL_DOMAINS: tuple[str, ...] = (
+    "b-learning.bill-jc.com",   # Phase 9.6:bill-jc 内部学习平台
     "internal.example.com",
     "video.corp.local",
 )
 
+# bill-jc 视频 URL 模板:https://b-learning.bill-jc.com/learn/<kng_id>
+_BILL_JC_LEARN_RE = re.compile(r"/learn/([^/?#]+)")
+
 
 class InternalSiteAdapter(PlatformAdapter):
-    """公司内部视频网站 adapter stub(占位实现,继承 PlatformAdapter)。"""
+    """公司内部视频网站 adapter(Phase 9.6:bill-jc.com 域接 InternalSiteSpider)。"""
 
     def __init__(
         self,
@@ -53,12 +57,15 @@ class InternalSiteAdapter(PlatformAdapter):
         tab_recorder: "TabAudioRecorder",
         transcriber: "AudioTranscriber",
         screenshot_controller: "ScreenshotPhaseController | None" = None,
+        spider: "InternalSiteSpider | None" = None,  # Phase 9.6:bill-jc 用
     ) -> None:
         # F2-7:存为 private attributes,与 BilibiliAdapter 风格一致
         self._audio_factory = audio_factory
         self._tab_recorder = tab_recorder
         self._transcriber = transcriber
         self._screenshot_controller = screenshot_controller
+        # Phase 9.6:可空 — 兼容 _stub_deps() 测试 fixture(无 spider 仍能实例化)
+        self._spider = spider
 
     @classmethod
     def match(cls, url: str) -> bool:
@@ -66,21 +73,54 @@ class InternalSiteAdapter(PlatformAdapter):
         return any(domain in url for domain in _INTERNAL_DOMAINS)
 
     def fetch_api_subtitle(self, url: str) -> tuple[str, dict] | None:
-        """stub: 无 API,返回 None。"""
+        """无平台 API → 返回 None(让 strategy 走 ② 浏览器探测)。"""
         return None
 
     def fetch_browser_subtitle(
         self, driver: Any, url: str
     ) -> tuple[str, dict] | None:
-        """stub: 等拿到页面结构后实现。"""
+        """bill-jc 无 DOM 字幕;返回 None。"""
         return None
+
+    def fetch_via_spider(
+        self, url: str
+    ) -> tuple[None, dict] | None:
+        """Phase 9.6:解析 URL → kng_id → 调 InternalSiteSpider.fetch_m3u8。
+
+        Returns:
+            (None, {"video_url": m3u8_url, "via": "internal_spider"}):
+            strategy.get_subtitle 把这包成 SubtitleResult(source="internal_spider"),
+            fetch_asset 路径 ② 看到 source.startswith("internal") 接管抽音。
+            None:spider 未注入 / URL 不含 /learn/<id> / spider 抛错(已 log)。
+        """
+        if self._spider is None:
+            logger.debug("fetch_via_spider 跳过:_spider 未注入")
+            return None
+        m = _BILL_JC_LEARN_RE.search(url)
+        if not m:
+            logger.debug("fetch_via_spider 跳过:URL 不含 /learn/<kng_id>: %s", url)
+            return None
+        kng_id = m.group(1)
+        try:
+            m3u8_url = self._run_spider_fetch(self._spider, kng_id)
+        except Exception as e:
+            logger.warning("fetch_via_spider 失败 kng=%s:%s", kng_id, e)
+            return None
+        return None, {"video_url": m3u8_url, "via": "internal_spider"}
+
+    @staticmethod
+    def _run_spider_fetch(spider: "InternalSiteSpider", kng_id: str) -> str:
+        """隔离的同步→异步桥:让 fetch_via_spider 保持同步签名,
+        内部用 asyncio.run 跑 spider.fetch_m3u8(coroutine)。
+
+        strategy 在 await get_subtitle 里通过 to_thread 调本方法,本方法在新
+        event loop 里跑 spider — 避免 greenlet / 当前 loop 嵌套的报错。
+        """
+        import asyncio
+        return asyncio.run(spider.fetch_m3u8(kng_id))
 
     def fetch_via_recording(
         self, driver: Any, url: str, duration_sec: int
     ) -> tuple[str, dict] | None:
-        """stub: 录屏兜底可后续接入,目前返回 None。
-
-        注意:此处故意不 override 转发到 base impl —— 内部站拿到账号/页面结构前,
-        默认 None 让 strategy 降级即可。等真正接入后再考虑 override。
-        """
+        """bill-jc 已走 spider 路径,无需录屏兜底;返回 None。"""
         return None

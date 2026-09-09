@@ -241,6 +241,12 @@ class SubtitleStrategy:
 
         每级 try/except 内调用 SubtitleResult(...):pydantic 校验失败
         (MagicMock / None 等异常值)被当作 miss,降级到下一级。
+
+        Phase 9.6:在 ① 与 ② 之间增加一个"internal_spider"分支 — 仅当 adapter
+        有 `fetch_via_spider` 方法时启用(默认 attribute lookup,duck typing;
+        duck typing 让旧 adapter / 测试 fixture 不受影响)。命中后返回
+        SubtitleResult(text=None, source="internal_spider", metadata={"video_url":
+        m3u8_url, ...}),让 fetch_asset 路径 ② 走 extract_m3u8_audio 抽音。
         """
         adapter = self._pick_adapter(url)
 
@@ -255,6 +261,14 @@ class SubtitleStrategy:
                 )
         except Exception as e:
             self.log.warning("策略 ① 失败: %s", e)
+
+        # ①-a InternalSiteSpider(Phase 9.6:bill-jc 域)
+        # 仅当 adapter 有 fetch_via_spider 方法(duck typing)才走 — 其他
+        # adapter / 测试 fixture 不受影响。
+        spider_result = await self._try_internal_spider(adapter, url)
+        if spider_result is not None:
+            self.log.info("✓ 策略 ①-a 命中(internal_spider)")
+            return spider_result
 
         # ② Browser(FR-2.5~2.8 字幕探测 + FR-2.14 Screen Recorder + FR-2.21 popup)
         # v3.2.1.6: _try_browser 内部 run_on_driver_thread + ask_open_browser 同步阻塞,
@@ -314,6 +328,39 @@ class SubtitleStrategy:
             self.log.warning("无匹配 adapter,使用 FallbackAdapter: %s", url)
             adapter = FallbackAdapter(self.driver, self.recorder, self._save_dir)
         return adapter
+
+    async def _try_internal_spider(
+        self, adapter: Any, url: str
+    ) -> SubtitleResult | None:
+        """Phase 9.6:让 adapter 调 InternalSiteSpider 拿 m3u8。
+
+        duck typing:有 fetch_via_spider 方法且返回非 None 才走。方法内部
+        已用 to_thread 把同步实现包装(隔离 event loop),此处直接 await。
+        """
+        fetch_fn = getattr(adapter, "fetch_via_spider", None)
+        if fetch_fn is None:
+            return None
+        try:
+            # adapter.fetch_via_spider 是同步函数(内部 asyncio.run 桥接),
+            # 在 asyncio context 中需 to_thread 隔离 — 否则新 loop 与当前
+            # loop 嵌套会报 "asyncio.run() cannot be called from a running
+            # event loop"。
+            result = await asyncio.to_thread(fetch_fn, url)
+        except Exception as e:
+            self.log.warning("策略 ①-a (internal_spider) 异常:%s", e)
+            return None
+        if result is None:
+            return None
+        # adapter 返回 (text, meta);内部约定 text=None + meta["video_url"]
+        _, meta = result
+        if not (isinstance(meta, dict) and meta.get("video_url")):
+            self.log.warning(
+                "策略 ①-a 返回 meta 缺 video_url:%s", meta,
+            )
+            return None
+        return SubtitleResult(
+            text=None, source="internal_spider", metadata=meta,
+        )
 
     def _try_browser(
         self, adapter: Any, url: str, duration_sec: int

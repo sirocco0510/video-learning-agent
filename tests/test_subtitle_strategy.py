@@ -566,4 +566,96 @@ class TestScanTodayDirPath:
         await enabled_strategy.get_subtitle(url)
 
         plugin_status.mark_available.assert_not_called()
+
+
+# ---------------- Phase 9.6:①-a internal_spider 分支 ----------------
+
+
+class TestPhase96SpiderDispatch:
+    """Phase 9.6:adapter 有 fetch_via_spider 时,strategy.get_subtitle 在 ① 与 ② 之间
+    探测并返回 source='internal_spider' 的 SubtitleResult。
+    """
+
+    @pytest.fixture
+    def spider_adapter(self):
+        """Fake adapter 同时提供 fetch_via_spider。"""
+        a = MagicMock()
+        a.fetch_api_subtitle.return_value = None
+        a.fetch_browser_subtitle.return_value = None
+        a.fetch_via_recording.return_value = None
+        a.match = classmethod(lambda cls, url: True)
+        return a
+
+    @pytest.fixture
+    def spider_strategy(self, spider_adapter, driver, notifier, plugin_status, log):
+        return SubtitleStrategy(
+            registry=StubRegistry(spider_adapter),
+            driver=driver,
+            recorder=None,
+            notifier=notifier,
+            plugin_status=plugin_status,
+            remind_timeout_sec=30,
+            log=log,
+            audio_factory=MagicMock(),
+            tab_recorder=MagicMock(),
+            transcriber=MagicMock(),
+            screenshot_controller=MagicMock(),
+        )
+
+    async def test_fetch_via_spider_hit_returns_internal_spider_source(
+        self, spider_strategy, spider_adapter
+    ):
+        """fetch_via_spider 返回 m3u8 meta → strategy 命中 ①-a, source='internal_spider'。"""
+        spider_adapter.fetch_via_spider.return_value = (
+            None, {"video_url": "https://video.bill-jc.com/x.m3u8", "via": "internal_spider"},
+        )
+
+        result = await spider_strategy.get_subtitle(
+            "https://b-learning.bill-jc.com/learn/kng-001",
+        )
+
+        assert result is not None
+        assert result.source == "internal_spider"
+        assert result.text is None
+        assert result.metadata["video_url"] == "https://video.bill-jc.com/x.m3u8"
+        # ② ③ 没被调(被 ①-a 短路)
+        spider_adapter.fetch_browser_subtitle.assert_not_called()
+        spider_adapter.fetch_via_recording.assert_not_called()
+
+    async def test_fetch_via_spider_miss_falls_through_to_browser(
+        self, spider_strategy, spider_adapter, notifier, plugin_status
+    ):
+        """fetch_via_spider 返回 None → 降级到 ② browser(若 browser 也 miss → 全 None)。"""
+        spider_adapter.fetch_via_spider.return_value = None
+        # ② browser miss + plugin_status 不 unavailable → 走 enabled 弹窗路径,
+        # 弹窗返回 enabled → _try_browser 返 None,然后 ③ 也 miss → 整体 None。
+        result = await spider_strategy.get_subtitle(
+            "https://b-learning.bill-jc.com/learn/kng-002",
+        )
+
+        assert result is None
+        spider_adapter.fetch_via_spider.assert_called_once()
+        spider_adapter.fetch_browser_subtitle.assert_called_once()
+
+    async def test_adapter_without_fetch_via_spider_skips_dispatch(
+        self, adapter, driver, notifier, plugin_status, log
+    ):
+        """adapter 没有 fetch_via_spider(老 adapter) → 跳过 ①-a, 走 ① ② ③ 原路径。"""
+        # FakeAdapter 没定义 fetch_via_spider → getattr(..., None) → 跳过
+        strategy = SubtitleStrategy(
+            registry=StubRegistry(adapter),
+            driver=driver,
+            recorder=None,
+            notifier=notifier,
+            plugin_status=plugin_status,
+            remind_timeout_sec=30,
+            log=log,
+            audio_factory=MagicMock(),
+            tab_recorder=MagicMock(),
+            transcriber=MagicMock(),
+            screenshot_controller=MagicMock(),
+        )
+        result = await strategy.get_subtitle("https://b-learning.bill-jc.com/learn/x")
+        # 全 miss → None
+        assert result is None
         plugin_status.mark_unavailable.assert_not_called()

@@ -29,6 +29,9 @@ class TestMatch:
         [
             "https://internal.example.com/v/123",
             "https://video.corp.local/play/abc",
+            # Phase 9.6:bill-jc 内部学习平台
+            "https://b-learning.bill-jc.com/learn/kng-001",
+            "https://b-learning.bill-jc.com/learn/kng-002?foo=bar",
             # B站不算内部
         ],
     )
@@ -41,6 +44,11 @@ class TestMatch:
         [
             "https://www.bilibili.com/video/BV1xxx",
             "https://www.youtube.com/watch?v=xxx",
+            # Phase 9.6:bill-jc 父域不在 _INTERNAL_DOMAINS 时不进 match
+            # (当前实现用 substring 匹配,所以 bill-jc 任何子串都命中 —
+            #  主要保护是后面 /learn/<id> 解析 + cookie 域过滤。)
+            "https://api.example.com/v/123",
+            "https://google.com/",
         ],
     )
     def test_does_not_match_external_sites(self, url: str):
@@ -77,3 +85,72 @@ class TestRegistryIntegration:
         adapter = reg.get_for_url("https://internal.example.com/v/1")
         assert adapter is instance
         assert isinstance(adapter, InternalSiteAdapter)
+
+
+class TestPhase96SpiderHook:
+    """Phase 9.6:InternalSiteAdapter 接入 InternalSiteSpider,fetch_via_spider 返回 m3u8 元数据。"""
+
+    def test_fetch_via_spider_returns_m3u8_metadata(self, monkeypatch):
+        """fetch_via_spider 解析 URL → kng_id → 调 spider.fetch_m3u8 → 返回
+        (None, {"video_url": m3u8, "via": "internal_spider"})。
+
+        注意:adapter._run_spider_fetch 用 asyncio.run 桥接;测试里直接
+        monkeypatch 该方法绕过 event loop 创建(本测试只验 shape + URL 解析)。
+        """
+        fake_spider = MagicMock()
+        adapter = InternalSiteAdapter(**_stub_deps(), spider=fake_spider)
+        fake_m3u8 = "https://video.bill-jc.com/a_720p.m3u8"
+
+        def fake_run(spider_obj, kng_id):
+            assert spider_obj is fake_spider
+            assert kng_id == "kng-001"
+            return fake_m3u8
+
+        monkeypatch.setattr(adapter, "_run_spider_fetch", fake_run)
+
+        text, meta = adapter.fetch_via_spider(
+            "https://b-learning.bill-jc.com/learn/kng-001"
+        )
+
+        assert text is None
+        assert meta == {"video_url": fake_m3u8, "via": "internal_spider"}
+
+    def test_fetch_via_spider_returns_none_without_learn_path(self):
+        """URL 不含 /learn/<id> → 返回 None(spider 不该被打扰)。"""
+        adapter = InternalSiteAdapter(**_stub_deps(), spider=MagicMock())
+
+        assert adapter.fetch_via_spider("https://b-learning.bill-jc.com/") is None
+        assert adapter.fetch_via_spider(
+            "https://b-learning.bill-jc.com/catalog/123"
+        ) is None
+
+    def test_fetch_via_spider_returns_none_without_spider(self):
+        """spider 未注入(向后兼容 _stub_deps())→ 返回 None,不抛。"""
+        adapter = InternalSiteAdapter(**_stub_deps())
+        assert adapter._spider is None  # type: ignore[attr-defined]
+        assert adapter.fetch_via_spider(
+            "https://b-learning.bill-jc.com/learn/kng-001"
+        ) is None
+
+    def test_fetch_via_spider_handles_spider_exception(self, monkeypatch):
+        """spider.fetch_m3u8 抛错 → 返回 None(已 log warning,不抛给 strategy)。"""
+        adapter = InternalSiteAdapter(**_stub_deps(), spider=MagicMock())
+
+        def fake_run(_spider, _kng_id):
+            raise RuntimeError("kngPlay 失败 status=401")
+
+        monkeypatch.setattr(adapter, "_run_spider_fetch", fake_run)
+        assert adapter.fetch_via_spider(
+            "https://b-learning.bill-jc.com/learn/kng-401"
+        ) is None
+
+    def test_constructor_accepts_spider_kwarg(self):
+        """spider kwarg 注入后属性可见(无 type 约束,MagicMock 即可)。"""
+        fake_spider = MagicMock()
+        adapter = InternalSiteAdapter(**_stub_deps(), spider=fake_spider)
+        assert adapter._spider is fake_spider  # type: ignore[attr-defined]
+
+    def test_constructor_spider_defaults_to_none(self):
+        """spider 缺省 = None(_stub_deps 不传也不报错,向后兼容)。"""
+        adapter = InternalSiteAdapter(**_stub_deps())
+        assert adapter._spider is None  # type: ignore[attr-defined]
