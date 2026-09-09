@@ -69,20 +69,26 @@ main.run() [串行循环,本轮不改并发]
     ├─ Phase A 截图(side effect,主失败 → 跳视频,继续同步)
     │
     ├─【输入链】fetch_asset(task) → Asset | None
-    │      ├─ 字幕策略(API / Browser / scan_today_dir / internal_spider)
-    │      │     · API/Browser 命中 → 直接返回 Asset(text=..., audio_path=None)
-    │      │     · scan_today_dir 命中 → 抽出 webm → wav
-    │      │       返回 Asset(text=None, audio_path=wav, source="whisper_scan",
-    │      │                    deletable=True)
-    │      │     · internal_spider 命中(纯 API 驱动:submit/preinit + kngPlay → m3u8 URL)
-    │      │       → ffmpeg 抽 m3u8 → wav
+    │      ├─ 字幕策略(API / Browser)— 拿到 text 直接返回
+    │      │     · 命中 → Asset(text=..., audio_path=None, source="api"|"browser")
+    │      │
+    │      ├─ internal_spider(纯 API 驱动)— 公司 LMS
+    │      │     · 命中 → ffmpeg m3u8 → wav
     │      │       返回 Asset(text=None, audio_path=wav, source="whisper_internal_download",
     │      │                    deletable=True)
     │      │       **注:**"开始学习" 完全程序化 — 不开浏览器 / 不模拟点击 / 不需用户干预
-    │      ├─ 全 miss → VideoSourceFactory 下载 MP4
-    │      │     · 抽出 MP4 → wav,unlink MP4(FR-3.3)
-    │      │     · 返回 Asset(text=None, audio_path=wav, source="whisper_download",
+    │      │
+    │      ├─ VideoSourceFactory 兜底(MP4 下载)— B 站 / 其他公开源
+    │      │     · 命中 → 抽出 MP4 → wav,unlink MP4(FR-3.3)
+    │      │       返回 Asset(text=None, audio_path=wav, source="whisper_download",
     │      │                    deletable=True)
+    │      │
+    │      ├─ **scan_today_dir 兜底**(最后)— 用户手动录屏产物
+    │      │     · 命中(今天目录有对应 webm)→ ffmpeg webm → wav
+    │      │       返回 Asset(text=None, audio_path=wav, source="whisper_scan",
+    │      │                    deletable=True)
+    │      │       **设计意图:** 兜底都失败才用,前 3 路径都是自动化,这条要用户手动操作
+    │      │
     │      └─ 全失败 → 返回 None
     │
     ├─【处理链】process_asset(asset, task) → ProcessResult | None
@@ -141,7 +147,7 @@ class Asset:
     - deletable: 质量 pass 后是否 unlink 该 wav
     """
     text: str | None
-    source: str              # "api" | "browser" | "whisper_scan" | "whisper_download"
+    source: str              # "api" | "browser" | "whisper_scan" | "whisper_download" | "whisper_internal_download"
     audio_path: Path | None  # 永远是 wav(由 fetch_asset 抽好)
     deletable: bool = False
 
@@ -154,10 +160,16 @@ class Asset:
 |---|---|---|---|---|---|
 | ① API 命中 | `"..."` | `None` | `"api"` | n/a | False |
 | ② Browser 命中(纯字幕) | `"..."` | `None` | `"browser"` | n/a | False |
-| ② scan_today_dir(F2-10) | `None` | `<today>/<bvid>.wav`(`fetch_asset` 抽自 webm) | `"whisper_scan"` | **True**(wav 是我方 temp;webm 留原位) | True |
-| ③ VideoSourceFactory 兜底 | `None` | `<tmp>/<bvid>.wav`(`fetch_asset` 抽自 MP4,后 unlink MP4) | `"whisper_download"` | **True**(我方产物) | True |
-| ④ **内部源 spider(2026-09-09 新)** | `None` | `<save_dir>/<id>.wav`(`fetch_asset` 抽自 m3u8) | `"whisper_internal_download"` | **True**(我方产物) | True |
+| ③ internal_spider(公司 LMS,2026-09-09 新) | `None` | `<save_dir>/<id>.wav`(`fetch_asset` 抽自 m3u8) | `"whisper_internal_download"` | **True**(我方产物) | True |
+| ④ VideoSourceFactory 兜底(MP4 下载) | `None` | `<tmp>/<bvid>.wav`(`fetch_asset` 抽自 MP4,后 unlink MP4) | `"whisper_download"` | **True**(我方产物) | True |
+| ⑤ **scan_today_dir(F2-10,最后兜底)** | `None` | `<today>/<bvid>.wav`(`fetch_asset` 抽自 webm) | `"whisper_scan"` | **True**(wav 是我方 temp;webm 留原位) | True |
 | 全失败 | (返回 None,不算 Asset) | | | | |
+
+**顺序设计意图**(2026-09-09 用户决策):
+- **前 4 路径(api / browser / internal_spider / VideoSourceFactory)全自动化**,无用户操作成本
+- **scan_today_dir 是用户手动录屏的兜底** — 需用户事先用 TabAudioRecorder / 屏幕录制保存 webm 到 today 目录
+- 因此**顺序往后调**:API/Browser → internal_spider → VideoSourceFactory → scan_today_dir 最后
+- 反过来想:如果 scan_today_dir 排在前,auto 路径都被跳过(vla 可能就转写用户手动录的版本,而不是更准的自动字幕)
 
 **`Asset.audio_path` 永远是 wav**:无论 scan webm 还是 MP4 兜底,`fetch_asset` 内部都用 `extract_audio()` helper 把原始音频抽成 wav 再返回。
 这样 `transcriber.transcribe(wav)` 签名变纯(单一职责:Whisper),处理链不用关心 ffmpeg。
@@ -252,14 +264,23 @@ class ProcessResult:
 **`fetch_asset` 关键代码**:
 ```python
 async def fetch_asset(self, task: VideoTask) -> Asset | None:
+    """输入链 — 按自动→手动优先级逐路径试,返回 Asset 或 None。
+
+    顺序(2026-09-09 用户决策):
+      1. 字幕策略(API / Browser)— 拿到 text 直接返回
+      2. internal_spider(公司 LMS)— ffmpeg m3u8 → wav
+      3. VideoSourceFactory 兜底 — 下载 MP4 → ffmpeg → wav → unlink MP4
+      4. scan_today_dir 最后兜底 — 用户手动录屏 webm → ffmpeg → wav
+    """
     url = str(task.url)
     duration_sec = task.expected_duration
 
-    # 1. 字幕三级策略(含 FR-2.5/2.6 popup 流程)
+    # 1. 字幕三级策略(API / Browser)— 含 FR-2.5/2.6 popup 流程
+    # 注:本轮起 scan_today_dir 从 strategy 挪走,strategy 只做 text 命中
     try:
         result = await self.strategy.get_subtitle(url, duration_sec)
     except Exception as e:
-        logger.warning("策略调用异常,降级到 source_factory: %s", e)
+        logger.warning("策略调用异常,降级到 internal_spider: %s", e)
         result = None
 
     if result is not None and result.text is not None:
@@ -271,24 +292,9 @@ async def fetch_asset(self, task: VideoTask) -> Asset | None:
             deletable=False,
         )
 
-    if result is not None and result.audio_path is not None:
-        # scan 命中(webm 用户产物) → ffmpeg 抽成 wav
-        webm_path = result.audio_path
-        wav_path = webm_path.with_suffix(".wav")
-        try:
-            extract_audio(webm_path, wav_path)
-        except Exception as e:
-            logger.warning("scan webm 抽音失败 %s: %s", webm_path, e)
-            return None
-        return Asset(
-            text=None,
-            source="whisper_scan",
-            audio_path=wav_path,
-            deletable=True,  # wav 是我方 temp;webm 留原位不删
-        )
-
-    # 1b. 内部学习平台 spider(2026-09-09 新增)→ m3u8 URL → ffmpeg → wav
-    # 数据流:Chrome CDP 借 SSO cookie → 3 个 yunxuetang API(tree/pagelist/kngPlay)
+    # 2. 内部学习平台 spider(2026-09-09 新增)→ m3u8 URL → ffmpeg → wav
+    # 数据流:Chrome CDP 借 SSO cookie → 4 个 yunxuetang API
+    #   (tree / pagelist / submit/preinit / kngPlay)
     # → kngPlay 返回 playDetails[].url 即 m3u8 URL
     # InternalSiteSpider.spider(task) 返回 SubtitleResult(source="internal_spider",
     # metadata={"video_url": "<m3u8>", "resolution": "720p"})
@@ -296,44 +302,80 @@ async def fetch_asset(self, task: VideoTask) -> Asset | None:
         video_url = (result.metadata or {}).get("video_url")
         if not video_url:
             logger.warning("internal spider 返回无 video_url,跳过: %s", result)
-            return None
-        wav_path = self._save_dir / "audio_raw" / f"{task.id}.wav"
-        try:
-            # ffmpeg 直处理 m3u8 playlist(自动下载 + 合并 + 解码)
-            # m3u8 是公开 CDN URL,无需注入 cookie(签名 token 在 URL 里)
-            extract_audio(video_url, wav_path)
-        except Exception as e:
-            logger.warning("internal spider m3u8 抽音失败 %s: %s", video_url, e)
-            return None
-        return Asset(
-            text=None,
-            source="whisper_internal_download",
-            audio_path=wav_path,
-            deletable=True,
-        )
+        else:
+            wav_path = self._save_dir / "audio_raw" / f"{task.id}.wav"
+            try:
+                # ffmpeg 直处理 m3u8 playlist(自动下载 + 合并 + 解码)
+                # m3u8 是公开 CDN URL,无需注入 cookie(签名 token 在 URL 里)
+                extract_audio(video_url, wav_path)
+            except Exception as e:
+                logger.warning("internal spider m3u8 抽音失败 %s: %s", video_url, e)
+            else:
+                return Asset(
+                    text=None,
+                    source="whisper_internal_download",
+                    audio_path=wav_path,
+                    deletable=True,
+                )
+        # internal_spider 失败(无 url / 抽音失败)→ 不降级到 factory(策略明确)
+        # 因为 internal 是 URL-prefix 判定,bilibili 等公开源不会进这条
+        # 直接 return None
+        return None
 
-    # 2. 全失败 → VideoSourceFactory 兜底(下载 MP4 → 抽 wav → 删 MP4)
+    # 3. VideoSourceFactory 兜底(下载 MP4 → 抽 wav → 删 MP4)
     # 工厂切换(→ AudioSourceFactory)属 backlog §5,本轮保持现状
     try:
         source = self.source_factory.get(url, task.id, duration_sec)
     except Exception as e:
         logger.warning("source_factory.get 失败: %s", e)
+        source = None
+
+    if source is not None:
+        video_path = source.path
+        wav_path = video_path.with_suffix(".wav")
+        try:
+            extract_audio(video_path, wav_path)
+        except Exception as e:
+            logger.warning("MP4 抽音失败 %s: %s", video_path, e)
+        else:
+            # FR-3.3:抽完即删视频源
+            try:
+                video_path.unlink()
+            except Exception as e:
+                logger.warning("unlink MP4 失败 %s,继续:%s", video_path, e)
+            return Asset(
+                text=None,
+                source="whisper_download",
+                audio_path=wav_path,
+                deletable=True,
+            )
+
+    # 4. scan_today_dir 最后兜底 — 用户手动录屏产物
+    # 注:本轮起从 strategy 挪到 fetch_asset 末尾
+    # scan_untranscribed_audio 不带 task 参数,只扫今天目录第一个未转写 webm
+    # 匹配 task 的语义由调用方保证(用户事先按 task 命名约定放文件)
+    try:
+        webm_path = scan_untranscribed_audio(self._today_dir)
+    except Exception as e:
+        logger.warning("scan_today_dir 失败: %s", e)
         return None
 
-    video_path = source.path
-    wav_path = video_path.with_suffix(".wav")
-    try:
-        extract_audio(video_path, wav_path)
-    except Exception as e:
-        logger.warning("MP4 抽音失败 %s: %s", video_path, e)
+    if webm_path is None:
         return None
-    # FR-3.3:抽完即删视频源
-    try:
-        video_path.unlink()
-    except Exception as e:
-        logger.warning("unlink MP4 失败 %s,继续:%s", video_path, e)
 
+    wav_path = webm_path.with_suffix(".wav")
+    try:
+        extract_audio(webm_path, wav_path)
+    except Exception as e:
+        logger.warning("scan webm 抽音失败 %s: %s", webm_path, e)
+        return None
     return Asset(
+        text=None,
+        source="whisper_scan",
+        audio_path=wav_path,
+        deletable=True,  # wav 是我方 temp;webm 留原位不删
+    )
+```
         text=None,
         source="whisper_download",
         audio_path=wav_path,
@@ -471,23 +513,50 @@ audio_path.with_suffix(".transcribed.txt").touch()
 return text, {"via": "tab_audio_recorder", "method": "scan_today_dir", "audio_path": str(audio_path), ...}
 ```
 
-**改后**:
+**改后(本轮方案调整,2026-09-09)**:
 ```python
-# 5. "enabled" 分支 — 只扫描,不做 transcribe
+# strategy._try_browser 不再包含 scan_today_dir 分支
+# scan_today_dir 改为 fetch_asset 内的最后兜底(见 §4.2 fetch_asset 关键代码)
+# strategy 只负责 API / Browser 两路(text-only hit)
+def _try_browser(self, adapter, url, duration_sec) -> SubtitleResult | None:
+    """只走浏览器插件(纯字幕命中)。scan_today_dir 已挪出 strategy。"""
+    ...
+```
+
+**理由**:
+- scan_today_dir 是用户手动录屏的兜底,需要 user 事先操作(放 webm 到 today 目录)
+- 排在前会让 fetch_asset 优先用用户录的版本,跳过 auto 路径(API/internal/factory)
+- 用户决策(2026-09-09):scan_today_dir 放 fetch_asset 末尾,作为最后兜底
+
+**`scan_untranscribed_audio` 仍保留在 `audio_scan.py`**,由 fetch_asset 直接调(不再走 strategy)。
+fetch_asset 调法:
+```python
+# fetch_asset 末尾
 audio_path = scan_untranscribed_audio(today_dir)
 if audio_path is None: return None
-# 把 webm 路径交给 fetch_asset,由 fetch_asset 抽音成 wav
-return SubtitleResult(text=None, source="whisper_scan", audio_path=audio_path)
+wav_path = audio_path.with_suffix(".wav")
+try:
+    extract_audio(audio_path, wav_path)
+except Exception as e:
+    logger.warning("scan webm 抽音失败 %s: %s", audio_path, e)
+    return None
+return Asset(
+    text=None,
+    source="whisper_scan",
+    audio_path=wav_path,
+    deletable=True,  # wav 是我方 temp;webm 留原位不删
+)
 ```
 
 `_try_browser` 的返回签名需扩展。当前返回 `tuple[str, dict] | None`,改为:
 ```python
 def _try_browser(self, adapter, url, duration_sec) -> SubtitleResult | None:
-    """返回 SubtitleResult(由 strategy.get_subtitle 包);或 None(全 miss/降级 ③)。"""
+    """返回 SubtitleResult(由 strategy.get_subtitle 包);或 None(全 miss)。"""
 ```
 
 这样 `strategy.get_subtitle` 也只返回 `SubtitleResult | None`,不再返回 `(text, meta)` 元组。
-strategy 自身**不调 transcriber**;**不调 extract_audio**;只做"扫 webm 路径"。
+strategy 自身**不调 transcriber**;**不调 extract_audio**;**不调 scan_untranscribed_audio**(挪到 fetch_asset)。
+strategy 只做 API / Browser 两路(都是 text 命中,不返回 audio_path)。
 
 ### 4.4 `src/vla/main.py`(_process_one 改薄)
 
