@@ -560,6 +560,9 @@ user 决定(2026-09-09):ready 检测先不做,后续单独 PR。代码维持现�
 ### 4.7 `src/vla/subtitle/internal_site_spider.py`(新,API-driven spider)
 
 **职责**:通过 3 个 yunxuetang API 把"b-learning.bill-jc.com 的视频 task"变成"m3u8 URL"。
+**关键发现(2026-09-09 探勘 probe_bill_jc_start.py 验证)**:"开始学习" 按钮的点击**完全可以用 API 程序化替代** —
+实为 `submit/preinit` + `kngPlay` 两个 POST,**不**需要打开浏览器 / 模拟点击 / 用户干预。
+(此前担心"每次手动点开始学习"是误判。)
 
 **核心数据流**:
 ```
@@ -568,15 +571,25 @@ task(kngId)
    ├─ POST /kng/kngCatalog/student/tree     # 拿 catalog 树
    │     body: {"pmType": "0", "collegeId": "<cid>"}
    │     → 用于按叶子 catalog id 拿视频列表(本接口本 spider 不调 pagelist,
-   │       实际是从 strategy 已扫到的 task 里拿 kngId,直接跳到 kngPlay)
+   │       实际是从 strategy 已扫到的 task 里拿 kngId,直接跳到下面)
    │
    ├─ POST /kng/knowledge/pagelist           # 拿子目录下视频列表(可选,本 spider 不直接调)
    │     body: {"collegeId": "<cid>", "catalogId": "<leaf_id>", ...}
    │     → 实际集成时由 strategy 在 yield task 前调一次
    │
+   ├─ POST /kng/study/submit/preinit         # **关键:开启 study session,等价于"点开始学习"**
+   │     body: {"kngId": "<kngId>", "courseId": "",
+   │            "studyParam": {"originOrgId": "", "previewType": 0},
+   │            "targetCode": "kng", "targetId": "",
+   │            "targetParam": {"taskId": "", "projectId": "", "flipId": "", "batchId": ""},
+   │            "customFunctionCode": ""}
+   │     → 不返回 m3u8,只是预热(等同用户点击"开始学习"按钮)
+   │     → 实测:跳过此步直接调 kngPlay 也可能返回 200,但 m3u8 URL 鉴权可能失效;
+   │       探勘推荐两步都调,确保 m3u8 可达
+   │
    └─ POST /kng/study/kngPlay                # 拿 m3u8 URL(关键 API)
-         body: {"kngId": "<kngId>", "courseId": "", "fullname": "",
-                "lang": "", "studyParam": {"originOrgId": "", "previewType": 0},
+         body: {"kngId": "<kngId>", "courseId": "", "fullname": "", "lang": "",
+                "studyParam": {"originOrgId": "", "previewType": 0},
                 "targetCode": "kng", "targetId": "",
                 "targetParam": {"taskId": "", "projectId": "", "flipId": "", "batchId": ""},
                 "customFunctionCode": ""}
