@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any, Callable
@@ -140,8 +141,77 @@ class RealTextProvider:
         return Asset(text=None, source="whisper_scan", audio_path=wav_path, deletable=True)
 
     async def process_asset(self, asset: Asset, task: VideoTask) -> ProcessResult | None:
-        """处理链(本 task 仅占位,Task 8 实装)。"""
-        raise NotImplementedError("Task 8 实装 process_asset")
+        """处理链(Task 8 实装):6 步骤。
+
+        步骤:
+          ① 转写(if needs_transcribe) → 失败 log + return None
+          ② 质量门控 → 失败 log + 不 unlink(FR-3.7 v3.2 retry 保留) + browser 源 mark_unavailable
+          ③ Refine(可选,cfg.quality_check.refine_enabled) → 失败 log warning + 用原文
+          ④ save_transcribed(落盘 transcribed/)
+          ⑤ cleanup:unlink wav if deletable(best-effort)
+          ⑥ return ProcessResult
+        """
+        # Step 1: 转写
+        if asset.needs_transcribe:
+            try:
+                text = await asyncio.to_thread(self.transcriber.transcribe, asset.audio_path)
+            except Exception as e:
+                self.log.log_transcribe_fail(
+                    task.id, task.title, str(task.url),
+                    stage="transcribe", error=str(e),
+                )
+                return None
+            # scan 路径写 sidecar,避免下次又被扫到(FR-2.10)
+            if asset.source == "whisper_scan" and asset.audio_path is not None:
+                try:
+                    asset.audio_path.with_suffix(".transcribed.txt").touch()
+                except Exception as e:
+                    logger.warning("touch sidecar 失败 %s: %s", asset.audio_path, e)
+        else:
+            text = asset.text
+
+        # Step 2: 质量门控
+        qr = self.checker.check(
+            text=text, title=task.title,
+            duration_sec=task.expected_duration,
+            model_size=self.cfg.whisper.model,
+        )
+
+        # Step 3: 质量失败分支
+        if not qr.passed:
+            self.log.log_quality_fail(task.id, task.title, str(task.url), qr, text)
+            if asset.source == "browser":
+                self.plugin_status.mark_unavailable(reason="plugin_quality_fail")
+            return None
+
+        # Step 4: Refine(可选,云端 LLM 语义清理)
+        if self.cfg.quality_check.refine_enabled and self.refiner is not None:
+            try:
+                refinement = self.refiner.refine(text, title=task.title)
+                if refinement.cleaned_text:
+                    text = refinement.cleaned_text
+            except Exception as e:
+                logger.warning("Refine 失败,使用原文继续: %s", e)
+
+        # Step 5: 落盘 transcribed/<id>_<title>.txt(供 Phase 7 总结读)
+        self.log.save_transcribed(
+            video_id=task.id, title=task.title, text=text,
+            quality=qr, source=asset.source,
+            duration_sec=task.expected_duration,
+        )
+
+        # Step 6: 清理 wav(best-effort)
+        if asset.deletable and asset.audio_path is not None and asset.audio_path.exists():
+            try:
+                asset.audio_path.unlink()
+            except Exception as e:
+                logger.warning("删音频失败 %s,主流程继续: %s", asset.audio_path, e)
+
+        return ProcessResult(
+            text=text, qr=qr,
+            source=asset.source,
+            duration_sec=task.expected_duration,
+        )
 
     async def __call__(self, task: VideoTask) -> tuple[Asset | None, ProcessResult | None]:
         asset = await self.fetch_asset(task)
