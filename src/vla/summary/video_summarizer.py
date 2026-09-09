@@ -1,0 +1,251 @@
+"""VideoSummarizer — 单视频 200-300 字摘要(SSOT: requirements.md FR-2.15d,2026-09-10)。
+
+职责:
+- 接 cleaned_text(Refiner 输出后) → 调云端 LLM 生成 200-300 字摘要
+- 触发条件:len(cleaned_text) > config.quality_check.refine_max_chars(默认 6000)
+  短视频(< 6000)直接返回空 SummaryResult,不浪费 token
+- 超长输入(> ~12000 字)送 LLM 前截断,避免 prompt 爆 token
+- 输出 SummaryResult;失败 fallback(不抛错,主流程不中断)
+- 落盘 helper:`<id>.summary.txt`(与 cleaned.txt 平级)
+
+为什么不在 Refiner 里做:
+- Refiner 是"清理"(preserve original length),与"压缩"语义不同
+- Refiner 输入是 transcript,摘要输入是 cleaned_text(更干净,压缩效果更好)
+- 长视频同时保留 cleaned.txt(全文本)+ .summary.txt(摘要),职责清晰
+
+配额归类:
+- 项目 SSOT:"云端 LLM 限定两件事: ① 字幕质量检查 ② 6h 批量总结"
+- 本类归入 ①(字幕质量相关,单视频精炼版)
+- 调用方负责 QuotaManager 控制;本类**不**自己加限流
+
+失败 fallback:
+- LLM 调用失败 / 解析失败 / quota 用完 → 返回空 SummaryResult + notes 说明
+- 不抛错(主流程不因摘要失败中断)
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime
+from pathlib import Path
+
+from vla.config import VLAConfig
+from vla.llm.client import LLMClientLike
+from vla.models import SummaryResult
+
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------- Prompt 设计 ----------------
+
+_SYSTEM_PROMPT = """你是视频内容摘要助手,任务是把一段较长的视频字幕压缩成精华摘要。
+
+【输入】一段已经过云端清理(Refiner)的中文视频字幕。
+
+【任务】
+1. 提取核心知识点(概念 / 方法 / 结论 / 关键案例)
+2. 按逻辑顺序组织(开场 → 主体 → 收尾)
+3. 保留可操作的信息(代码片段 / 步骤 / 数字)
+4. 跳过寒暄 / 重复 / 口水话
+5. 用简洁的中文,不要用 Markdown 标题 / 列表(连续段落即可)
+
+【字数】约 250 字(可接受 200-300 范围)。**不要逐字计数** — 按自然段落
+长度直接写即可,差别不超过 50 字都没关系。
+
+【输出格式 — 严格 JSON,只输出 JSON】
+{
+  "summary_text": "摘要正文(连续段落)"
+}
+"""
+
+
+_USER_PROMPT_TEMPLATE = """【视频标题】
+{title}
+
+【字幕内容(共 {char_count} 字符,以下为摘要输入)
+{text}
+
+请按系统指令输出 JSON。"""
+
+
+# 送 LLM 前的最大 prompt chars(粗估)。
+# 12000 字是 ~3000-4000 tokens,加上 system + user prompt 模板约 ~5000 tokens,
+# 留出余量给 200-300 字输出。低于 refine_max_chars=6000 时不触发,不涉及。
+_PROMPT_MAX_CHARS = 12000
+
+
+# ---------------- 主类 ----------------
+
+
+class VideoSummarizer:
+    """单视频 200-300 字摘要(2026-09-10)。
+
+    用法:
+        summarizer = VideoSummarizer(config, llm_client)
+        result = summarizer.summarize_one(cleaned_text, title="xxx")
+        if result.summary_text:
+            summarizer.write_summary(out_path, result)
+    """
+
+    def __init__(
+        self,
+        config: VLAConfig,
+        llm: LLMClientLike | None = None,
+    ) -> None:
+        self.config = config
+        self._llm = llm
+
+    def set_llm(self, llm: LLMClientLike) -> None:
+        """延迟注入 LLM 客户端(同 QualityChecker / SubtitleRefiner 模式)。"""
+        self._llm = llm
+
+    @property
+    def enabled(self) -> bool:
+        """是否启用 — 当前永远启用(短文本自动 skip,不需要开关)。"""
+        return True
+
+    @property
+    def model(self) -> str:
+        """R-10:统一从 cfg.llm.refine_model 取值(同 Refiner,复用模型)。
+
+        历史语义在 VLAConfig._migrate_legacy_llm_keys 的 pre-validator 里实现。
+        """
+        return self.config.llm.refine_model
+
+    # ---------------- 主流程 ----------------
+
+    def summarize_one(
+        self,
+        text: str,
+        title: str = "",
+    ) -> SummaryResult:
+        """生成单视频 200-300 字摘要。
+
+        流程:
+        1. 长度检查:≤ refine_max_chars → 返回空 SummaryResult(短视频不调 LLM)
+        2. 超长输入截断到 _PROMPT_MAX_CHARS
+        3. 调 LLM(system + user prompt)
+        4. 解析 JSON → SummaryResult
+        5. 任何环节失败 → 返回空 SummaryResult + notes 记录
+
+        Raises:
+            RuntimeError: 未注入 LLM 客户端(且文本长度 > refine_max_chars 时)
+        """
+        max_chars = self.config.quality_check.refine_max_chars
+
+        # 短视频 → 不调 LLM(节省 token)
+        if len(text) <= max_chars:
+            logger.debug(
+                "📏 transcript %d 字符 ≤ refine_max_chars %d,跳过摘要",
+                len(text), max_chars,
+            )
+            return SummaryResult(summary_text="", notes="", model=self.model)
+
+        if self._llm is None:
+            raise RuntimeError(
+                "VideoSummarizer 没有 LLM 客户端(长文本需要 LLM 生成摘要),"
+                "请先 set_llm() 或构造时注入"
+            )
+
+        # 超长输入截断 — 保留前 _PROMPT_MAX_CHARS 字,后续内容标记截断
+        truncated = False
+        input_text = text
+        if len(text) > _PROMPT_MAX_CHARS:
+            input_text = text[:_PROMPT_MAX_CHARS]
+            truncated = True
+            logger.info(
+                "📏 transcript %d 字符 > _PROMPT_MAX_CHARS %d,截断后送 LLM",
+                len(text), _PROMPT_MAX_CHARS,
+            )
+
+        user_prompt = _USER_PROMPT_TEMPLATE.format(
+            title=title or "(无标题)",
+            char_count=len(text),  # 报告原始长度(让 LLM 知道全文多长)
+            text=input_text + ("\n\n(后续内容已截断)" if truncated else ""),
+        )
+        full_prompt = f"{_SYSTEM_PROMPT}\n\n{user_prompt}"
+
+        # 调 LLM — max_tokens=4000 兼顾 reasoning model 的  think 块 + 200-300 字 JSON 输出。
+        # reasoning model(M2.7 / R1)会在 think 块里数中文字符 / 规划段落,
+        # 实际消耗 ~3000+ tokens,然后才输出 JSON。需要更大窗口。
+        try:
+            response = self._llm.complete(full_prompt, max_tokens=4000, temperature=0.3)
+        except Exception as e:
+            logger.warning("⚠️ LLM 摘要调用失败,返回空 SummaryResult:%s", e)
+            return SummaryResult(
+                summary_text="",
+                notes=f"LLM 调用失败:{type(e).__name__}:{str(e)[:100]}",
+                model=self.model,
+            )
+
+        # 解析 JSON
+        try:
+            from vla.llm.response import parse_json_response
+            data = parse_json_response(response)
+        except (ValueError, Exception) as e:
+            logger.warning("⚠️ LLM 摘要响应解析失败:%s", e)
+            return SummaryResult(
+                summary_text="",
+                notes=f"LLM 响应解析失败:{e}",
+                model=self.model,
+            )
+
+        summary_text = str(data.get("summary_text", "")).strip()
+        if not summary_text:
+            logger.warning("⚠️ LLM 摘要返回空 summary_text")
+            return SummaryResult(
+                summary_text="",
+                notes="LLM 返回空 summary_text",
+                model=self.model,
+            )
+
+        # 字数统计(中文字符 + 英文单词混合)
+        word_count = len(summary_text)
+        logger.info(
+            "✨ 单视频摘要完成:%d 字 → %d 字(原 transcript %d 字符)",
+            word_count, word_count, len(text),
+        )
+
+        return SummaryResult(
+            summary_text=summary_text,
+            notes="",
+            model=self.model,
+        )
+
+    # ---------------- 文件落盘 helper ----------------
+
+    def write_summary(
+        self,
+        summary_path: Path,
+        result: SummaryResult,
+    ) -> Path | None:
+        """把 SummaryResult 落盘到 `<id>.summary.txt`。
+
+        文件格式:
+            {summary_text}
+
+            ---
+            generated_at: 2026-09-10T15:30:00
+            model: MiniMax-M2.7-highspeed
+            source_chars: 12345
+
+        空 SummaryResult → 不写文件,返回 None(让调用方根据 None 判断跳过)。
+
+        Returns:
+            写入的路径,或 None(没生成摘要时)。
+        """
+        if not result.summary_text:
+            # 调用方应根据 None 判断"该视频没生成摘要"
+            return None
+
+        summary_path = Path(summary_path)
+        lines: list[str] = [result.summary_text, "", "---", ""]
+        lines.append(f"generated_at: {datetime.now().isoformat(timespec='seconds')}")
+        lines.append(f"model: {result.model}")
+        if result.notes:
+            lines.append(f"notes: {result.notes}")
+
+        summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        logger.info("💾 摘要已落盘:%s (%d 字)", summary_path, len(result.summary_text))
+        return summary_path

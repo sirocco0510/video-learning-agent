@@ -60,6 +60,7 @@ class RealTextProvider:
         checker: Any | None = None,
         refiner: Any | None = None,
         today_dir: Path | None = None,
+        summarizer: Any | None = None,
     ) -> None:
         """
         Args:
@@ -77,6 +78,8 @@ class RealTextProvider:
                        §4.2 ④ 用;build_text_provider 自动从 cfg.audio.downloads_dir
                        计算,测试 fixture 也可手动注入,None 时 fetch_asset 路径 ④
                        仍走 audio_scan 但目录需由调用方保证存在)
+            summarizer: VideoSummarizer(可选,2026-09-10 新增 — 长视频 Refiner
+                       长度超限时生成 200-300 字单视频摘要)
         """
         self.cfg = cfg
         self.strategy = strategy
@@ -88,6 +91,7 @@ class RealTextProvider:
         self.log = log or TranscriptionLog(cfg.logging.log_dir)
         self.checker = checker
         self.refiner = refiner
+        self.summarizer = summarizer
         self._today_dir = today_dir
 
     async def fetch_asset(self, task: VideoTask) -> Asset | None:
@@ -231,6 +235,34 @@ class RealTextProvider:
             except Exception as e:
                 logger.warning("Refine 失败,使用原文继续: %s", e)
 
+        # Step 4.5: 长视频摘要(2026-09-10 / FR-2.15d)
+        # 触发条件:cleaned_text > refine_max_chars(默认 6000)— 此时 Refiner
+        # 跳过云端清理,需要单视频 200-300 字摘要作为补充。
+        # 短视频不调 LLM,直接跳过(节省 token)。
+        # 注意:在 save_transcribed 之前调,因为 summary 文件路径依赖 task.id。
+        # 用 getattr 兼容 test_process_asset.py 用 __new__ 跳过 __init__ 的 case。
+        summarizer = getattr(self, "summarizer", None)
+        if summarizer is not None:
+            try:
+                summary = summarizer.summarize_one(text, title=task.title)
+                if summary.summary_text:
+                    # 文件命名与 save_transcribed 对齐:`<id>_<safe_title>.summary.txt`,
+                    # 方便用户 grep / 关联。
+                    from vla.log.transcription_log import _safe_title
+                    safe = _safe_title(task.title)
+                    summary_path = (
+                        self.log.transcribed_dir / f"{task.id}_{safe}.summary.txt"
+                    )
+                    written = summarizer.write_summary(summary_path, summary)
+                    if written is not None:
+                        logger.info(
+                            "📝 长视频摘要已落盘:%s (%d 字)",
+                            written, len(summary.summary_text),
+                        )
+            except Exception as e:
+                # 摘要失败不影响主流程(用户已有 cleaned_text 全文本)
+                logger.warning("⚠ 单视频摘要失败,主流程继续: %s", e)
+
         # Step 5: 落盘 transcribed/<id>_<title>.txt(供 Phase 7 总结读)
         self.log.save_transcribed(
             video_id=task.id, title=task.title, text=text,
@@ -273,6 +305,7 @@ def build_text_provider(
     refiner: Any | None = None,
     strategy: Any | None = None,
     internal_spider: Any | None = None,  # Phase 9.6:bill-jc 用,注入 InternalSiteSpider
+    summarizer: Any | None = None,  # 2026-09-10 / FR-2.15d:长视频 200-300 字单视频摘要
 ) -> tuple[FetchAssetFn, ProcessAssetFn]:
     """工厂函数:装配一个完整的 RealTextProvider,返回 (fetch_asset, process_asset) 两个 callable。
 
@@ -346,6 +379,13 @@ def build_text_provider(
         from vla.quality.refiner import SubtitleRefiner
         refiner = SubtitleRefiner(cfg)
 
+    # 2026-09-10 / FR-2.15d:长视频 200-300 字单视频摘要。
+    # 当前永远启用 — 短视频在 VideoSummarizer 内部自动 skip(节省 token),
+    # 长视频自动触发。调用方不传 summarizer 时内部 auto-construct。
+    if summarizer is None:
+        from vla.summary.video_summarizer import VideoSummarizer
+        summarizer = VideoSummarizer(cfg)
+
     source_factory = VideoSourceFactory(tmp_dir=save_dir, log=log, config=cfg)
     if transcriber is None:
         transcriber = StreamingTranscriber(cfg)
@@ -394,6 +434,7 @@ def build_text_provider(
         checker=checker,
         refiner=refiner,
         today_dir=today_dir,
+        summarizer=summarizer,
     )
 
     return provider.fetch_asset, provider.process_asset

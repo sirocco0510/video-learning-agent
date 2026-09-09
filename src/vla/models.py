@@ -136,3 +136,21 @@ class RefinementResult(BaseModel):
     model: str                  # 用的模型(便于审计)
     prompt_tokens: int = 0      # 调 LLM 的 token 统计(供 quota)
     completion_tokens: int = 0
+
+
+class SummaryResult(BaseModel):
+    """单视频摘要结果(FR-2.15d,2026-09-10)。
+
+    触发条件:cleaned_text 长度 > config.quality_check.refine_max_chars。
+    低于阈值 → summary_text="",调用方根据此字段判断要不要落盘。
+
+    与 RefinementResult 的区别:
+    - RefinementResult 是"清理 preserve original length"
+    - SummaryResult 是"压缩 200-300 字精华"
+    """
+
+    summary_text: str           # 200-300 字摘要;空字符串 = 没生成
+    notes: str = ""             # 处理说明(失败原因 / 跳过原因)
+    model: str                  # 用的模型(便于审计)
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
