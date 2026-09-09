@@ -119,6 +119,10 @@ def _make_fake_browser(*, ready_state_ok: bool = True, capture_error: str | None
     ready_state_ok=False:wait_for_selector/wait_for_function 抛 TimeoutError。
     capture_error="no_video":page.evaluate 抛 "No <video> element"。
     capture_error="no_audio":page.evaluate 抛 "No audio track"。
+
+    extract_browser_audio 现在调 page.evaluate 2 次(①点"开始学习"按钮 ②跑
+    MediaRecorder 捕获 JS),所以 happy path 的 evaluate 用 side_effect 列表
+    返回:第一调用返回 True(按钮存在),第二调用返回 b64 payload。
     """
     fake_page = MagicMock()
     fake_page.goto = AsyncMock()
@@ -131,14 +135,15 @@ def _make_fake_browser(*, ready_state_ok: bool = True, capture_error: str | None
             side_effect=Exception("wait_for_selector timeout"),
         )
     elif capture_error == "no_video":
-        fake_page.evaluate = AsyncMock(side_effect=Exception("No <video> element"))
+        # 第一 evaluate(点开始学习)成功,第二 evaluate(捕获)抛 "No <video>"
+        fake_page.evaluate = AsyncMock(side_effect=[True, Exception("No <video> element")])
     elif capture_error == "no_audio":
-        fake_page.evaluate = AsyncMock(side_effect=Exception("No audio track"))
+        fake_page.evaluate = AsyncMock(side_effect=[True, Exception("No audio track")])
     else:
-        # happy path: 返回 b64 payload(0x00 几个字节的 webm 假装)
+        # happy path: 第 1 次 evaluate(点开始学习)返 True,第 2 次(捕获)返 b64
         fake_bytes = b"\x1a\x45\xdf\xa3"  # EBML header
         payload = {"b64": base64.b64encode(fake_bytes).decode("ascii"), "duration": 12.0}
-        fake_page.evaluate = AsyncMock(return_value=payload)
+        fake_page.evaluate = AsyncMock(side_effect=[True, payload])
 
     fake_context = MagicMock()
     fake_context.new_page = AsyncMock(return_value=fake_page)
@@ -185,9 +190,9 @@ async def test_extract_browser_audio_invokes_playwright_and_ffmpeg(tmp_path, mon
         "http://localhost:9222"
     )
     fake_page.goto.assert_called_once()
-    fake_page.wait_for_selector.assert_called_once()
+    fake_page.wait_for_selector.assert_called()  # 调了 2 次(按钮 + video)
     fake_page.wait_for_function.assert_called_once()
-    fake_page.evaluate.assert_called_once()
+    fake_page.evaluate.assert_called()  # 调了 2 次(点开始学习 + 跑捕获)
     fake_page.close.assert_called_once()
 
     # 验证 ffmpeg 被调(必须有 webm 输入 + wav 输出)
@@ -270,17 +275,26 @@ async def test_extract_browser_audio_passes_playback_rate_to_js(tmp_path, monkey
     # 默认值
     with patch("vla.transcribe.extract.async_playwright", ap):
         await extract_browser_audio("https://x.com/play", out_wav)
-    args = fake_page.evaluate.call_args
-    payload = args[0][1]  # (_BROWSER_CAPTURE_JS, payload)
-    assert payload["playbackRate"] == 4.0
-    assert payload["maxDurationSec"] == 3600
+    # evaluate 调 2 次: ①点开始学习(返 True) ②跑 MediaRecorder(返 b64)
+    # 第二次的 call_args 才有 playbackRate 参数
+    capture_args = fake_page.evaluate.call_args_list[1]
+    capture_payload = capture_args[0][1]  # (_BROWSER_CAPTURE_JS, payload)
+    assert capture_payload["playbackRate"] == 4.0
+    assert capture_payload["maxDurationSec"] == 3600
 
-    # 自定义值
+    # 自定义值:reset_mock 后重新设置 side_effect(reset 也清掉 side_effect)
+    # 注意:helper 里 fake_page.evaluate 的 side_effect[1] 是 helper-local 的 b64 payload,
+    # 测试函数不能直接引用,需要重新构造一个等价 dict。
     fake_page.evaluate.reset_mock()
+    b64_payload = {
+        "b64": base64.b64encode(b"\x1a\x45\xdf\xa3").decode("ascii"),
+        "duration": 12.0,
+    }
+    fake_page.evaluate = AsyncMock(side_effect=[True, b64_payload])
     with patch("vla.transcribe.extract.async_playwright", ap):
         await extract_browser_audio(
             "https://x.com/play", out_wav, max_duration_sec=7200, playback_rate=2.0,
         )
-    payload = fake_page.evaluate.call_args[0][1]
-    assert payload["playbackRate"] == 2.0
-    assert payload["maxDurationSec"] == 7200
+    custom_payload = fake_page.evaluate.call_args_list[1][0][1]
+    assert custom_payload["playbackRate"] == 2.0
+    assert custom_payload["maxDurationSec"] == 7200

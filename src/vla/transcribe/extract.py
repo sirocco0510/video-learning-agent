@@ -211,7 +211,28 @@ async def extract_browser_audio(
             await page.goto(video_url, wait_until="domcontentloaded")
 
             try:
-                await page.wait_for_selector("video", timeout=30_000)
+                # bill-jc SPA 默认显示课程详情页,<video> 只在用户点 "开始学习"
+                # 后才挂载(bind 在 yxtf-button yxtf-button--primary)。
+                # 不点的话 querySelector('video') 永远 None。
+                # state="attached": 只要 DOM 里有,不要求 visible(可能被课程详情
+                # overlay 挡住,但我们 click() 直接调 trigger,绕过 overlay)。
+                await page.wait_for_selector(
+                    "button.yxtf-button--primary", timeout=30_000, state="attached",
+                )
+                await page.evaluate(
+                    """
+                    () => {
+                        for (const b of document.querySelectorAll('button')) {
+                            if (b.innerText && b.innerText.trim() === '开始学习') {
+                                b.click();
+                                return true;
+                            }
+                        }
+                        return false;
+                    }
+                    """
+                )
+                await page.wait_for_selector("video", timeout=30_000, state="attached")
                 await page.wait_for_function(
                     "document.querySelector('video') && document.querySelector('video').readyState >= 2",
                     timeout=30_000,
