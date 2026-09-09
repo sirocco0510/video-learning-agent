@@ -1,0 +1,891 @@
+{
+  "kng_id": "0268b79b-c752-4b30-abc6-23bc55ff2f26",
+  "leaf_id": "600bdcd9-774a-4e13-ad52-610d590fe66a",
+  "m3u8_urls": [],
+  "ts_urls_sample": [],
+  "ts_total": 0,
+  "play_api_count": 110,
+  "play_apis_with_keyword": [],
+  "all_play_apis": [
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/core/org/access-limits/check-limited?orgId=7c80b070-28ac-4c1a-b54b-35b327b870eb",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"pubKey\":\"04295597c04eecc355065c3c360a636aa5f0a5b88befc2affc2506c4aefe8817cf14935fbc2ad9b6d7e93061a8393e66c19a09f12ac76504e8f0180448e15d2bf6\",\"signature\":\"MEUCIFAMltbCOPpO6VC-9PxTkh5HBdJ5hE-rc_DZtaMmukjTAiEArJuYrGuYAj1rZ0ce2npnpcj5c8357v6g4GFVKP6DOqI\",\"payload\":\"eyJleHBpcmVkIjowLCJsaW1pdGVkIjowfQ\",\"expired\":0,\"limited\":0}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/core/token/check",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"isValid\":1,\"expireTtl\":1202553}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/core/userinfo/config",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"changeDefaultPwd\":false,\"bindMobile\":false,\"bindEmail\":false,\"firstLogin\":false,\"mobileValidated\":true,\"emailValidated\":true,\"defaultPwd\":false,\"manageNavPerm\":false,\"platform\":2,\"changePwdPeriod\":0,\"needChangePwdPeriod\":0,\"pwdChange\":0}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx.yunxuetang.cn/file/watermark/config?orgId=7c80b070-28ac-4c1a-b54b-35b327b870eb&fullResponse=true",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"enabled\":0,\"type\":1,\"watermarkContent\":\"BJC\",\"wordColor\":\"a9a9a9\",\"wordAlpha\":\"99\",\"wordFontSize\":10,\"otherColor\":\"a9a9a9\",\"otherAlpha\":\"99\",\"otherFontSize\":10,\"density\":0,\"speed\":2,\"fileWatermarkAppList\":[{\"id\":22470,\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"appCode\":\"bbs\",\"createTime\":null,\"updateTime\":null,\"enabled\":0,\"showType\":1,\"density\":0,\"speed\":2,\"display\":1},{\"id\":22473,\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"appCode\":\"gmcenter\",\"createTime\":null,\"updateTime\":null,\"enabled\":0,\"showType\":1,\"density\":0,\"speed\":2,\"display\":1},{\"id\":3006,\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"appCode\":\"kng\",\"createTime\":null,\"updateTime\":null,\"enabled\":0,\"showType\":1,\"density\":0,\"speed\":2,\"display\":1},{\"id\":87879,\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"appCode\":\"ote\","
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/core/org/orgname?orgId=7c80b070-28ac-4c1a-b54b-35b327b870eb",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"orgName\":\"武汉佰钧成B-learning\",\"i18nOrgName\":\"\",\"i18nOrgNames\":{},\"logoUrl\":\"https://picobd.yunxuetang.cn/orgsv2/demo/7c80b070-28ac-4c1a-b54b-35b327b870eb-tools20220805/test_module/test_function/202208/b54141c39a154751b9733569c71e2212.png\",\"enableI18n\":0,\"lang4Get\":[{\"langName\":\"简体中文\",\"langTag\":\"zh\"}],\"editionUpgrade\":0,\"salePkgName\":null,\"pcUrl\":\"https://api-phx.yunxuetang.cn/sso/baijunchengsso/sso\",\"h5Url\":\"https://api-phx.yunxuetang.cn/sso/baijunchengsso/sso\",\"sourceCode\":\"103\",\"domainName\":\"b-learning.bill-jc.com\",\"productVersion\":\"2.0\",\"platEnv\":\"aliyun\",\"appSso\":1,\"forgetPwd\":null,\"singleChatSwitch\":1,\"siteName\":\"武汉佰钧成技术B-learning\",\"isShowNavFooter\":null,\"showMoreLoginFn\":null,\"orgType\":1,\"profileId\":null,\"operateLevel\":\"\",\"batchId\":null}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/decorate/orgconfig/support?orgId=7c80b070-28ac-4c1a-b54b-35b327b870eb&domainName=b-learning.bill-jc.com",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"webIconUrl\":\"https://streamobd.yunxuetang.cn/g/favicon_default.ico\"}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/core/factors/7c80b070-28ac-4c1a-b54b-35b327b870eb/func-points/refresh/check",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"refresh\":1,\"lastUpdate\":1788910078251}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/core/org/orgname?orgId=7c80b070-28ac-4c1a-b54b-35b327b870eb",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"orgName\":\"武汉佰钧成B-learning\",\"i18nOrgName\":\"\",\"i18nOrgNames\":{},\"logoUrl\":\"https://picobd.yunxuetang.cn/orgsv2/demo/7c80b070-28ac-4c1a-b54b-35b327b870eb-tools20220805/test_module/test_function/202208/b54141c39a154751b9733569c71e2212.png\",\"enableI18n\":0,\"lang4Get\":[{\"langName\":\"简体中文\",\"langTag\":\"zh\"}],\"editionUpgrade\":0,\"salePkgName\":null,\"pcUrl\":\"https://api-phx.yunxuetang.cn/sso/baijunchengsso/sso\",\"h5Url\":\"https://api-phx.yunxuetang.cn/sso/baijunchengsso/sso\",\"sourceCode\":\"103\",\"domainName\":\"b-learning.bill-jc.com\",\"productVersion\":\"2.0\",\"platEnv\":\"aliyun\",\"appSso\":1,\"forgetPwd\":null,\"singleChatSwitch\":1,\"siteName\":\"武汉佰钧成技术B-learning\",\"isShowNavFooter\":null,\"showMoreLoginFn\":null,\"orgType\":1,\"profileId\":null,\"operateLevel\":\"\",\"batchId\":null}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/core/orgparsetting/code?code=closePCandH5Conver&orgId=7c80b070-28ac-4c1a-b54b-35b327b870eb",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"id\":null,\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"catalogId\":null,\"remark\":null,\"orderIndex\":0,\"createUserId\":null,\"createFullname\":null,\"createTime\":null,\"updateUserId\":null,\"updateFullname\":null,\"updateTime\":null,\"code\":\"closePCandH5Conver\",\"value\":\"\"}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/decorate/orgconfig/skins?domainName=b-learning.bill-jc.com&orgId=7c80b070-28ac-4c1a-b54b-35b327b870eb",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"skinValue\":\"#FE8D13\",\"grayToggle\":0}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/core/orgparsetting/code?code=custom_kng_code&orgId=7c80b070-28ac-4c1a-b54b-35b327b870eb",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"id\":null,\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"catalogId\":null,\"remark\":null,\"orderIndex\":0,\"createUserId\":null,\"createFullname\":null,\"createTime\":null,\"updateUserId\":null,\"updateFullname\":null,\"updateTime\":null,\"code\":\"custom_kng_code\",\"value\":\"\"}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/core/orgparsetting/code?code=hide_set_creator&orgId=7c80b070-28ac-4c1a-b54b-35b327b870eb",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"id\":null,\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"catalogId\":null,\"remark\":null,\"orderIndex\":0,\"createUserId\":null,\"createFullname\":null,\"createTime\":null,\"updateUserId\":null,\"updateFullname\":null,\"updateTime\":null,\"code\":\"hide_set_creator\",\"value\":\"\"}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/core/orgparsetting/code?code=Mixed%20AI%20Subtitles&orgId=7c80b070-28ac-4c1a-b54b-35b327b870eb",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"id\":null,\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"catalogId\":null,\"remark\":null,\"orderIndex\":0,\"createUserId\":null,\"createFullname\":null,\"createTime\":null,\"updateUserId\":null,\"updateFullname\":null,\"updateTime\":null,\"code\":\"Mixed AI Subtitles\",\"value\":\"\"}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/core/orgparsetting/code?code=isGlobalEnglish&orgId=7c80b070-28ac-4c1a-b54b-35b327b870eb",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"id\":null,\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"catalogId\":null,\"remark\":null,\"orderIndex\":0,\"createUserId\":null,\"createFullname\":null,\"createTime\":null,\"updateUserId\":null,\"updateFullname\":null,\"updateTime\":null,\"code\":\"isGlobalEnglish\",\"value\":\"\"}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/decorate/custom/release-codes/types/7?domainName=b-learning.bill-jc.com",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"id\":null,\"customTemplateId\":null,\"customTemplateName\":null,\"body\":\"\",\"codingType\":null}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/core/orgparsetting/code?code=MixedKngDown&orgId=7c80b070-28ac-4c1a-b54b-35b327b870eb",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"id\":null,\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"catalogId\":null,\"remark\":null,\"orderIndex\":0,\"createUserId\":null,\"createFullname\":null,\"createTime\":null,\"updateUserId\":null,\"updateFullname\":null,\"updateTime\":null,\"code\":\"MixedKngDown\",\"value\":\"\"}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/core/orgparsetting/code?code=Tourists_learn_method&orgId=7c80b070-28ac-4c1a-b54b-35b327b870eb",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"id\":null,\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"catalogId\":null,\"remark\":null,\"orderIndex\":0,\"createUserId\":null,\"createFullname\":null,\"createTime\":null,\"updateUserId\":null,\"updateFullname\":null,\"updateTime\":null,\"code\":\"Tourists_learn_method\",\"value\":\"\"}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/core/orgparsetting/code?code=buyCourselink&orgId=7c80b070-28ac-4c1a-b54b-35b327b870eb",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"id\":null,\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"catalogId\":null,\"remark\":null,\"orderIndex\":0,\"createUserId\":null,\"createFullname\":null,\"createTime\":null,\"updateUserId\":null,\"updateFullname\":null,\"updateTime\":null,\"code\":\"buyCourselink\",\"value\":\"\"}"
+    },
+    {
+      "phase": "?",
+      "url": "https://picobd.yunxuetang.cn/orgsv2/glbl/1785140243081/im/zh/custom/i18n_pc.json",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"pc_IM_tip_img\":\"[图片]\",\"h5_IM_choice_chat\":\"选择聊天\",\"pc_IM_tip_voice\":\"[语音]\",\"h5_IM_noticelist_type_announcement\":\"公告\",\"pc_IM_urge_msg_tip\":\"督促提醒\",\"h5_IM_msg_center_un_top\":\"取消置顶\",\"h5_IM_view_detail\":\"查看详情\",\"pc_IM_msg_center_un_top\":\"取消置顶\",\"h5_IM_title\":\"标题\",\"pc_IM_dissolution_success\":\"解散群成功\",\"pc_IM_bell_unread_num\":\"条未读的聊天消息\",\"h5_IM_change_groupname\":\"修改群名称为\",\"pc_IM_btn_save\":\"保存\",\"h5_IM_click_view_detail\":\"点击查看详情\",\"h5_IM_btn_set_role\":\"设置身份\",\"h5_IM_default_emoji\":\"默认表情\",\"h5_IM_noticelist_type_certificate\":\"证书\",\"h5_IM_view_more\":\"查看更多\",\"h5_IM_set_group_title_success\":\"设置群身份成功\",\"h5_IM_error_text\":\"错误\",\"h5_IM_btn_more\":\"更多\",\"h5_IM_noticelist_msg_no\":\"否\",\"pc_IM_btn_ok\":\"确定\",\"h5_IM_noticelist_search\":\"搜索\",\"h5_IM_group_disbanded\":\"该群聊已解散\",\"h5_IM_as_monitor\":\"例如：班长、副班长\",\"h5_IM_edit_only_manager"
+    },
+    {
+      "phase": "?",
+      "url": "https://picobd.yunxuetang.cn/orgsv2/glbl/1785140243081/im/zh/custom/i18n_h5.json",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"pc_IM_tip_img\":\"[图片]\",\"h5_IM_choice_chat\":\"选择聊天\",\"pc_IM_tip_voice\":\"[语音]\",\"h5_IM_noticelist_type_announcement\":\"公告\",\"h5_IM_msg_center_un_top\":\"取消置顶\",\"h5_IM_view_detail\":\"查看详情\",\"h5_IM_title\":\"标题\",\"pc_IM_dissolution_success\":\"解散群成功\",\"h5_IM_change_groupname\":\"修改群名称为\",\"h5_IM_click_view_detail\":\"点击查看详情\",\"h5_IM_btn_set_role\":\"设置身份\",\"h5_IM_default_emoji\":\"默认表情\",\"h5_IM_noticelist_type_certificate\":\"证书\",\"h5_IM_view_more\":\"查看更多\",\"h5_IM_set_group_title_success\":\"设置群身份成功\",\"h5_IM_error_text\":\"错误\",\"h5_IM_btn_more\":\"更多\",\"h5_IM_noticelist_msg_no\":\"否\",\"h5_IM_noticelist_search\":\"搜索\",\"h5_IM_group_disbanded\":\"该群聊已解散\",\"h5_IM_as_monitor\":\"例如：班长、副班长\",\"h5_IM_edit_only_manager\":\"仅群主可编辑\",\"h5_IM_msg_pls_input\":\"请输入群身份，特殊字符除外\",\"h5_IM_group_right_transfer\":\"群管理权转让\",\"h5_IM_no_member\":\"没有其他群成员\",\"h5_IM_noticelist_msg_y"
+    },
+    {
+      "phase": "?",
+      "url": "https://picobd.yunxuetang.cn/orgsv2/glbl/1788857985041/common/zh/custom/i18n_pc.json",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"pc_ote_btn_viewmultireview\":\"查看多次批阅记录\",\"pc_biz_ote_msg_studyscorenotnull\":\"请输入学分\",\"common_i18n_country_areacode_30_68\":\"希腊\",\"pc_biz_ote_tip_catalogsearch\":\"请输入分类名称搜索\",\"pc_ulcd-studyPlan-select-knowledge\":\"一键移入\",\"pc_te_lbl_cancel\":\"取消\",\"pc_gwnl_jq_other\":\"其他\",\"pc_o2o_msg_plase_keyword\":\"请输入关键字搜索\",\"pc_gwnl_import_selectAgain\":\"非正常数据模板文件，请重新选择文件！\",\"pc_ote_msg_endarrangetip\":\"{0}，未交卷会强制交卷，无法再修改考试设置，此操作不可恢复，请谨慎操作\",\"pc_gwnl_seqmodel_edit_category_desc\":\"编辑描述\",\"pc_gwnl_aiqb_rule_opt_weekThu\":\"周四\",\"pc_biz_kng_lbl_zoCode\":\"商城课编号\",\"pc_gwnl_seqmodel_state_unpublished\":\"未发布\",\"pc_biz_tit_rich_image\":\"图片\",\"pc_gwnl_web_oneToThreeYear\":\"1-3年\",\"pc_biz_eval_self_eval\":\"自评\",\"pc_o2o_msg_batch_move_failed\":\"批量移动失败，请稍后重试\",\"pc_biz_eval_lbl_ready_time_limit\":\"准备限时\",\"common_i18n_country_areacode_850_126\":\"朝鲜\",\"p"
+    },
+    {
+      "phase": "?",
+      "url": "https://picobd.yunxuetang.cn/orgsv2/glbl/1788857984877/common/zh/custom/i18n_pc.json",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"pc_gwnl_aiqb_adoption_affected_status_active\":\"进行中\",\"pc_biz_lbl_uploadnotice\":\"1.一次最多同时上传10个文件，文件夹不支持上传<br>2.请勿上传已设置加密或者只读的文档，否则系统将无法转换而报错\",\"pc_biz_flow_lbl_node_name\":\"节点名称\",\"pc_report_expname_ote_ind_arrange\":\"个人完成考试统计\",\"pc_biz_ote_lbl_littleeasy\":\"较易\",\"pc_gwnl_seqmodel_step_structure\":\"模型结构设置\",\"pc_report_expname_gwnl_tmap_ind_completion\":\"个人关卡完成详情\",\"xschcomm_require_choose_use\":\"请先选择用户\",\"kng_lbl_custom_code\":\"自定义课程编号\",\"talentrv_pc_calibration_range\":\"校准幅度\",\"pc_biz_discuss_view_replay_with_count\":\"查看{0}条回复\",\"pc_biz_Identitycardsaresupported\":\"仅支持大陆身份证、港澳居民居住证、台湾居民居住证\",\"pc_talentrv_fastExpression\":\"快捷公式\",\"xschcomm_certificatio_course_products\":\"认证课商品\",\"pc_gwnl_eval_self_eval\":\"自评\",\"apis.tlive.global.live.todo\":\"直播\",\"pc_biz_tit_rich_indent\":\"缩进\",\"pc_gwnl_seqmodel_delete_confirm_msg\":\"删除将"
+    },
+    {
+      "phase": "?",
+      "url": "https://picobd.yunxuetang.cn/orgsv2/glbl/1788857984444/common/zh/custom/i18n_pc.json",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"pc_biz_eval_msg_release_quota_tips\":\"只有占用份额且还未开始评估的人才能解除占用测评份额，是否解除选择人员的测评份额?\",\"pc_gwnl_eval_sendReport\":\"下发报告\",\"pc_biz_ote_lbl_marker\":\"批阅人\",\"pc_gwnl_seqmodel_pubfail_multi_marked_header\":\"有以下 {count} 处配置需要调整，已在表格中标红，请逐项检查：\",\"pc_biz_select_rank_group\":\"集团榜\",\"pc_aatd_eval_noreportsuccessnorebuild\":\"报告暂未生成不支持重新生成\",\"pc_biz_long_term\":\"长期活动\",\"pc_biz_rank_dept_per_studyscore_less\":\"部门人均学分小于等于\",\"pc_biz_tip_no_more\":\"没有更多了\",\"pc_ote_tips_all_stu_urge\":\"单场考试所有学员每天最多只能催促三次\",\"pc_gwnl_aiqb_sched_txt_sumBinFull\":\"薄弱强化 30% / 巩固验证 20% / 拓展探索 50%\",\"pc_biz_ote_msg_sureemptybasket\":\"您确定要清空试题篮吗?\",\"pc_biz_meeting_device_projector\":\"投影仪\",\"pc_gwnl_web_pleaseChooseAge\":\"请选择年龄\",\"pc_biz_ote_btn_changelib\":\"换库\",\"sp_designer_drag_mouse_tip\":\"拖动鼠标选中内容，并点击气泡内操作 — 标记/取消标记，可重复标记多条内容。\",\"pc_biz_ote_msg_keyword\":\"请输入关键词"
+    },
+    {
+      "phase": "?",
+      "url": "https://picobd.yunxuetang.cn/orgsv2/glbl/1788857873060/common/zh/custom/i18n_h5.json",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"h5_audit_btn_undone\":\"撤销\",\"h5_core_udp_orgoumgmt_form_userno\":\"工号\",\"h5_o2o_lbl_select_identify_result\":\"请选择鉴定结果\",\"h5_biz_phone_enter_error\":\"请输入正确的手机号\",\"h5_biz_lbl_offlineName\":\"面授名称\",\"common_i18n_country_areacode_30_68\":\"希腊\",\"h5_biz_te_lbl_billing_info\":\"结算信息\",\"kng_lbl_custom_code\":\"自定义课程编号\",\"h5_biz_ote_lbl_exampapertype0\":\"固定出卷\",\"h5_biz_ai_lbl_tool_recommend\":\"AI推荐\",\"h5_biz_clockin_lbl_sunday\":\"周一\",\"h5_biz_ote_lbl_exampapertype1\":\"随机出卷\",\"h5_gwnl_change_eval_result\":\"切换测评结果\",\"apis.tlive.global.live.todo\":\"直播\",\"h5_common_december\":\"12月\",\"common_i18n_country_areacode_850_126\":\"朝鲜\",\"common_i18n_country_areacode_262_140\":\"留尼汪岛\",\"h5_o2o_lbl_stu_complete_standard\":\"学员完成标准\",\"h5_biz_lbl_name_length\":\"姓名长度为2-20个字符\",\"h5_ote_fb_type_other\":\"其他错误\",\"h5_biz_core_btn_getCaptch\":\"获取验证码\",\"common_i18n_co"
+    },
+    {
+      "phase": "?",
+      "url": "https://picobd.yunxuetang.cn/orgsv2/glbl/1788857980788/pd/zh/custom/i18n_pc.json",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"pc_o2o_msg_confirm_delete\":\"确认解除占用吗？\",\"pc_pd_lbl_choosed_group\":\"已选小组\",\"pc_pd_tip_upload_readme\":\"上传须知：{0}\\n1.总共最多上传10个附件，包含图片+文件{0}\\n2. 上传已设置加密的文档，系统无法支持预览{0}\\n支持的格式大小：{0}\\n(1) 图片： .jpg、.jpeg、.gif、.png、.bmp；单个图片小于10MB{0}\\n(2) 文件上传支持文档、视频{0}\\n（2-1）文档：.doc、.docx、.ppt、.pptx、.xls、.xlsx、.pps、.pdf；单个文档小于200MB{0}\\n  (2-2) 视频：.wmv、.mp4、.flv、.avi、.rmvb、.mpg、.mkv、.mov、.mts；单个视频小于200MB{0}\",\"pc_pd_lbl_not_entered\":\"未录入\",\"pc_pd_tit_group_stu\":\"学员换组\",\"pc_pd_drawer_confirm\":\"确定\",\"pc_pd_lbl_sign1\":\"签名：\",\"sp_viewNth\":\"查看第\",\"pc_o2o_lbl_outlink\":\"外链\",\"pc_pd_group_notice_hint\":\"【通告】当前小组得分排名最高的是「小组名称」，其他小组要加油了哦\",\"pc_pd_manager_notice_tip\":\"有什么话想对学员说吗，可以通过公告的形式传递给学员哦。此公告可以用于鼓励学员，督促学员。也可以发一些企业的理念和名人名言。\",\"pc_o2o_msg_exam_end\":\"考试已结束\",\"pc_o2o_lbl_point_batchimport\":\"批量导入\",\"sp_designer_drag_mouse_tip\":\"拖动鼠标选中内容，"
+    },
+    {
+      "phase": "?",
+      "url": "https://picobd.yunxuetang.cn/orgsv2/glbl/1788245322678/kng/zh/custom/i18n_pc.json",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"pc_kng_lbl_scorm_score\":\"成绩\",\"pc_kng_lbl_buycourse_perpurchase_type\":\"类型\",\"pc_kng_detail_msg_no_permition\":\"对不起，该课程您无权查看，如需访问请联系管理员：\",\"pc_kng_lbl_photo\":\"照片\",\"pc_kng_lbl_enable\":\"启用\",\"pc_kng_kngcourse_tit_editcourse\":\"编辑课程\",\"kng_lbl_custom_code\":\"自定义课程编号\",\"pc_kng_project_msg_setAttr_apply_read\":\"已自动为您恢复上次保存但未应用的版本。\",\"pc_kng_project_tit_scan\":\"课程跳转详情页\",\"pc_kng_comments_lbl_audit_shield\":\"被屏蔽\",\"pc_kng_bbs_tip_confirmRecommand\":\"推荐后不可取消，确定要推荐吗？\",\"pc_kng_operate_msg_upload_support\":\"尺寸470*120，支持.jpg .png\",\"pc_kng_catalogmgmt_msg_error1\":\"分类名称长度不能大于50\",\"pc_kng_kngcourse_btn_addhandouts\":\"添加讲义\",\"pc_kng_college_this_month_complete\":\"本月员工自学完课数（个）\",\"pc_kng_catalogmgmt_msg_error5\":\"分类下存在课程，不可删除\",\"pc_course_mgmt_lbl_order_type_times\":\"按次\",\"pc_kng_catalogmgmt_msg_error2\":\"请选择您要移动到的分类\",\"pc_kng_lbl_se"
+    },
+    {
+      "phase": "?",
+      "url": "https://picobd.yunxuetang.cn/orgsv2/glbl/1788245322994/kng/zh/custom/i18n_pc.json",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"pc_kng_relatedSetting_lbl_opcityandcolor\":\"颜色及透明度\",\"pc_kng_visitor_lbl_email\":\"邮箱\",\"pc_kng_scoreset_doc\":\"文档：每{0}页，计{1}个学分 标准学习时长{2}分钟 每个文档最高学分不超过{3}个学分\",\"pc_kng_upload_tip_view_terminal\":\"课程需要适配移动端，否则会导致学员使用手机看课时出现异常\",\"pc_kng_upload_lbl_down_allow\":\"单独设置允许下载\",\"pc_kng_selectCatalog_lbl_collegeCatalog\":\"子课堂分类\",\"pc_kng_uplaoder_scorm_content_tip\":\"完成课件内容即可获得学分（需要课件支持内容记录，否则学员无法完成该课件）\",\"pc_kng_selectuserhint\":\"请选择人员\",\"pc_kng_upload_lbl_browse_allow\":\"单独设置允许浏览\",\"pc_kng_upload_tit_kng_code\":\"知识编码\",\"pc_kng_upload_lbl_newweike_autoupdate_false\":\"未开启自动更新\",\"pc_kng_tag_disabled\":\"已失效\",\"pc_kng_setting_lbl_setAttr_custom_name\":\"自定义名称\",\"pc_kng_ulcd_kngcourse_msg_warning3\":\"存在转码失败的课程，需要重新上传并转码成功后方可发布！\",\"pc_kng_upload_msg_kng_code\":\"请填写知识编码\",\"pc_kng_studyremind_lbl_thursday\":\"周四\",\"pc_kng_uplaoder_lbl_s"
+    },
+    {
+      "phase": "?",
+      "url": "https://picobd.yunxuetang.cn/orgsv2/glbl/1788857984444/common/zh/custom/i18n_pc.json",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"pc_biz_eval_msg_release_quota_tips\":\"只有占用份额且还未开始评估的人才能解除占用测评份额，是否解除选择人员的测评份额?\",\"pc_gwnl_eval_sendReport\":\"下发报告\",\"pc_biz_ote_lbl_marker\":\"批阅人\",\"pc_gwnl_seqmodel_pubfail_multi_marked_header\":\"有以下 {count} 处配置需要调整，已在表格中标红，请逐项检查：\",\"pc_biz_select_rank_group\":\"集团榜\",\"pc_aatd_eval_noreportsuccessnorebuild\":\"报告暂未生成不支持重新生成\",\"pc_biz_long_term\":\"长期活动\",\"pc_biz_rank_dept_per_studyscore_less\":\"部门人均学分小于等于\",\"pc_biz_tip_no_more\":\"没有更多了\",\"pc_ote_tips_all_stu_urge\":\"单场考试所有学员每天最多只能催促三次\",\"pc_gwnl_aiqb_sched_txt_sumBinFull\":\"薄弱强化 30% / 巩固验证 20% / 拓展探索 50%\",\"pc_biz_ote_msg_sureemptybasket\":\"您确定要清空试题篮吗?\",\"pc_biz_meeting_device_projector\":\"投影仪\",\"pc_gwnl_web_pleaseChooseAge\":\"请选择年龄\",\"pc_biz_ote_btn_changelib\":\"换库\",\"sp_designer_drag_mouse_tip\":\"拖动鼠标选中内容，并点击气泡内操作 — 标记/取消标记，可重复标记多条内容。\",\"pc_biz_ote_msg_keyword\":\"请输入关键词"
+    },
+    {
+      "phase": "?",
+      "url": "https://picobd.yunxuetang.cn/orgsv2/glbl/1788857980956/pd/zh/custom/i18n_pc.json",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"pc_o2o_lbl_ojttutor\":\"导师\",\"pc_o2o_lbl_counts_users\":\"等{0}人\",\"pc_o2o_tips_hw_rule_3\":\"按批阅的最高得分为准\",\"sp_scoringmethod_by_word_desc\":\"上述文字为标准话术，绿色字体为命中内容\",\"pc_pd_lbl_pleaseselectstudents\":\"请选择学员\",\"pc_o2o_lbl_have_choosed_tasks\":\"已选{0}个任务\",\"sp_contentEditSuccess\":\"评分内容已修改成功\",\"pc_o2o_lbl_taskgroup\":\"任务组\",\"pc_pd_lbl_duration\":\"时长\",\"pc_o2o_lbl_publishing\":\"发布中\",\"pc_ulcd_attend_finish_rule_and\":\"同时完成签到和签退\",\"pc_o2o_lbl_notopened\":\"未开启\",\"pc_gwnl_eval_equalRelation\":\"平级\",\"pc_o2o_lbl_totalstudyhours\":\"总学时（h）\",\"sp_designer_lbl_fileSizeExceeded\":\"该文件大于50M，请先进行图片压缩或剔除音视频文件，再上传\",\"pc_o2o_use_period_stardand\":\"按阶段完成标准\",\"pc_pd_lbl_assessment\":\"评估\",\"pc_pd_view_task_console\":\"进入任务控制台\",\"pc_o2o_tip_assign_disabled\":\"您目前项目是无阶段，不需使用此功能\",\"pc_o2o_lbl_startattend\":\"开始考勤\",\"pc_o2o_tit_exam_score\":\"考试得分\",\"pc_pd_lbl_exa"
+    },
+    {
+      "phase": "?",
+      "url": "https://picobd.yunxuetang.cn/orgsv2/glbl/1788245214471/ulcdsdk/zh/custom/i18n_pc.json",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"pc_tlive_guest\":\"嘉宾\",\"pc_tlive_watchreview\":\"观看回放\",\"pc_ulcdsdk_lbl_previous\":\"上一个\",\"pc_tlive_teacher\":\"讲师\",\"pc_kng_course_btn_confirm\":\"确认\",\"kng_lbl_custom_code\":\"自定义课程编号\",\"pc_h5_eval_evaluate_same\":\"作为平级评估\",\"pc_gwnl_jq_other\":\"其他\",\"pc_survey_lbl_numsjoin\":\"参与次数\",\"pc_kng_comments_lbl_audit_shield\":\"被屏蔽\",\"pc_kng_detail_msg_no_permission_download\":\"课程没有下载权限！\",\"pc_flip_lbl_face_evaluateTip\":\"此任务还未开始，不可进行评价\",\"pc_survey_lbl_ques_type_2\":\"多选题\",\"pc_gwnl_jq_analysis\":\"解析\",\"pc_ulcdsdk_access_via_xuanxing_app\":\"请用绚星APP、或对接了绚星学习平台后通过企微、钉钉、飞书扫码参与！\",\"pc_survey_lbl_ques_type_3\":\"判断题\",\"pc_o2o_lbl_addpic\":\"添加图片\",\"pc_gwnl_web_pleaseChooseAge\":\"请选择年龄\",\"pc_ulcdsdk_enter_leave_reason\":\"请输入请假原因（非必填）\",\"pc_survey_lbl_ques_type_4\":\"分类题\",\"pc_survey_lbl_ques_type_5\":\"填空题\",\"pc_kng_common_btn_cancel_no_blank\":\"取消\","
+    },
+    {
+      "phase": "?",
+      "url": "https://picobd.yunxuetang.cn/orgsv2/glbl/1788857985041/common/zh/custom/i18n_pc.json",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"pc_ote_btn_viewmultireview\":\"查看多次批阅记录\",\"pc_biz_ote_msg_studyscorenotnull\":\"请输入学分\",\"common_i18n_country_areacode_30_68\":\"希腊\",\"pc_biz_ote_tip_catalogsearch\":\"请输入分类名称搜索\",\"pc_ulcd-studyPlan-select-knowledge\":\"一键移入\",\"pc_te_lbl_cancel\":\"取消\",\"pc_gwnl_jq_other\":\"其他\",\"pc_o2o_msg_plase_keyword\":\"请输入关键字搜索\",\"pc_gwnl_import_selectAgain\":\"非正常数据模板文件，请重新选择文件！\",\"pc_ote_msg_endarrangetip\":\"{0}，未交卷会强制交卷，无法再修改考试设置，此操作不可恢复，请谨慎操作\",\"pc_gwnl_seqmodel_edit_category_desc\":\"编辑描述\",\"pc_gwnl_aiqb_rule_opt_weekThu\":\"周四\",\"pc_biz_kng_lbl_zoCode\":\"商城课编号\",\"pc_gwnl_seqmodel_state_unpublished\":\"未发布\",\"pc_biz_tit_rich_image\":\"图片\",\"pc_gwnl_web_oneToThreeYear\":\"1-3年\",\"pc_biz_eval_self_eval\":\"自评\",\"pc_o2o_msg_batch_move_failed\":\"批量移动失败，请稍后重试\",\"pc_biz_eval_lbl_ready_time_limit\":\"准备限时\",\"common_i18n_country_areacode_850_126\":\"朝鲜\",\"p"
+    },
+    {
+      "phase": "?",
+      "url": "https://picobd.yunxuetang.cn/orgsv2/glbl/1788857984877/common/zh/custom/i18n_pc.json",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"pc_gwnl_aiqb_adoption_affected_status_active\":\"进行中\",\"pc_biz_lbl_uploadnotice\":\"1.一次最多同时上传10个文件，文件夹不支持上传<br>2.请勿上传已设置加密或者只读的文档，否则系统将无法转换而报错\",\"pc_biz_flow_lbl_node_name\":\"节点名称\",\"pc_report_expname_ote_ind_arrange\":\"个人完成考试统计\",\"pc_biz_ote_lbl_littleeasy\":\"较易\",\"pc_gwnl_seqmodel_step_structure\":\"模型结构设置\",\"pc_report_expname_gwnl_tmap_ind_completion\":\"个人关卡完成详情\",\"xschcomm_require_choose_use\":\"请先选择用户\",\"kng_lbl_custom_code\":\"自定义课程编号\",\"talentrv_pc_calibration_range\":\"校准幅度\",\"pc_biz_discuss_view_replay_with_count\":\"查看{0}条回复\",\"pc_biz_Identitycardsaresupported\":\"仅支持大陆身份证、港澳居民居住证、台湾居民居住证\",\"pc_talentrv_fastExpression\":\"快捷公式\",\"xschcomm_certificatio_course_products\":\"认证课商品\",\"pc_gwnl_eval_self_eval\":\"自评\",\"apis.tlive.global.live.todo\":\"直播\",\"pc_biz_tit_rich_indent\":\"缩进\",\"pc_gwnl_seqmodel_delete_confirm_msg\":\"删除将"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx.yunxuetang.cn/misc/langfiles/search",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{\"appTypes\":[\"pc\"],\"langTags\":[\"zh\"],\"moduleTags\":[\"audit\"]}",
+      "body_preview": "{\"datas\":[{\"fileName\":\"i18n_pc.json\",\"fileUrl\":\"https://picobd.yunxuetang.cn/orgsv2/glbl/1785140243081/audit/zh/custom/i18n_pc.json\",\"langTag\":\"zh\",\"appType\":\"pc\",\"moduleTag\":\"audit\"}]}"
+    },
+    {
+      "phase": "?",
+      "url": "https://picobd.yunxuetang.cn/orgsv2/glbl/1785140243081/audit/zh/custom/i18n_pc.json",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"pc_select_role_audit\":\"请选择审核成员\",\"pc_audit_tip_select_all\":\"选择全部\",\"pc_audit_look_record_audit\":\"查看年度培训详情表\",\"pc_audit_search_tip_searchfor\":\"搜索\",\"pc_txt_required\":\"必填\",\"pc_audit_global_lbl_noauditing\":\"无需审核\",\"pc_real_rmdr\":\"实时待审核提醒\",\"pc_open\":\"开启\",\"pc_tmp_back_tip\":\"当前操作尚未保存，是否确认取消？\",\"pc_audit_table_7\":\"操作\",\"pc_audit_tip_input_com\":\"请输入审核意见\",\"pc_audit_suggest\":\"审核意见\",\"pc_audit_table_5\":\"提交时间\",\"pc_audit_table_6\":\"状态\",\"pc_audit_lbl_audit_plan\":\"审核进程\",\"pc_audit_table_3\":\"申请人\",\"pc_slelct_max\":\"最多选择{0}人\",\"pc_audit_table_4\":\"发起人\",\"pc_audit_table_1\":\"标题\",\"pc_txt_optional\":\"选填\",\"pc_audit_table_2\":\"审核内容\",\"pc_audit_lbl_initiate\":\"发起\",\"pc_audit_global_lbl_toaduit\":\"待我审核\",\"pc_select_role_p\":\"请选择成员\",\"pc_setup\":\"发起\",\"pc_audit_tit_name\":\"审核中心\",\"pc_audit_multi\":\"多人审核\",\"pc_audit_tit_audit_detail\":\"审核详情\",\"p"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/core/token/check",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"isValid\":1,\"expireTtl\":1202548}"
+    },
+    {
+      "phase": "?",
+      "url": "https://picobd.yunxuetang.cn/orgsv2/glbl/1785140243081/im/zh/custom/i18n_pc.json",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"pc_IM_tip_img\":\"[图片]\",\"h5_IM_choice_chat\":\"选择聊天\",\"pc_IM_tip_voice\":\"[语音]\",\"h5_IM_noticelist_type_announcement\":\"公告\",\"pc_IM_urge_msg_tip\":\"督促提醒\",\"h5_IM_msg_center_un_top\":\"取消置顶\",\"h5_IM_view_detail\":\"查看详情\",\"pc_IM_msg_center_un_top\":\"取消置顶\",\"h5_IM_title\":\"标题\",\"pc_IM_dissolution_success\":\"解散群成功\",\"pc_IM_bell_unread_num\":\"条未读的聊天消息\",\"h5_IM_change_groupname\":\"修改群名称为\",\"pc_IM_btn_save\":\"保存\",\"h5_IM_click_view_detail\":\"点击查看详情\",\"h5_IM_btn_set_role\":\"设置身份\",\"h5_IM_default_emoji\":\"默认表情\",\"h5_IM_noticelist_type_certificate\":\"证书\",\"h5_IM_view_more\":\"查看更多\",\"h5_IM_set_group_title_success\":\"设置群身份成功\",\"h5_IM_error_text\":\"错误\",\"h5_IM_btn_more\":\"更多\",\"h5_IM_noticelist_msg_no\":\"否\",\"pc_IM_btn_ok\":\"确定\",\"h5_IM_noticelist_search\":\"搜索\",\"h5_IM_group_disbanded\":\"该群聊已解散\",\"h5_IM_as_monitor\":\"例如：班长、副班长\",\"h5_IM_edit_only_manager"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx.yunxuetang.cn/misc/orgparsetting/code?code=useFirstName&orgId=7c80b070-28ac-4c1a-b54b-35b327b870eb",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"id\":null,\"orgId\":null,\"catalogId\":null,\"remark\":null,\"orderIndex\":0,\"createUserId\":null,\"createFullname\":null,\"createTime\":null,\"updateUserId\":null,\"updateFullname\":null,\"updateTime\":null,\"code\":null,\"value\":null}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx.yunxuetang.cn/misc/orgparsetting/code?code=show_helper_center_status&orgId=7c80b070-28ac-4c1a-b54b-35b327b870eb",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"id\":null,\"orgId\":null,\"catalogId\":null,\"remark\":null,\"orderIndex\":0,\"createUserId\":null,\"createFullname\":null,\"createTime\":null,\"updateUserId\":null,\"updateFullname\":null,\"updateTime\":null,\"code\":null,\"value\":null}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx.yunxuetang.cn/misc/orgparsetting/code?code=isHideLogout&orgId=7c80b070-28ac-4c1a-b54b-35b327b870eb",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"id\":null,\"orgId\":null,\"catalogId\":null,\"remark\":null,\"orderIndex\":0,\"createUserId\":null,\"createFullname\":null,\"createTime\":null,\"updateUserId\":null,\"updateFullname\":null,\"updateTime\":null,\"code\":null,\"value\":null}"
+    },
+    {
+      "phase": "?",
+      "url": "https://picobd.yunxuetang.cn/orgsv2/glbl/1788857984444/common/zh/custom/i18n_pc.json",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"pc_biz_eval_msg_release_quota_tips\":\"只有占用份额且还未开始评估的人才能解除占用测评份额，是否解除选择人员的测评份额?\",\"pc_gwnl_eval_sendReport\":\"下发报告\",\"pc_biz_ote_lbl_marker\":\"批阅人\",\"pc_gwnl_seqmodel_pubfail_multi_marked_header\":\"有以下 {count} 处配置需要调整，已在表格中标红，请逐项检查：\",\"pc_biz_select_rank_group\":\"集团榜\",\"pc_aatd_eval_noreportsuccessnorebuild\":\"报告暂未生成不支持重新生成\",\"pc_biz_long_term\":\"长期活动\",\"pc_biz_rank_dept_per_studyscore_less\":\"部门人均学分小于等于\",\"pc_biz_tip_no_more\":\"没有更多了\",\"pc_ote_tips_all_stu_urge\":\"单场考试所有学员每天最多只能催促三次\",\"pc_gwnl_aiqb_sched_txt_sumBinFull\":\"薄弱强化 30% / 巩固验证 20% / 拓展探索 50%\",\"pc_biz_ote_msg_sureemptybasket\":\"您确定要清空试题篮吗?\",\"pc_biz_meeting_device_projector\":\"投影仪\",\"pc_gwnl_web_pleaseChooseAge\":\"请选择年龄\",\"pc_biz_ote_btn_changelib\":\"换库\",\"sp_designer_drag_mouse_tip\":\"拖动鼠标选中内容，并点击气泡内操作 — 标记/取消标记，可重复标记多条内容。\",\"pc_biz_ote_msg_keyword\":\"请输入关键词"
+    },
+    {
+      "phase": "?",
+      "url": "https://picobd.yunxuetang.cn/orgsv2/glbl/1788857984877/common/zh/custom/i18n_pc.json",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"pc_gwnl_aiqb_adoption_affected_status_active\":\"进行中\",\"pc_biz_lbl_uploadnotice\":\"1.一次最多同时上传10个文件，文件夹不支持上传<br>2.请勿上传已设置加密或者只读的文档，否则系统将无法转换而报错\",\"pc_biz_flow_lbl_node_name\":\"节点名称\",\"pc_report_expname_ote_ind_arrange\":\"个人完成考试统计\",\"pc_biz_ote_lbl_littleeasy\":\"较易\",\"pc_gwnl_seqmodel_step_structure\":\"模型结构设置\",\"pc_report_expname_gwnl_tmap_ind_completion\":\"个人关卡完成详情\",\"xschcomm_require_choose_use\":\"请先选择用户\",\"kng_lbl_custom_code\":\"自定义课程编号\",\"talentrv_pc_calibration_range\":\"校准幅度\",\"pc_biz_discuss_view_replay_with_count\":\"查看{0}条回复\",\"pc_biz_Identitycardsaresupported\":\"仅支持大陆身份证、港澳居民居住证、台湾居民居住证\",\"pc_talentrv_fastExpression\":\"快捷公式\",\"xschcomm_certificatio_course_products\":\"认证课商品\",\"pc_gwnl_eval_self_eval\":\"自评\",\"apis.tlive.global.live.todo\":\"直播\",\"pc_biz_tit_rich_indent\":\"缩进\",\"pc_gwnl_seqmodel_delete_confirm_msg\":\"删除将"
+    },
+    {
+      "phase": "?",
+      "url": "https://picobd.yunxuetang.cn/orgsv2/glbl/1785140243081/im/zh/custom/i18n_h5.json",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"pc_IM_tip_img\":\"[图片]\",\"h5_IM_choice_chat\":\"选择聊天\",\"pc_IM_tip_voice\":\"[语音]\",\"h5_IM_noticelist_type_announcement\":\"公告\",\"h5_IM_msg_center_un_top\":\"取消置顶\",\"h5_IM_view_detail\":\"查看详情\",\"h5_IM_title\":\"标题\",\"pc_IM_dissolution_success\":\"解散群成功\",\"h5_IM_change_groupname\":\"修改群名称为\",\"h5_IM_click_view_detail\":\"点击查看详情\",\"h5_IM_btn_set_role\":\"设置身份\",\"h5_IM_default_emoji\":\"默认表情\",\"h5_IM_noticelist_type_certificate\":\"证书\",\"h5_IM_view_more\":\"查看更多\",\"h5_IM_set_group_title_success\":\"设置群身份成功\",\"h5_IM_error_text\":\"错误\",\"h5_IM_btn_more\":\"更多\",\"h5_IM_noticelist_msg_no\":\"否\",\"h5_IM_noticelist_search\":\"搜索\",\"h5_IM_group_disbanded\":\"该群聊已解散\",\"h5_IM_as_monitor\":\"例如：班长、副班长\",\"h5_IM_edit_only_manager\":\"仅群主可编辑\",\"h5_IM_msg_pls_input\":\"请输入群身份，特殊字符除外\",\"h5_IM_group_right_transfer\":\"群管理权转让\",\"h5_IM_no_member\":\"没有其他群成员\",\"h5_IM_noticelist_msg_y"
+    },
+    {
+      "phase": "?",
+      "url": "https://picobd.yunxuetang.cn/orgsv2/glbl/1788857873060/common/zh/custom/i18n_h5.json",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"h5_audit_btn_undone\":\"撤销\",\"h5_core_udp_orgoumgmt_form_userno\":\"工号\",\"h5_o2o_lbl_select_identify_result\":\"请选择鉴定结果\",\"h5_biz_phone_enter_error\":\"请输入正确的手机号\",\"h5_biz_lbl_offlineName\":\"面授名称\",\"common_i18n_country_areacode_30_68\":\"希腊\",\"h5_biz_te_lbl_billing_info\":\"结算信息\",\"kng_lbl_custom_code\":\"自定义课程编号\",\"h5_biz_ote_lbl_exampapertype0\":\"固定出卷\",\"h5_biz_ai_lbl_tool_recommend\":\"AI推荐\",\"h5_biz_clockin_lbl_sunday\":\"周一\",\"h5_biz_ote_lbl_exampapertype1\":\"随机出卷\",\"h5_gwnl_change_eval_result\":\"切换测评结果\",\"apis.tlive.global.live.todo\":\"直播\",\"h5_common_december\":\"12月\",\"common_i18n_country_areacode_850_126\":\"朝鲜\",\"common_i18n_country_areacode_262_140\":\"留尼汪岛\",\"h5_o2o_lbl_stu_complete_standard\":\"学员完成标准\",\"h5_biz_lbl_name_length\":\"姓名长度为2-20个字符\",\"h5_ote_fb_type_other\":\"其他错误\",\"h5_biz_core_btn_getCaptch\":\"获取验证码\",\"common_i18n_co"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/decorate/festivals/auto-toggle",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"festivalToggle\":1,\"pageIndexToggle\":0,\"pcPageIndexToggle\":0}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/decorate/custom/release-codes/types/4/toggle-configs",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"toggle\":0}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/udp/groupcorps/7c80b070-28ac-4c1a-b54b-35b327b870eb/groupinfo",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"enableGroupCorp\":false,\"groupCorpId\":null,\"groupCorpName\":null,\"manageMode\":null,\"masterOrgStatus\":0,\"manageOrgStatus\":0,\"masterOrgId\":null}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/core/user/nav/latest?type=1",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"updateTime\":1788919333000}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/im/imusers/self",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"hxPassword\":\"\",\"hxUserToken\":\"\",\"hxOrgName\":\"\",\"hxAppName\":\"\",\"imFactor\":\"1\",\"zyUsername\":\"5a048314-abbd-40db-9378-9c1536aa581c\",\"zyUserToken\":\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJVc2VySUQiOiI0NTcxNDg3OTAxNDU5NDE1NDkiLCJVc2VybmFtZSI6IjVhMDQ4MzE0LWFiYmQtNDBkYi05Mzc4LTljMTUzNmFhNTgxYyIsIk9yZ0lEIjoiN2M4MGIwNzAtMjhhYy00YzFhLWI1NGItMzViMzI3Yjg3MGViIiwiZXhwIjoxNzkxNTExMzMzLCJuYmYiOjE3ODg5MTkzMzMsImlhdCI6MTc4ODkxOTMzM30.SvxIsLrfnTDvpVR8sLO5bsIZKRKTz6lAEFoJm-_ZJlY\",\"hxUserName\":\"\"}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/decorate/stu/range-templates?pageCode=index",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "[{\"id\":\"1722916858151735298\",\"name\":\"首页升级\",\"type\":2,\"terminal\":0,\"topFlag\":0,\"langKey\":\"\",\"checked\":1}]"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/core/user/nav/manage",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"manageFlag\":0}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/kv/course/attr/show",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"courseAttList\":[7]}"
+    },
+    {
+      "phase": "?",
+      "url": "https://picobd.yunxuetang.cn/orgsv2/glbl/1788857985041/common/zh/custom/i18n_pc.json",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"pc_ote_btn_viewmultireview\":\"查看多次批阅记录\",\"pc_biz_ote_msg_studyscorenotnull\":\"请输入学分\",\"common_i18n_country_areacode_30_68\":\"希腊\",\"pc_biz_ote_tip_catalogsearch\":\"请输入分类名称搜索\",\"pc_ulcd-studyPlan-select-knowledge\":\"一键移入\",\"pc_te_lbl_cancel\":\"取消\",\"pc_gwnl_jq_other\":\"其他\",\"pc_o2o_msg_plase_keyword\":\"请输入关键字搜索\",\"pc_gwnl_import_selectAgain\":\"非正常数据模板文件，请重新选择文件！\",\"pc_ote_msg_endarrangetip\":\"{0}，未交卷会强制交卷，无法再修改考试设置，此操作不可恢复，请谨慎操作\",\"pc_gwnl_seqmodel_edit_category_desc\":\"编辑描述\",\"pc_gwnl_aiqb_rule_opt_weekThu\":\"周四\",\"pc_biz_kng_lbl_zoCode\":\"商城课编号\",\"pc_gwnl_seqmodel_state_unpublished\":\"未发布\",\"pc_biz_tit_rich_image\":\"图片\",\"pc_gwnl_web_oneToThreeYear\":\"1-3年\",\"pc_biz_eval_self_eval\":\"自评\",\"pc_o2o_msg_batch_move_failed\":\"批量移动失败，请稍后重试\",\"pc_biz_eval_lbl_ready_time_limit\":\"准备限时\",\"common_i18n_country_areacode_850_126\":\"朝鲜\",\"p"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/notice/notice/list?type=0&edition=-1&isManage=0",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"datas\":[]}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/audit/audit/getauditcount",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"count\":0}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/core/user/nav/code/name",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"lectuer_statistics\":\"讲师统计\",\"ai_question_config\":\"出题规则配置\",\"enterprise_pra_participation\":\"练习参与情况\",\"sp_speech_prj_report_prj\":\"训练统计数据\",\"knowledge_details\":\"课程学习详情\",\"sys_psn_daily\":\"个人学习结果日统计\",\"active_statistics_cumulative\":\"平台活跃累计统计\",\"kng_systemSetting\":\"系统设置\",\"group_project_participation\":\"项目参与情况\",\"certificate_award\":\"证书颁发详情\",\"system_usage\":\"系统使用情况\",\"group_live_participation\":\"直播参与情况\",\"reward_setting_exp\":\"经验值管理\",\"project_completion\":\"项目完成结果\",\"quick_start\":\"QuickStart\",\"decorate_custom_nav\":\"导航\",\"reward_medal_mgmt\":\"勋章管理\",\"talent_personal\":\"个人发展\",\"bbs_mgmt_post\":\"帖子管理\",\"ssp_other_settings\":\"入学通知设置\",\"rpt_sparring_personal_details\":\"个人完成详情\",\"m_learningdynamics\":\"学习动态\",\"ote_mark\":\"考试批阅\",\"sp_gwnl_certificate_project\":\"认证项目\",\"decorate_custom_other\":\"其他\",\"sp_position_dashboard\":\"岗位指标看板\",\"rpt_sp"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/kngCatalog/student/tree",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{\"pmType\":\"0\",\"collegeId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\"}",
+      "body_preview": "[{\"id\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"parentId\":null,\"label\":\"主课堂\",\"kngCount\":null,\"routingPath\":null,\"orderIndex\":null,\"orderType\":null,\"updateTime\":null,\"children\":[{\"id\":\"d47929db-7e32-4e0a-aa82-16ca819e4bc4\",\"parentId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"label\":\"佰事专区\",\"kngCount\":0,\"routingPath\":\"015\",\"orderIndex\":1,\"orderType\":0,\"updateTime\":\"2026-06-03\",\"children\":[{\"id\":\"600bdcd9-774a-4e13-ad52-610d590fe66a\",\"parentId\":\"d47929db-7e32-4e0a-aa82-16ca819e4bc4\",\"label\":\"公司介绍\",\"kngCount\":2,\"routingPath\":\"015.001\",\"orderIndex\":2631,\"orderType\":0,\"updateTime\":\"2026-06-03\",\"children\":[],\"collegeId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"courseCount\":null,\"mainCollege\":null,\"allKngCount\":null,\"allCourseCount\":null,\"createTime\":null,\"rootPath\":null,\"catalogCode\":\"\"},{\"id\":\"5d3ddf"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/knowledge/pagelist?limit=16&offset=0&orderType=desc&orderBy=createTime",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{\"collegeId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"catalogId\":\"4ff8c024-219c-4e49-91d0-ec869bcf859f\",\"title\":\"\",\"type\":\"\",\"allTag\":1,\"tagIds\":[]}",
+      "body_preview": "{\"datas\":[{\"id\":\"0268b79b-c752-4b30-abc6-23bc55ff2f26\",\"title\":\"Lecture06-Agent智能体系统的设计与应用\",\"coverUrl\":\"https://stc.yxt.com/ufd/55a3e0/kng/pc/img/system/13.jpg\",\"description\":\"今天的学习目标 Agent智能体系统的设计与应用 • AI Agent对比 • 智能体架构设计 反应式 (Reactive) 深思熟虑 (Deliberative) 混合式 (Hybrid) • CASE：私募基金运作指引问答助手（反应式） • CASE：智能投研助手（深思熟虑） • CASE：投顾AI助手（混合式）\",\"avgCommentScore\":4.44,\"studyScore\":1.00,\"studyCount\":53,\"appEnabled\":1,\"price\":0.0,\"createTime\":\"2026-06-23 18:18:13\",\"updateTime\":\"2026-06-23 18:18:13\",\"type\":2,\"fileType\":\"video\",\"tagIds\":\"\",\"studyComplete\":null,\"tags\":null,\"orderIndex\":null,\"userAvgCommentScore\":null,\"contributorId\":\"f94f7302-5dd8-47ae-89ed-e7770b1e34b8\",\"contributorName\":\"胡峥\",\"contributorImage\":\"https://picobd.yunxuetang.cn/media/userfiles/userphotos/default/99.png?imageView2/0/w/100/h/1"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/im/imusers/search",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{\"hxUserNames\":[\"5a048314-abbd-40db-9378-9c1536aa581c\"]}",
+      "body_preview": "{\"datas\":[{\"hxUserName\":\"5a048314-abbd-40db-9378-9c1536aa581c\",\"id\":\"5a048314-abbd-40db-9378-9c1536aa581c\",\"orgId\":null,\"orgName\":null,\"imgUrl\":\"https://picobd.yunxuetang.cn/orgsv2/core/7c80b070-28ac-4c1a-b54b-35b327b870eb-tools20220805/userinfo/images/202211/10fbd7e6f2214e33a77eabd36815c8b1.jpeg\",\"sex\":null,\"deptName\":null,\"positionSet\":[],\"title\":\"\",\"createTime\":null,\"updateTime\":null,\"fullName\":\"杨鑫雨\"}]}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/kngContentTag/show?catalogId=4ff8c024-219c-4e49-91d0-ec869bcf859f&collegeId=7c80b070-28ac-4c1a-b54b-35b327b870eb",
+      "method": "POST",
+      "status": 200,
+      "post_data": null,
+      "body_preview": ""
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/down/info/push?userId=5a048314-abbd-40db-9378-9c1536aa581c",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": ""
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/msg/ding/h5?time=1788926385845",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"url\":\"https://b-learning.bill-jc.com/m/\",\"isCustomDingDingApp\":1,\"pcUrl\":\"https://b-learning.bill-jc.com/\"}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/core/org/orgname?orgId=7c80b070-28ac-4c1a-b54b-35b327b870eb&time=1788926385852",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"orgName\":\"武汉佰钧成B-learning\",\"i18nOrgName\":\"\",\"i18nOrgNames\":{},\"logoUrl\":\"https://picobd.yunxuetang.cn/orgsv2/demo/7c80b070-28ac-4c1a-b54b-35b327b870eb-tools20220805/test_module/test_function/202208/b54141c39a154751b9733569c71e2212.png\",\"enableI18n\":0,\"lang4Get\":[{\"langName\":\"简体中文\",\"langTag\":\"zh\"}],\"editionUpgrade\":0,\"salePkgName\":null,\"pcUrl\":\"https://api-phx.yunxuetang.cn/sso/baijunchengsso/sso\",\"h5Url\":\"https://api-phx.yunxuetang.cn/sso/baijunchengsso/sso\",\"sourceCode\":\"103\",\"domainName\":\"b-learning.bill-jc.com\",\"productVersion\":\"2.0\",\"platEnv\":\"aliyun\",\"appSso\":1,\"forgetPwd\":null,\"singleChatSwitch\":1,\"siteName\":\"武汉佰钧成技术B-learning\",\"isShowNavFooter\":null,\"showMoreLoginFn\":null,\"orgType\":1,\"profileId\":null,\"operateLevel\":\"\",\"batchId\":null}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-paas.yunxuetang.cn/xxim/api/v1/7c80b070-28ac-4c1a-b54b-35b327b870eb/client/user/get_self_user_info",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{\"operationID\":\"dWXkbWomTn4PqmZFDw7APOg4CBZhFvgo\"}",
+      "body_preview": "{\"errCode\":0,\"errMsg\":\"\",\"data\":{\"userID\":\"457148790145941549\",\"username\":\"5a048314-abbd-40db-9378-9c1536aa581c\",\"nickname\":\"杨鑫雨\",\"activated\":true,\"created\":1682011512470,\"modified\":1788482995204}}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-paas-ali.yunxuetang.cn/dataplatform-olap/dashboard/push",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{}",
+      "body_preview": "0"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx.yunxuetang.cn/misc/app/7c80b070-28ac-4c1a-b54b-35b327b870eb/downloadinfo?appType=0&time=1788926386077",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"domain\":\"b-learning.bill-jc.com\",\"openCustom\":0,\"generalDownloadUrl\":\"https://appdown.yunxuetang.cn/t/daxue/phoenix/phoenix_master_10285.apk\",\"customDownloadUrl\":null,\"redeEnough\":0,\"redeFlag\":0,\"downloadBgpUrl\":null,\"appName\":null}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-paas.yunxuetang.cn/xxim/api/v1/7c80b070-28ac-4c1a-b54b-35b327b870eb/client/user/get_self_user_info",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{\"operationID\":\"JG9W0CWFI1fZYMbguVmOY5kijU0IuUYz\"}",
+      "body_preview": "{\"errCode\":0,\"errMsg\":\"\",\"data\":{\"userID\":\"457148790145941549\",\"username\":\"5a048314-abbd-40db-9378-9c1536aa581c\",\"nickname\":\"杨鑫雨\",\"activated\":true,\"created\":1682011512470,\"modified\":1788482995204}}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/im/appusernames",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"datas\":[\"assist__50__20\",\"assist__50__21\",\"assist__50__24\",\"assist__50__25\",\"assist__50__26\",\"assist__50__28\",\"assist__50__29\",\"assist__50__30\",\"assist__50__33\",\"assist__50__34\",\"assist__50__36\",\"assist__50__37\",\"assist__50__38\",\"assist__50__39\",\"assist__50__40\",\"assist__50__42\",\"assist__50__43\",\"assist__50__45\",\"assist__50__46\",\"assist__50__47\",\"assist__50__48\",\"assist__50__50\",\"assist__50__51\",\"assist__50__53\",\"assist__50__54\",\"assist__50__55\",\"assist__50__56\",\"assist__50__57\",\"assist__50__58\",\"assist__50__59\",\"assist__50__60\",\"assist__50__61\",\"assist__50__62\",\"assist__50__63\",\"assist__50__64\",\"assist__50__65\",\"assist__50__66\",\"assist__50__67\",\"assist__50__68\",\"assist__50__69\",\"assist__50__70\",\"assist__50__71\",\"assist__50__72\",\"assist__50__73\",\"assist__50__74\",\"assist__50__76\",\"assist_"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx.yunxuetang.cn/misc/orgparsetting/code?code=DownloadQRCode&orgId=7c80b070-28ac-4c1a-b54b-35b327b870eb&time=1788926386274",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"id\":null,\"orgId\":null,\"catalogId\":null,\"remark\":null,\"orderIndex\":0,\"createUserId\":null,\"createFullname\":null,\"createTime\":null,\"updateUserId\":null,\"updateFullname\":null,\"updateTime\":null,\"code\":null,\"value\":null}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-paas.yunxuetang.cn/xxim/api/v1/7c80b070-28ac-4c1a-b54b-35b327b870eb/client/conversation/list",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{\"operationID\":\"T7J6yrFm9pXJ68lSouI0SdQk6K78dNgb\",\"page\":1,\"size\":5000}",
+      "body_preview": "{\"errCode\":0,\"errMsg\":\"\",\"conversations\":[]}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/im/imusers/search",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{\"users\":[],\"hxUserNames\":[]}",
+      "body_preview": "{\"datas\":[]}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-paas.yunxuetang.cn/xxim/api/v1/7c80b070-28ac-4c1a-b54b-35b327b870eb/client/conversation/list",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{\"operationID\":\"T7J6yrFm9pXJ68lSouI0SdQk6K78dNgb\",\"page\":1,\"size\":5000}",
+      "body_preview": "{\"errCode\":0,\"errMsg\":\"\",\"conversations\":[]}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-paas.yunxuetang.cn/xxim/api/v1/7c80b070-28ac-4c1a-b54b-35b327b870eb/client/group/get_joined_group_list",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{\"operationID\":\"T7J6yrFm9pXJ68lSouI0SdQk6K78dNgb\",\"fromUserID\":\"457148790145941549\"}",
+      "body_preview": "{\"errCode\":0,\"errMsg\":\"\",\"data\":[]}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/o2o/global/langTrans?langKey=keys.org.ssp.custom.global.optional",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"en\":\"Elective\",\"ha\":\"選修\",\"zh\":\"选修\"}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/o2o/global/langTrans?langKey=keys.org.ssp.custom.global.compulsory",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"en\":\"Compulsory\",\"ha\":\"必修\",\"zh\":\"必修\"}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/core/secretprotocol/privacy/7c80b070-28ac-4c1a-b54b-35b327b870eb",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"secretSwitch\":0,\"secretUpdateTime\":null,\"privacySwitch\":0,\"url\":null,\"orgPrivacySetting\":null}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/studylog/logs",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{\"logTypeCode\":\"001\",\"uuId\":\"4393aea4-8e8c-4403-8383-48709e6692de\",\"pageUrl\":\"https://b-learning.bill-jc.com/kng/#/video/play?kngId=0268b79b-c752-4b30-abc6-23bc55ff2f26&projectId=&btid=&gwnlUrl=\",\"requestHeaderJson\":{\"source\":501},\"ext5\":\"2026/9/9 11:59:59\",\"courseId\":\"\",\"kngId\":\"\",\"ext1\":\"进入播放页\",\"ext2\":\"\",\"ext3\":\"\",\"ext4\":\"\"}",
+      "body_preview": ""
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/bbs/cc/silencewords/users/status",
+      "method": "POST",
+      "status": 201,
+      "post_data": "{}",
+      "body_preview": "{\"silence\":0}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx.yunxuetang.cn/file/watermark/config",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"enabled\":0,\"type\":1,\"watermarkContent\":\"BJC\",\"wordColor\":\"a9a9a9\",\"wordAlpha\":\"99\",\"wordFontSize\":10,\"otherColor\":\"a9a9a9\",\"otherAlpha\":\"99\",\"otherFontSize\":10,\"density\":0,\"speed\":2,\"fileWatermarkAppList\":[{\"id\":22470,\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"appCode\":\"bbs\",\"createTime\":null,\"updateTime\":null,\"enabled\":0,\"showType\":1,\"density\":0,\"speed\":2,\"display\":1},{\"id\":22473,\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"appCode\":\"gmcenter\",\"createTime\":null,\"updateTime\":null,\"enabled\":0,\"showType\":1,\"density\":0,\"speed\":2,\"display\":1},{\"id\":3006,\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"appCode\":\"kng\",\"createTime\":null,\"updateTime\":null,\"enabled\":0,\"showType\":1,\"density\":0,\"speed\":2,\"display\":1},{\"id\":87879,\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"appCode\":\"ote\","
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/bbs/cc/silenceconfigs?orgId=7c80b070-28ac-4c1a-b54b-35b327b870eb&userId=5a048314-abbd-40db-9378-9c1536aa581c",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"complainKnowledgeLibKng\":0,\"MK0005-GN0001-2\":0,\"MK0005-GN0001-1\":1,\"complainLearningbbsComment\":0,\"MK0005-GN0005-2\":0,\"MK0005-GN0005-1\":1,\"MK0001-GN0007-1\":1,\"speechCommentKnowledgeLib\":1,\"MK0001-GN0007-2\":0,\"speechContentKnowledgeforum\":1,\"complainLearningbbsPostqa\":0,\"complainOnlineclassCourse\":0,\"speechCommentLearningbbs\":1,\"MK0006-GN0008-2\":0,\"speechCommentKnowledgeforum\":1,\"MK0006-GN0004-1\":1,\"complainKnowledgeforumComment\":0,\"speechCommentOnlineclass\":1,\"complainKnowledgeLibComment\":0,\"speechContentLearningbbs\":1,\"MK0007-GN0004-1\":1,\"MK0007-GN0008-2\":0,\"complain-aichat-2\":0,\"complainOnlineclassComment\":0,\"complainKnowledgeforumDiscussqa\":0}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/decorate/custom/release-codes/types/3/toggle-configs?orgId=7c80b070-28ac-4c1a-b54b-35b327b870eb&domainName=b-learning.bill-jc.com",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"toggle\":0}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/kngVersion/check",
+      "method": "POST",
+      "status": 204,
+      "post_data": "{\"kngId\":\"0268b79b-c752-4b30-abc6-23bc55ff2f26\",\"targetCode\":\"kng\",\"targetId\":\"\"}",
+      "body_preview": ""
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/kv/conf/query/switch",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{\"group\":\"DOWNLOAD_GROUP\",\"key\":\"DOWNLOAD_SWITCH\",\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\"}",
+      "body_preview": "{\"config\":\"1\"}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/kngConf/cheat",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"enabled\":0,\"maxMin\":10,\"tips\":\"已触发防挂机验证，请点击“继续学习”，否则学习将被停止\",\"tips1\":\"已触发防挂机验证，请点击“继续学习”，否则学习将被停止\",\"tips2\":\"学习计时中，请不要走开喔。点击“继续学习”，否则我们认为您已临时走开，在您离开的这段时间我们不会计入您的学习时间及相应学分。\",\"countDown\":120,\"selectType\":1,\"progress\":100,\"moreEnabled\":0,\"enableForbidDrag\":0,\"enableAudioBackgroundPlay\":0,\"cheatTipList\":[{\"langTag\":\"zh\",\"transContent\":\"已触发防挂机验证，请点击“继续学习”，否则学习将被停止\"}]}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/download/config",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "[{\"id\":1555513450146971649,\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"fileType\":1,\"openFlag\":1,\"deleted\":0,\"createUserId\":null,\"createFullname\":\"admin\",\"createTime\":\"2022-08-05 19:18:01\",\"updateUserId\":null,\"updateFullname\":\"admin\",\"updateTime\":\"2022-08-05 19:18:01\"},{\"id\":1555513450151165953,\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"fileType\":2,\"openFlag\":1,\"deleted\":0,\"createUserId\":null,\"createFullname\":\"admin\",\"createTime\":\"2022-08-05 19:18:01\",\"updateUserId\":null,\"updateFullname\":\"admin\",\"updateTime\":\"2022-08-05 19:18:01\"},{\"id\":1555513450159554561,\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"fileType\":3,\"openFlag\":1,\"deleted\":0,\"createUserId\":null,\"createFullname\":\"admin\",\"createTime\":\"2022-08-05 19:18:01\",\"updateUserId\":null,\"updateFullname\":\"admin\",\"updateTime\":\"2022-"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/study/del/studying",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{}",
+      "body_preview": ""
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/kv/current/knowledge/name",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"nameSwitch\":\"0\",\"scormLan\":null,\"htmlLan\":null}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/study/popupAfterFinishStudy/0268b79b-c752-4b30-abc6-23bc55ff2f26",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"userId\":\"5a048314-abbd-40db-9378-9c1536aa581c\",\"popUpStatus\":0}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/core/orgparsetting/code?code=isV2VideoPlayer&orgId=7c80b070-28ac-4c1a-b54b-35b327b870eb",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"id\":null,\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"catalogId\":null,\"remark\":null,\"orderIndex\":0,\"createUserId\":null,\"createFullname\":null,\"createTime\":null,\"updateUserId\":null,\"updateFullname\":null,\"updateTime\":null,\"code\":\"isV2VideoPlayer\",\"value\":\"\"}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/core/orgparsetting/code?code=autoplay&orgId=7c80b070-28ac-4c1a-b54b-35b327b870eb",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"id\":null,\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"catalogId\":null,\"remark\":null,\"orderIndex\":0,\"createUserId\":null,\"createFullname\":null,\"createTime\":null,\"updateUserId\":null,\"updateFullname\":null,\"updateTime\":null,\"code\":\"autoplay\",\"value\":\"\"}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/study/knginfos/preload",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{\"kngId\":\"0268b79b-c752-4b30-abc6-23bc55ff2f26\",\"studyParam\":{\"originOrgId\":\"\",\"previewType\":0},\"targetCode\":\"kng\",\"targetId\":\"\",\"targetParam\":{\"taskId\":\"\",\"projectId\":\"\",\"flipId\":\"\",\"batchId\":\"\"},\"customFunctionCode\":\"\"}",
+      "body_preview": ""
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/attribute/detail/info/0268b79b-c752-4b30-abc6-23bc55ff2f26",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"attributeInfoResponses\":[{\"id\":\"6e1873aa-2034-4058-8408-e81237f7fbbe\",\"attrKey\":0,\"attrName\":\"名称\",\"attrType\":null,\"selectRange\":null,\"rangeMax\":\"\",\"rangeMin\":\"\",\"disabled\":0,\"required\":1,\"attrShow\":1,\"history\":0,\"deleted\":0,\"attrNameCn\":null,\"attrNameEn\":null,\"attrNameHa\":null,\"apply\":1,\"groupType\":1,\"orderIndex\":1,\"createTime\":\"2022-08-06 15:49:47\"},{\"id\":\"8cb97e0b-db1f-4a3a-9627-950c08c8a73d\",\"attrKey\":2,\"attrName\":\"标准时长\",\"attrType\":null,\"selectRange\":null,\"rangeMax\":\"\",\"rangeMin\":\"\",\"disabled\":0,\"required\":1,\"attrShow\":1,\"history\":0,\"deleted\":0,\"attrNameCn\":null,\"attrNameEn\":null,\"attrNameHa\":null,\"apply\":1,\"groupType\":1,\"orderIndex\":3,\"createTime\":\"2022-08-06 15:49:47\"},{\"id\":\"40c265df-4898-487f-895e-621160cfbbb2\",\"attrKey\":3,\"attrName\":\"学分\",\"attrType\":null,\"selectRange\":null,\"rangeM"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/study/kngInfo",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{\"kngId\":\"0268b79b-c752-4b30-abc6-23bc55ff2f26\",\"studyParam\":{\"originOrgId\":\"\",\"previewType\":0},\"targetCode\":\"kng\",\"targetId\":\"\",\"targetParam\":{\"taskId\":\"\",\"projectId\":\"\",\"flipId\":\"\",\"batchId\":\"\"},\"customFunctionCode\":\"\"}",
+      "body_preview": "{\"id\":\"0268b79b-c752-4b30-abc6-23bc55ff2f26\",\"title\":\"Lecture06-Agent智能体系统的设计与应用\",\"fileId\":\"ab008139-5167-4b6e-9b06-585c72cea675\",\"type\":2,\"fileType\":\"video\",\"courseId\":null,\"attId\":null,\"catalogAllPath\":null,\"catalogAllPathName\":null,\"catalogAllPathId\":[\"b50e8058-2536-4a69-90af-bea71420ad4f\"],\"catalogName\":\"AI应用开发\",\"catalogRoutingPath\":\"017.091\",\"status\":4,\"coverUrl\":\"https://stc.yxt.com/ufd/55a3e0/kng/pc/img/system/13.jpg\",\"avgCommentScore\":4.44,\"distributeSourceType\":0,\"orginalKngId\":null,\"studyCount\":53,\"supportCount\":0,\"commentCount\":0,\"evaluateCount\":9,\"shareEnabled\":1,\"addStudy\":0,\"schedule\":0.0,\"viewLoc\":0,\"contributorsId\":\"f94f7302-5dd8-47ae-89ed-e7770b1e34b8\",\"contributorsName\":\"胡峥\",\"contributorsImage\":\"https://picobd.yunxuetang.cn/media/userfiles/userphotos/default/99.png?imageV"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/kngUserViewRecord",
+      "method": "POST",
+      "status": 204,
+      "post_data": "{\"kngId\":\"0268b79b-c752-4b30-abc6-23bc55ff2f26\",\"targetCode\":\"kng\",\"targetId\":\"0268b79b-c752-4b30-abc6-23bc55ff2f26\"}",
+      "body_preview": ""
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/multi-eval/group/info/0268b79b-c752-4b30-abc6-23bc55ff2f26",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"score\":4.44,\"multiScore\":null,\"itemResultBeans\":null}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/utility/praises/findpraisedtargets",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{\"targetIds\":[\"0268b79b-c752-4b30-abc6-23bc55ff2f26\"]}",
+      "body_preview": "{\"datas\":[]}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/play/detail/config",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{\"id\":\"0268b79b-c752-4b30-abc6-23bc55ff2f26\"}",
+      "body_preview": "{\"kngId\":\"0268b79b-c752-4b30-abc6-23bc55ff2f26\",\"courseId\":null,\"orgId\":\"7c80b070-28ac-4c1a-b54b-35b327b870eb\",\"targetId\":null,\"targetCode\":\"kng\",\"enableStudyedAlert\":1,\"enableCommentForce\":0,\"enableBbs\":1,\"enableNote\":1,\"enableMultiple\":1,\"enableShowMultiple\":1,\"enableDrag\":1,\"studyStartTime\":\"\",\"studyEndTime\":\"\",\"rewardBossSwitch\":0}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/utility/favoritetargets/0268b79b-c752-4b30-abc6-23bc55ff2f26/favorited",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"myFavorite\":false}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/utility/praises/findpraisedtargets",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{\"targetIds\":[\"0268b79b-c752-4b30-abc6-23bc55ff2f26\"]}",
+      "body_preview": "{\"datas\":[]}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/utility/favoritetargets/0268b79b-c752-4b30-abc6-23bc55ff2f26/favorited",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"myFavorite\":false}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/studynote/count",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{\"queryType\":1,\"courseId\":\"\",\"kngId\":\"0268b79b-c752-4b30-abc6-23bc55ff2f26\",\"qryFeatured\":0,\"qryMine\":0,\"onlyCurr\":0}",
+      "body_preview": "{\"data\":0,\"msgCode\":null}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/multi-eval/group/info/0268b79b-c752-4b30-abc6-23bc55ff2f26",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"score\":4.44,\"multiScore\":null,\"itemResultBeans\":null}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/kngContentTag/tagtargets/0268b79b-c752-4b30-abc6-23bc55ff2f26/orgtags",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "[]"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/comment/0268b79b-c752-4b30-abc6-23bc55ff2f26/count",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"data\":11,\"msgCode\":null}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/kv/course/attr/show",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"courseAttList\":[7]}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/knowledge/learnTogether",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{\"kngId\":\"0268b79b-c752-4b30-abc6-23bc55ff2f26\",\"count\":3,\"catalogId\":\"b50e8058-2536-4a69-90af-bea71420ad4f\"}",
+      "body_preview": "[{\"id\":\"4e4834f1-0569-47bd-8297-257b4709ea55\",\"catalogId\":\"b50e8058-2536-4a69-90af-bea71420ad4f\",\"catalogLevel\":2,\"title\":\"Lecture01-AI大模型基本原理及API应用\",\"coverUrl\":\"https://stc.yxt.com/ufd/55a3e0/kng/pc/img/system/8.jpg\",\"studyCount\":44,\"fileType\":\"video\",\"studyHours\":8875,\"studyScore\":1.00,\"knowledgeAttrDTO\":{\"id\":\"4e4834f1-0569-47bd-8297-257b4709ea55\",\"avgCommentScore\":3.66,\"contributorId\":\"f94f7302-5dd8-47ae-89ed-e7770b1e34b8\",\"contributorName\":\"胡峥\",\"contributorImage\":\"https://picobd.yunxuetang.cn/media/userfiles/userphotos/default/99.png?imageView2/0/w/100/h/100/format/jpg/interlace/1\",\"viewCount\":154,\"readCount\":50,\"studyCount\":44,\"lectureId\":\"\",\"lectureName\":\"\",\"lectureImage\":null,\"assistLectureId\":\"\",\"assistLectureName\":\"\",\"assistLectureImage\":null,\"status\":0,\"studyHours\":8875,\"studySc"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/study/summary",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{\"kngId\":\"0268b79b-c752-4b30-abc6-23bc55ff2f26\",\"studyParam\":{\"originOrgId\":\"\",\"previewType\":0},\"targetCode\":\"kng\",\"targetId\":\"\",\"targetParam\":{\"taskId\":\"\",\"projectId\":\"\",\"flipId\":\"\",\"batchId\":\"\"},\"customFunctionCode\":\"\"}",
+      "body_preview": "{\"finishNum\":0,\"totalNum\":1,\"bizAtt\":{\"acqHours\":0,\"accHours\":0,\"acqScores\":0,\"studyScores\":1.00,\"studyHours\":10084}}"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/mark/byKng/0268b79b-c752-4b30-abc6-23bc55ff2f26",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "[]"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/core/user/nav/self?type=2",
+      "method": "GET",
+      "status": 200,
+      "post_data": null,
+      "body_preview": "{\"datas\":[{\"id\":\"2095527580435710073\",\"navId\":\"2095527578992869559\",\"fromId\":\"46274918-0a36-45ef-95d4-f735080f6ea1\",\"parentId\":\"2095527580435709953\",\"functionCode\":\"te_myteach\",\"code\":\"te_myteach\",\"name\":\"我的授课\",\"pageUrl\":\"/te/#/teachmgmt\",\"pageType\":1,\"catalogId\":null,\"openMode\":0,\"keywords\":\"\",\"showed\":1,\"navIcon\":\"\",\"appType\":0,\"navSelecticon\":\"\",\"navNotSelected\":\"\",\"pointActions\":null,\"associationType\":0,\"appId\":\"0\",\"orderIndex\":1,\"type\":5,\"permissionGroupIds\":null,\"userDataPermissions\":null,\"isAllOrgPermission\":0,\"langKey\":\"keys.org.core.nav.name.1437374198388475906\",\"expired\":null,\"updateTime\":null,\"showedType\":0,\"navCustomType\":null,\"navCategory\":null,\"defaultPage\":0,\"mobileSelf\":null},{\"id\":\"2095527580435710140\",\"navId\":\"2095527578992869501\",\"fromId\":\"2da4b147-cbfd-40cc-948f-8ccb477"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/study/exercise/list",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{\"kngId\":\"0268b79b-c752-4b30-abc6-23bc55ff2f26\",\"courseId\":\"\",\"studyParam\":{\"originOrgId\":\"\",\"previewType\":0},\"targetCode\":\"kng\",\"targetId\":\"\",\"targetParam\":{\"taskId\":\"\",\"projectId\":\"\",\"flipId\":\"\",\"batchId\":\"\"},\"customFunctionCode\":\"\"}",
+      "body_preview": "[]"
+    },
+    {
+      "phase": "?",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/study/otherInfo",
+      "method": "POST",
+      "status": 200,
+      "post_data": "{\"kngId\":\"0268b79b-c752-4b30-abc6-23bc55ff2f26\"}",
+      "body_preview": "{\"answerFlag\":0}"
+    }
+  ]
+}
