@@ -26,7 +26,7 @@ from typing import Any, Callable
 
 from vla.config import VLAConfig
 from vla.log.transcription_log import TranscriptionLog
-from vla.models import VideoTask
+from vla.models import Asset, ProcessResult, VideoTask
 
 
 logger = logging.getLogger(__name__)
@@ -63,50 +63,20 @@ class RealTextProvider:
         self.plugin_status = plugin_status
         self._save_dir = Path(save_dir) if save_dir else Path("./tmp")
 
-    async def __call__(self, task: VideoTask) -> tuple[str, str, Path | None]:
-        """返回 (text, source, audio_path_or_None)。
+    async def fetch_asset(self, task: VideoTask) -> Asset | None:
+        """输入链(本 task 仅占位,Task 7 实装)。"""
+        raise NotImplementedError("Task 7 实装 fetch_asset")
 
-        audio_path 在走 Whisper 兜底时返回,质量通过后由主调度清理;
-        走官方/插件字幕时返回 None(没有 audio 需要清理)。
-        """
-        url = str(task.url)
-        duration_sec = task.expected_duration
+    async def process_asset(self, asset: Asset, task: VideoTask) -> ProcessResult | None:
+        """处理链(本 task 仅占位,Task 8 实装)。"""
+        raise NotImplementedError("Task 8 实装 process_asset")
 
-        # 1. 字幕三级策略(含 FR-2.5/2.6 popup 流程)
-        try:
-            result = await self.strategy.get_subtitle(url, duration_sec)
-        except Exception as e:
-            logger.warning("策略调用异常,降级到 source_factory: %s", e)
-            result = None
-
-        if result is not None:
-            # 字幕命中 → 不需要 video/audio 路径
-            logger.info(
-                "✓ %s 字幕来源: %s", task.title, result.source,
-            )
-            return (result.text, result.source, None)
-
-        # 2. 全失败 → source_factory.get + transcriber
-        logger.info(
-            "📼 %s:字幕三级全失败,走兜底(下载/录屏 + Whisper)",
-            task.title,
-        )
-        try:
-            source = self.source_factory.get(url, task.id, duration_sec)
-        except Exception as e:
-            raise RuntimeError(f"source_factory.get failed: {e}") from e
-
-        video_path = source.path
-        # 3. 转写(FR-3.3 内部删视频源)
-        try:
-            text = self.transcriber.transcribe(video_path)
-        except Exception as e:
-            # 保留 .wav(若已生成)供重试
-            audio_path = video_path.with_suffix(".wav")
-            raise RuntimeError(f"transcribe failed: {e}") from e
-
-        audio_path = video_path.with_suffix(".wav")
-        return (text, "whisper", audio_path)
+    async def __call__(self, task: VideoTask) -> tuple[Asset | None, ProcessResult | None]:
+        asset = await self.fetch_asset(task)
+        if asset is None:
+            return None, None
+        result = await self.process_asset(asset, task)
+        return asset, result
 
 
 def build_text_provider(
