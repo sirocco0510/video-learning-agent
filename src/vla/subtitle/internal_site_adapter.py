@@ -53,13 +53,17 @@ class InternalSiteAdapter(PlatformAdapter):
     def __init__(
         self,
         *,
-        audio_factory: "AudioSourceFactory",
-        tab_recorder: "TabAudioRecorder",
-        transcriber: "AudioTranscriber",
+        audio_factory: "AudioSourceFactory | None" = None,
+        tab_recorder: "TabAudioRecorder | None" = None,
+        transcriber: "AudioTranscriber | None" = None,
         screenshot_controller: "ScreenshotPhaseController | None" = None,
         spider: "InternalSiteSpider | None" = None,  # Phase 9.6:bill-jc 用
     ) -> None:
-        # F2-7:存为 private attributes,与 BilibiliAdapter 风格一致
+        # Round 3 修复:所有 deps 默认 None — 让 `register(InternalSiteAdapter)`
+        # 类注册 fallback 在 internal_spider=None 时仍能实例化,避免生产 CLI
+        # 走 bill-jc URL 时 fetch_asset 的兜底 except 把 TypeError 静默吃掉。
+        # 真实 fetch_via_spider 不依赖这些 deps(只调 spider.fetch_m3u8),
+        # _audio_factory / _tab_recorder / _transcriber 仅 F2-7 历史签名保留。
         self._audio_factory = audio_factory
         self._tab_recorder = tab_recorder
         self._transcriber = transcriber

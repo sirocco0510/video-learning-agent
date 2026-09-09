@@ -154,3 +154,36 @@ class TestPhase96SpiderHook:
         """spider 缺省 = None(_stub_deps 不传也不报错,向后兼容)。"""
         adapter = InternalSiteAdapter(**_stub_deps())
         assert adapter._spider is None  # type: ignore[attr-defined]
+
+    def test_constructor_accepts_no_args(self):
+        """Round 3 修复:`InternalSiteAdapter()` 不报 TypeError,支持
+        PlatformAdapterRegistry 的 `register(cls)` 无参实例化 fallback。
+
+        历史背景:F2-7 引入 4 个 REQUIRED deps(audio_factory / tab_recorder /
+        transcriber / screenshot_controller),Registry 的 `get_for_url` 走
+        `cls()` 无参构造时会抛 TypeError。Phase 9.6 把所有 deps 改成 None-default
+        后,class-registration 在 internal_spider=None 的生产路径不再炸。
+        """
+        adapter = InternalSiteAdapter()
+        assert adapter._audio_factory is None  # type: ignore[attr-defined]
+        assert adapter._tab_recorder is None  # type: ignore[attr-defined]
+        assert adapter._transcriber is None  # type: ignore[attr-defined]
+        assert adapter._screenshot_controller is None  # type: ignore[attr-defined]
+        assert adapter._spider is None  # type: ignore[attr-defined]
+        # match 仍能用;fetch_via_spider 因 _spider=None → None(预期)。
+        assert InternalSiteAdapter.match("https://b-learning.bill-jc.com/learn/x") is True
+        assert adapter.fetch_via_spider("https://b-learning.bill-jc.com/learn/x") is None
+
+    def test_registry_class_register_no_args_does_not_typeerror(self):
+        """`PlatformAdapterRegistry.register(InternalSiteAdapter)` + get_for_url
+        走 `cls()` 无参实例化必须不抛 TypeError(否则 fetch_asset 静默降级)。
+        """
+        from vla.subtitle.platform_adapter import PlatformAdapterRegistry
+
+        reg = PlatformAdapterRegistry()
+        reg.register(InternalSiteAdapter)  # class-register
+        # 无 internal_site spider 注入的生产路径;get_for_url 调 InternalSiteAdapter()
+        adapter = reg.get_for_url("https://b-learning.bill-jc.com/learn/kng-1")
+        assert isinstance(adapter, InternalSiteAdapter)
+        # fetch_via_spider 在 _spider=None 时返 None(不抛)
+        assert adapter.fetch_via_spider("https://b-learning.bill-jc.com/learn/kng-1") is None
