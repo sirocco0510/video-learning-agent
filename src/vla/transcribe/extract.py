@@ -47,3 +47,40 @@ def extract_audio(input_path: Path, output_path: Path) -> None:
             except OSError:
                 logger.warning("清理半截 wav 失败 %s,继续", output_path)
         raise
+
+
+def extract_m3u8_audio(m3u8_url: str, output_path: Path) -> None:
+    """ffmpeg 流式抽 m3u8 音轨 → wav, 不缓存视频。
+
+    与 extract_audio 的差异: -vn 跳过视频轨, m3u8 直接走 HLS 流式输入。
+    适合 InternalSiteSpider 路径 ②: 3h 视频 ~150MB wav vs 1.5GB mp4。
+
+    Args:
+        m3u8_url: HLS manifest URL(可达, 含签名 token)
+        output_path: 目标 wav 路径(需 .wav 后缀)
+
+    Raises:
+        RuntimeError: ffmpeg 返回非 0(网络/格式错)
+        FileNotFoundError: ffmpeg 二进制缺失
+
+    失败语义: 半截 wav 在 except 里被删, 避免磁盘残留。
+    """
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-vn",  # 跳过视频轨(磁盘友好: 不缓存 mp4)
+        "-i", m3u8_url,
+        "-ac", "1", "-ar", "16000", "-f", "wav", str(output_path),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"extract_m3u8_audio failed: {m3u8_url} → {output_path}: {proc.stderr[:500]}"
+            )
+    except Exception:
+        if output_path.exists():
+            try:
+                output_path.unlink()
+            except OSError:
+                logger.warning("清理半截 wav 失败 %s, 继续", output_path)
+        raise

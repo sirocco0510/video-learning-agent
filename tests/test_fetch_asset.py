@@ -57,9 +57,9 @@ async def test_fetch_asset_internal_spider_m3u8_to_wav(tmp_path):
     ))
     fake_wav = tmp_path / "save" / "audio_raw" / "BV1xx.wav"
     fake_wav.parent.mkdir(parents=True, exist_ok=True)
-    with patch("vla.main_provider.extract_audio") as mex:
-        # 模拟 extract_audio 写出 wav
-        def fake_extract(src, dst):
+    with patch("vla.main_provider.extract_m3u8_audio") as mex:
+        # 模拟 extract_m3u8_audio 写出 wav
+        def fake_extract(url, dst):
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(b"\x00")
         mex.side_effect = fake_extract
@@ -142,3 +142,42 @@ async def test_fetch_asset_scan_not_called_when_strategy_text_hits():
     with patch("vla.subtitle.audio_scan.scan_untranscribed_audio") as mscan:
         await p.fetch_asset(_task())
     assert not mscan.called
+
+
+@pytest.mark.asyncio
+async def test_fetch_asset_internal_spider_uses_extract_m3u8_audio(tmp_path):
+    """fetch_asset path ② 调 extract_m3u8_audio(不是 extract_audio)。"""
+    p = RealTextProvider.__new__(RealTextProvider)
+    p.cfg = MagicMock()
+    p.strategy = MagicMock()
+    p.transcriber = MagicMock()
+    p.source_factory = MagicMock()
+    p.notifier = MagicMock()
+    p.plugin_status = MagicMock()
+    p._save_dir = tmp_path
+    p.log = MagicMock()
+    p.checker = MagicMock()
+    p.refiner = None
+    p._today_dir = tmp_path  # T14 requirement
+
+    # strategy 返 SubtitleResult(source="internal_spider", metadata={"video_url": "https://x.m3u8"})
+    p.strategy.get_subtitle = AsyncMock(return_value=SubtitleResult(
+        text=None, source="internal_spider", metadata={"video_url": "https://x.m3u8"},
+    ))
+    # source_factory 不调(已走 path ②)
+    p.source_factory.get = MagicMock(return_value=None)
+
+    fake_wav = tmp_path / "audio_raw" / "test.wav"
+    with patch("vla.main_provider.extract_m3u8_audio") as fake_extract, \
+         patch("vla.main_provider.extract_audio") as legacy_extract:
+        fake_extract.side_effect = lambda url, p: fake_wav.write_bytes(b"RIFF")
+        task = VideoTask(id="test", title="t", url="https://b-learning.bill-jc.com/x", expected_duration=3600)
+        asset = await p.fetch_asset(task)
+
+    fake_extract.assert_called_once()
+    assert "https://x.m3u8" in fake_extract.call_args[0][0]
+    legacy_extract.assert_not_called()  # 验证走的是 m3u8 路径, 不是 legacy
+    assert asset is not None
+    assert asset.source == "whisper_internal_download"
+    assert asset.audio_path == fake_wav
+    assert asset.deletable is True

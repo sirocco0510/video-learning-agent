@@ -30,7 +30,7 @@ from vla.config import VLAConfig
 from vla.log.transcription_log import TranscriptionLog
 from vla.models import Asset, ProcessResult, VideoTask
 from vla.subtitle import audio_scan
-from vla.transcribe.extract import extract_audio
+from vla.transcribe.extract import extract_audio, extract_m3u8_audio
 
 
 logger = logging.getLogger(__name__)
@@ -121,7 +121,7 @@ class RealTextProvider:
             wav_path = self._save_dir / "audio_raw" / f"{task.id}.wav"
             wav_path.parent.mkdir(parents=True, exist_ok=True)
             try:
-                extract_audio(Path(video_url), wav_path)
+                extract_m3u8_audio(video_url, wav_path)
             except Exception as e:
                 logger.warning("internal spider m3u8 抽音失败 %s: %s", video_url, e)
                 return None

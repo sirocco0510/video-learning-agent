@@ -4,7 +4,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from vla.transcribe.extract import extract_audio
+from vla.transcribe.extract import extract_audio, extract_m3u8_audio
 
 
 def test_extract_audio_success(tmp_path):
@@ -65,3 +65,43 @@ def test_extract_audio_overwrites_existing_output(tmp_path):
     # 验证用了 -y(覆盖)
     args = mrun.call_args[0][0]
     assert "-y" in args
+
+
+def test_extract_m3u8_audio_success(tmp_path, monkeypatch):
+    """extract_m3u8_audio 调 ffmpeg with -vn -ac 1 -ar 16000 -f wav。"""
+    out = tmp_path / "audio.wav"
+    fake_proc = MagicMock(returncode=0, stderr="")
+    captured_cmd: list = []
+
+    def fake_run(cmd, **kwargs):
+        captured_cmd.extend(cmd)
+        out.write_bytes(b"RIFF")
+        return fake_proc
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    extract_m3u8_audio("https://video.bill-jc.com/foo.m3u8", out)
+    # 验证 -vn 在 args 里, audio flags 对, wav 落盘
+    assert "-vn" in captured_cmd
+    assert "-ac" in captured_cmd and "1" in captured_cmd
+    assert "-ar" in captured_cmd and "16000" in captured_cmd
+    assert "-f" in captured_cmd and "wav" in captured_cmd
+    assert "https://video.bill-jc.com/foo.m3u8" in captured_cmd
+    assert str(out) in captured_cmd
+
+
+def test_extract_m3u8_audio_fails_on_ffmpeg_nonzero(tmp_path, monkeypatch):
+    """ffmpeg 返回非 0 → RuntimeError, 半截 wav 清掉。"""
+    out = tmp_path / "audio.wav"
+    out.write_bytes(b"RIFF")
+    fake_proc = MagicMock(returncode=1, stderr="Connection refused")
+
+    def fake_run(cmd, **kwargs):
+        return fake_proc
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="extract_m3u8_audio failed"):
+        extract_m3u8_audio("https://x.com/bad.m3u8", out)
+    # 半截 wav 应被清掉
+    assert not out.exists()
