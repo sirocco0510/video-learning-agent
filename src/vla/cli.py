@@ -234,13 +234,12 @@ def _assemble_components(cfg_path: Path) -> dict:
     """从 config 装配所有依赖(用于 CLI 各命令)。
 
     ⚠️ Phase 8 CLI 是结构性占位 — 完整 Phase 3 字幕策略 + Phase 2 视频源工厂
-    集成在 Phase 9 E2E 阶段落地。这里 text_provider 用 stub,process/batch
-    命令跑起来后只走框架,真实字幕取需要外部组装(text_provider 注入)。
+    集成在 Phase 9 E2E 阶段落地。这里 fetch_asset/process_asset 用 stub,
+    process/batch 命令跑起来后只走框架,真实字幕取需要外部组装(注入)。
     """
     from vla.config import VLAConfig
     from vla.llm.client import LLMClient
     from vla.log.transcription_log import TranscriptionLog
-    from vla.quality.checker import QualityChecker
     from vla.state.history import HistoryManager
     from vla.state.plugin_status import PluginStatus
     from vla.state.quota import QuotaManager
@@ -257,8 +256,6 @@ def _assemble_components(cfg_path: Path) -> dict:
         cfg.summary.notes_file,
     )
     summarizer.cfg = cfg
-    checker = QualityChecker(cfg)
-    checker.set_llm(LLMClient(cfg.llm_client, model=cfg.llm.quality_model))
     notifier = MacOSNotifier()
     plugin_status = PluginStatus()
 
@@ -270,31 +267,41 @@ def _assemble_components(cfg_path: Path) -> dict:
         "summarizer": summarizer,
         "notifier": notifier,
         "plugin_status": plugin_status,
-        "checker": checker,
     }
 
 
-def _stub_text_provider(task):
-    """CLI 占位 text_provider — 在 process/batch 没注入真实 provider 时使用。
+def _stub_fetch_asset(task) -> None:
+    """CLI 占位 fetch_asset — 在 process/batch 没注入真实 provider 时使用。
 
     真实集成在 main_provider.build_text_provider;通过 --real-provider 标志启用。
     """
     raise NotImplementedError(
-        f"text_provider 是 stub:{task.title}。"
+        f"fetch_asset 是 stub:{task.title}。"
         f"完整 Phase 3 字幕策略 + Phase 2 视频源工厂集成在 main_provider.build_text_provider;"
         f"用 --real-provider 标志启用。"
     )
 
 
-def _build_real_text_provider(
+def _stub_process_asset(asset, task) -> None:
+    """CLI 占位 process_asset — 同 _stub_fetch_asset。"""
+    raise NotImplementedError(
+        f"process_asset 是 stub:{task.title}。"
+        f"用 --real-provider 标志启用完整链路。"
+    )
+
+
+def _build_real_provider(
     cfg: VLAConfig, *, notifier: Any, plugin_status: Any,
-) -> Callable:
-    """装配真实 text_provider(Phase 9 完整集成)。
+) -> tuple[Callable, Callable]:
+    """装配真实 fetch_asset + process_asset(Phase 9 完整集成)。
 
     Args:
         cfg: VLAConfig
         notifier: MacOSNotifier(必需 — FR-2.5/2.6 弹窗)
         plugin_status: PluginStatus(必需 — session 单例)
+
+    Returns:
+        (fetch_asset, process_asset) — Task 9 二元组接口
     """
     from vla.main_provider import build_text_provider
     return build_text_provider(
@@ -341,24 +348,24 @@ def process(
         group_title=group,
     )
 
-    provider = (
-        _build_real_text_provider(
+    fetch_asset, process_asset = (
+        _build_real_provider(
             comps["cfg"],
             notifier=comps["notifier"],
             plugin_status=comps["plugin_status"],
         )
-        if real_provider else _stub_text_provider
+        if real_provider else (_stub_fetch_asset, _stub_process_asset)
     )
 
     agent = VideoLearningAgent(
         cfg=comps["cfg"],
-        checker=comps["checker"],
         log=comps["log"],
         history=comps["history"],
         quota=comps["quota"],
         summarizer=comps["summarizer"],
         notifier=comps["notifier"],
-        text_provider=provider,
+        fetch_asset=fetch_asset,
+        process_asset=process_asset,
         plugin_status=comps["plugin_status"],
     )
 
@@ -408,24 +415,24 @@ def batch(
 
     tasks = [VideoTask(**item) for item in data["tasks"]]
 
-    provider = (
-        _build_real_text_provider(
+    fetch_asset, process_asset = (
+        _build_real_provider(
             comps["cfg"],
             notifier=comps["notifier"],
             plugin_status=comps["plugin_status"],
         )
-        if real_provider else _stub_text_provider
+        if real_provider else (_stub_fetch_asset, _stub_process_asset)
     )
 
     agent = VideoLearningAgent(
         cfg=comps["cfg"],
-        checker=comps["checker"],
         log=comps["log"],
         history=comps["history"],
         quota=comps["quota"],
         summarizer=comps["summarizer"],
         notifier=comps["notifier"],
-        text_provider=provider,
+        fetch_asset=fetch_asset,
+        process_asset=process_asset,
         plugin_status=comps["plugin_status"],
     )
 

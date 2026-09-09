@@ -4,33 +4,10 @@ from unittest.mock import MagicMock
 from vla.main_provider import RealTextProvider
 
 
-@pytest.mark.asyncio
-async def test_fetch_asset_placeholder():
-    p = RealTextProvider.__new__(RealTextProvider)  # 跳过 __init__ 依赖
-    # 手动塞依赖(stub)
-    p.strategy = None
-    p.transcriber = None
-    p.source_factory = None
-    p.checker = None
-    p.refiner = None
-    p.log = None
-    p.plugin_status = None
-    p._save_dir = None
-    p._today_dir = None
-    from vla.models import VideoTask
-    task = VideoTask(id="t", title="t", url="https://x", expected_duration=60)
-    with pytest.raises(NotImplementedError):
-        await p.fetch_asset(task)
-
-
-@pytest.mark.asyncio
-async def test_process_asset_placeholder():
-    p = RealTextProvider.__new__(RealTextProvider)
-    from vla.models import Asset, VideoTask
-    asset = Asset(text=None, source="whisper_download", audio_path=None)
-    task = VideoTask(id="t", title="t", url="https://x", expected_duration=60)
-    with pytest.raises(NotImplementedError):
-        await p.process_asset(asset, task)
+# 注(2026-09-09 Task 10):T6 placeholder tests test_fetch_asset_placeholder +
+# test_process_asset_placeholder 已删除 — T7 / T8 把 NotImplementedError 替成真实实装,
+# 这两个 placeholder 测试 obsolete。coverage 走 tests/test_fetch_asset.py +
+# tests/test_process_asset.py。
 
 
 @pytest.mark.asyncio
