@@ -27,6 +27,8 @@ from typing import Any, Callable
 from vla.config import VLAConfig
 from vla.log.transcription_log import TranscriptionLog
 from vla.models import Asset, ProcessResult, VideoTask
+from vla.subtitle import audio_scan
+from vla.transcribe.extract import extract_audio
 
 
 logger = logging.getLogger(__name__)
@@ -64,8 +66,78 @@ class RealTextProvider:
         self._save_dir = Path(save_dir) if save_dir else Path("./tmp")
 
     async def fetch_asset(self, task: VideoTask) -> Asset | None:
-        """输入链(本 task 仅占位,Task 7 实装)。"""
-        raise NotImplementedError("Task 7 实装 fetch_asset")
+        """输入链(Task 7 实装):4 路径回落,产出 Asset 或 None。
+
+        顺序:
+          ① 字幕三级策略命中 text → Asset(text=..., source, None, False)
+          ② internal_spider(m3u8) → extract → Asset(whisper_internal_download, wav, True)
+          ③ VideoSourceFactory(MP4) → extract → unlink → Asset(whisper_download, wav, True)
+          ④ scan_today_dir(webm, last) → extract → Asset(whisper_scan, wav, True)
+        """
+        url = str(task.url)
+        duration_sec = task.expected_duration
+
+        # 1. 字幕策略
+        try:
+            result = await self.strategy.get_subtitle(url, duration_sec)
+        except Exception as e:
+            logger.warning("策略调用异常,降级到 internal_spider: %s", e)
+            result = None
+
+        if result is not None and result.text is not None:
+            return Asset(text=result.text, source=result.source, audio_path=None, deletable=False)
+
+        # 2. internal_spider
+        if result is not None and (result.source or "").startswith("internal"):
+            video_url = (result.metadata or {}).get("video_url")
+            if not video_url:
+                logger.warning("internal spider 返回无 video_url,跳过: %s", result)
+                return None
+            wav_path = self._save_dir / "audio_raw" / f"{task.id}.wav"
+            try:
+                extract_audio(Path(video_url), wav_path)
+            except Exception as e:
+                logger.warning("internal spider m3u8 抽音失败 %s: %s", video_url, e)
+                return None
+            return Asset(text=None, source="whisper_internal_download", audio_path=wav_path, deletable=True)
+
+        # 3. VideoSourceFactory
+        try:
+            source = self.source_factory.get(url, task.id, duration_sec)
+        except Exception as e:
+            logger.warning("source_factory.get 失败: %s", e)
+            source = None
+
+        if source is not None:
+            video_path = source.path
+            wav_path = video_path.with_suffix(".wav")
+            try:
+                extract_audio(video_path, wav_path)
+            except Exception as e:
+                logger.warning("MP4 抽音失败 %s: %s", video_path, e)
+            else:
+                try:
+                    video_path.unlink()
+                except Exception as e:
+                    logger.warning("unlink MP4 失败 %s: %s", video_path, e)
+                return Asset(text=None, source="whisper_download", audio_path=wav_path, deletable=True)
+
+        # 4. scan_today_dir (last)
+        try:
+            webm_path = audio_scan.scan_untranscribed_audio(self._today_dir)
+        except Exception as e:
+            logger.warning("scan_today_dir 失败: %s", e)
+            return None
+
+        if webm_path is None:
+            return None
+        wav_path = webm_path.with_suffix(".wav")
+        try:
+            extract_audio(webm_path, wav_path)
+        except Exception as e:
+            logger.warning("scan webm 抽音失败 %s: %s", webm_path, e)
+            return None
+        return Asset(text=None, source="whisper_scan", audio_path=wav_path, deletable=True)
 
     async def process_asset(self, asset: Asset, task: VideoTask) -> ProcessResult | None:
         """处理链(本 task 仅占位,Task 8 实装)。"""
