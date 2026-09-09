@@ -85,8 +85,8 @@
 
 ```new InternalSiteSpider
         │ __init__(cdp_url, college_id, resolution, cookie_ttl_sec=1800)
+        │ list_tasks(root_label=None, limit=10)  ← 实装(tree + pagelist)
         │ fetch_m3u8(kng_id) -> str  ← 实装(preinit + kngPlay + cookie 借取)
-        │ list_tasks()                  ← stub(NotImplementedError, 走 backlog §1)
         ▼
 fetch_asset path ②(改动)
         │ 拿到 result.metadata["video_url"]  ← m3u8 URL
@@ -135,9 +135,23 @@ class InternalSiteSpider:
         # 3. POST /kng/study/kngPlay(kng_id, ..., resolution 选 playDetails[i].desc == resolution)
         # 4. 返回 playDetails[i].url
 
-    async def list_tasks(self) -> list:
-        """stub,走 backlog §1。"""
-        raise NotImplementedError("list_tasks 实装走 backlog §1")
+    async def list_tasks(
+        self,
+        *,
+        root_label: str | None = None,
+        limit: int = 10,
+    ) -> list[VideoTask]:
+        """爬目录树 + 视频列表 → VideoTask list。
+
+        流程:
+        1. 借 cookie(_borrow_cookies)
+        2. POST /kng/kngCatalog/student/tree → 拿 catalog 树
+        3. 递归找 root_label 子树(或全树)
+        4. 对每个 kngCount > 0 的叶子 catalog:
+           POST /kng/knowledge/pagelist(catalogId=<leaf_id>) → 拿视频列表
+        5. 累积到 limit 条 → 转 VideoTask(id=kng_id, title=..., url=...)
+        6. 返回 list[VideoTask]
+        """
 ```
 
 ### 3.2 ` `extract_m3u8_audio` ` 新接口
@@ -214,7 +228,22 @@ if result is not None and (result.source or "").startswith("internal"):
 2. 过滤:仅保留 yunxuetang.cn / bill-jc.com 域的 cookies
 3. 返回 Playwright cookies dict list
 
-**` `list_tasks(self) -> list[VideoTask]` `** stub, raise NotImplementedError("走 backlog §1")
+**` `list_tasks(self, *, root_label=None, limit=10) -> list[VideoTask]` `** 全实装:
+1. cookies = await ` `_borrow_cookies(self.cdp_url)` `
+2. headers = ` `{"Origin": "https://b-learning.bill-jc.com", "Referer": "https://b-learning.bill-jc.com/", ...cookies}` `
+3. async with httpx.AsyncClient(timeout=30) as client:
+    - tree_resp = await client.post("https://api-phx-ali.yunxuetang.cn/kng/kngCatalog/student/tree", json={"pmType": "0", "collegeId": self.college_id}, headers=headers)
+    - tree = tree_resp.json()(nested catalog 数组,每项 `{id, parentId, label, kngCount, children, ...}`)
+    - leaves = ` `_flatten_leaves(tree, root_label=root_label)` `(内部 helper,返回 ` `kngCount > 0` ` 的叶子)
+    - 对每个 leaf: pagelist_resp = await client.post("https://api-phx-ali.yunxuetang.cn/kng/knowledge/pagelist?limit=16&offset=0&orderType=desc&orderBy=createTime", json={"collegeId": self.college_id, "catalogId": leaf["id"], "title": "", "type": "", "allTag": 1, "tagIds": []}, headers=headers)
+    - datas = pagelist_resp.json()["datas"]
+    - 每条 `{id: kngId, title, coverUrl, ...}` ` → VideoTask(id=kngId, title=title, url=f"https://b-learning.bill-jc.com/learn/{kngId}", expected_duration=3600)
+    - 累积到 limit 条 break
+4. 返回 list[VideoTask]
+
+**` `_flatten_leaves(tree, root_label)` `** private helper:递归遍历树,过滤 ` `kngCount > 0` ` 节点,若 root_label 非空只返回 label 匹配子树内的叶子。**冲突裁决:root_label 多子树同名 → 取 DFS 第一个匹配子树**(确定性);若无匹配 → raise ValueError("root_label not found: ..."),让用户重选而非悄悄返空。
+
+**` `_borrow_cookies(self, cdp_url)` `** private helper:Playwright ` `connect_over_cdp` ` + ` `context.cookies()` `,过滤 yunxuetang.cn / bill-jc.com 域 cookie。
 
 ### 4.2 ` `src/vla/transcribe/extract.py` ` (新增 ~ 30 行)
 
@@ -224,14 +253,17 @@ if result is not None and (result.source or "").startswith("internal"):
 
 fetch_asset path ② 改调 ` `extract_m3u8_audio(video_url, wav_path)` `(同 §3.3)。
 
-### 4.4 ` `scripts/spike_bill_jc_full.py` ` (新 ~ 200 行)
+### 4.4 ` `scripts/spike_bill_jc_full.py` ` (新 ~ 250 行)
 
-CLI typer app,端到端跑通:
+CLI typer app,端到端跑通,**3 种模式**:
 
 ```python
 @app.command()
 def run(
-    kng_id: str = typer.Option(..., "--kng-id"),
+    kng_id: str | None = typer.Option(None, "--kng-id", help="单视频模式: 直接跑这个 kng_id"),
+    list_only: bool = typer.Option(False, "--list-only", help="只跑 list_tasks 打印 catalog + 视频列表,不爬音频"),
+    root_label: str | None = typer.Option(None, "--root-label", help="list 模式: 限定根目录(如 '技术分享')"),
+    limit: int = typer.Option(10, "--limit", help="list 模式: 最多返回几条"),
     college_id: str = typer.Option(..., "--college-id"),
     cdp_url: str = typer.Option("http://localhost:9222", "--cdp-url"),
     resolution: str = typer.Option("720p", "--resolution"),
@@ -241,23 +273,52 @@ def run(
     cfg = load_config(config_path)
     spider = InternalSiteSpider(cdp_url=cdp_url, college_id=college_id, resolution=resolution)
     fetch_asset, process_asset = build_text_provider(cfg)
-    task = VideoTask(id=kng_id, title=f"bill-jc-{kng_id}", url=f"https://b-learning.bill-jc.com/learn/{kng_id}", expected_duration=3600)
+
+    if list_only:
+        # 模式 1: 只爬目录树 + 视频列表,打印出来
+        tasks = asyncio.run(spider.list_tasks(root_label=root_label, limit=limit))
+        for t in tasks:
+            print(f"[LIST] {t.id} | {t.title} | {t.url}")
+        return
+
+    if kng_id is None:
+        print("--kng-id 或 --list-only 至少一个")
+        raise typer.Exit(1)
+
+    # 模式 2: 完整端到端跑单视频
+    task = VideoTask(
+        id=kng_id, title=f"bill-jc-{kng_id}",
+        url=f"https://b-learning.bill-jc.com/learn/{kng_id}",
+        expected_duration=3600,
+    )
     asset = asyncio.run(fetch_asset(task))
-    if asset is None: print("[FAIL] fetch_asset 返回 None"); raise typer.Exit(1)
+    if asset is None:
+        print("[FAIL] fetch_asset 返回 None"); raise typer.Exit(1)
     print(f"[OK] Asset: source={asset.source} wav={asset.audio_path} size={asset.audio_path.stat().st_size / 1e6:.1f}MB")
     result = asyncio.run(process_asset(asset, task))
-    if result is None: print("[FAIL] process_asset 返回 None"); raise typer.Exit(1)
+    if result is None:
+        print("[FAIL] process_asset 返回 None"); raise typer.Exit(1)
     print(f"[OK] Quality: score={result.qr.score} passed={result.qr.passed}")
     print(f"[OK] Duration: {result.duration_sec}s")
 ```
 
-### 4.5 ` `tests/test_internal_site_spider.py` ` (改 ~ 80 行)
+**3 种典型用法:**
+1. ` `uv run python scripts/spike_bill_jc_full.py --college-id <cid> --list-only --root-label "技术分享" --limit 5` ` → 列出 5 条视频供挑选
+2. ` `uv run python scripts/spike_bill_jc_full.py --college-id <cid> --kng-id <id>` ` → 端到端跑单视频(用户主路径)
+3. ` `uv run python scripts/spike_bill_jc_full.py --college-id <cid> --kng-id <id> --resolution 360p` ` → 走 360p 档带宽优先
 
-4 个 placeholder 测试改写:
+### 4.5 ` `tests/test_internal_site_spider.py` ` (改 ~ 120 行)
+
+7 个 placeholder 测试改写 + 5 个新测试:
 - ` `test_fetch_m3u8_calls_preinit_then_kngplay` `(mock httpx 两次 POST)
 - ` `test_fetch_m3u8_selects_requested_resolution` `(mock kngPlay 返回 3 档,assert 选 720p)
 - ` `test_fetch_m3u8_falls_back_to_first_if_resolution_missing` `(720p 不存在时 fallback)
 - ` `test_fetch_m3u8_raises_runtimeerror_on_401_with_cookie_hint` `(mock 401,assert RuntimeError 包含 "Chrome debug")
+- **` `test_list_tasks_walks_tree_then_paginates` `(mock tree 返回 nested 树 + 2 个 leaf, pagelist mock 返回 videos; assert 调 pagelist 的 catalogId 对得上)**
+- **` `test_list_tasks_filters_by_root_label` `(mock tree 含多个子树,root_label="技术分享" 只走该子树)**
+- **` `test_list_tasks_respects_limit` `(mock pagelist 返回 5 条,limit=3,assert VideoTask 数量 = 3)**
+- **` `test_list_tasks_skips_empty_leaves` `(mock tree 含 kngCount=0 节点,assert 不调 pagelist)**
+- **` `test_list_tasks_returns_video_task_with_bill_jc_url` `(assert VideoTask.url 格式 = https://b-learning.bill-jc.com/learn/<kng_id>)**
 - ` `test_extract_m3u8_audio_success` `(subprocess mock / 真 ffmpeg fixture)
 - ` `test_extract_m3u8_audio_fails_on_ffmpeg_nonzero` `(assert RuntimeError)
 - ` `test_fetch_asset_internal_spider_uses_extract_m3u8_audio` `(集成测试:mock strategy 返回 SubtitleResult, mock extract_m3u8_audio, assert called with m3u8 url)
@@ -275,7 +336,8 @@ def run(
 ### 5.2 验收(spec §5.2 扩展 Phase 9.6)
 
 1. **单元测试**:` `uv run pytest tests/test_internal_site_spider.py tests/test_extract_audio.py tests/test_fetch_asset.py -v` ` 全绿
-2. **spike 跑通**(用户手动启 Chrome debug + 填真实 kng_id):
+2. **spike list 模式**:` `uv run python scripts/spike_bill_jc_full.py --college-id <cid> --list-only --root-label "技术分享" --limit 5` ` → 打印 ≥ 1 条 kng_id + title
+4. **spike 端到端**(用户手动启 Chrome debug + 填真实 kng_id):
    ```
    uv run python scripts/spike_bill_jc_full.py --kng-id "<real_kng_id>" --college-id "<cid>" --verbose
    ```
@@ -284,8 +346,8 @@ def run(
    - `[OK] Quality: score=NN passed=True|False`
    - wav 文件存在,文件大小符合预期(720p / 3h 视频 → ~150MB wav,720p / 1h → ~50MB wav)
    - 字幕 *.cleaned.txt 落盘 ` `cfg.storage.transcribed_dir` `
-3. **磁盘检查**:` `df -h /tmp` ` spike 完成后 tmp_dir 不应有遗留 mp4 文件(只有 wav + sidecar)
-4. **Cookie 过期 fail-fast**:手动 ` `killall Chrome` ` 后再跑 spike,应看到清晰 hint "Chrome debug 未启动 / cookie 已失效"
+5. **磁盘检查**:` `df -h /tmp` ` spike 完成后 tmp_dir 不应有遗留 mp4 文件(只有 wav + sidecar)
+6. **Cookie 过期 fail-fast**:手动 ` `killall Chrome` ` 后再跑 spike,应看到清晰 hint "Chrome debug 未启动 / cookie 已失效"
 
 ---
 
@@ -328,14 +390,15 @@ def run(
 
 ---
 
-## 9. Task 分解(预计 5 个)
+## 9. Task 分解(预计 6 个)
 
 按 SDD 执行,subagent-driven:
 
 1. **spec 落地**(已完成,本文件)
-2. **InternalSiteSpider 实装**(TDD:先 httpx mock,再 Playwright cookie helper)
-3. **extract_m3u8_audio + fetch_asset path ② 改造**(TDD)
-4. **spike 脚本**(spike_bill_jc_full.py + 装配)
-5. **end-to-end 验证 + 文档收尾**(backlog §1 done / implementation-plan.md Phase 9.6)
+2. **InternalSiteSpider.fetch_m3u8 实装**(TDD:先 httpx mock,再 Playwright cookie helper)
+3. **InternalSiteSpider.list_tasks 实装**(TDD:mock tree + pagelist,验证 _flatten_leaves + 累积到 limit)
+4. **extract_m3u8_audio + fetch_asset path ② 改造**(TDD)
+5. **spike 脚本**(spike_bill_jc_full.py 3 模式 + 装配)
+6. **end-to-end 验证 + 文档收尾**(backlog §1 done / implementation-plan.md Phase 9.6)
 
 每个 task 一个 implementer subagent + 一个 task reviewer + final whole-branch review(opus)。
