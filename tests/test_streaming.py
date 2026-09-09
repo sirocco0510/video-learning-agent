@@ -2,11 +2,12 @@
 
 设计要点:
 - AudioTranscriber Protocol duck typing(在 transcribe/streaming.py 定义)
-- ffmpeg 抽音轨 → 删视频源 → faster-whisper 转写
+- transcribe(audio_path) 只做 Whisper;ffmpeg 抽音已迁到 extract.extract_audio(2026-09-09 T2)
+- FR-3.3 删视频源已迁到 fetch_asset(2026-09-09 T7);transcribe 不再 unlink
 - WhisperModel 懒加载,允许测试注入
 - cleanup() 静态方法给质量检查通过后调用
 
-测试策略:patch subprocess.run(ffmpeg)+ 注入 mock WhisperModel。
+测试策略:注入 mock WhisperModel;不再 patch subprocess(ffmpeg 已不在此模块)。
 """
 
 from pathlib import Path
@@ -86,10 +87,10 @@ def transcriber(cfg: VLAConfig, mock_model: MagicMock) -> StreamingTranscriber:
 
 
 @pytest.fixture
-def video_file(tmp_path: Path) -> Path:
-    """假视频文件:实际上不需要真实内容,因为我们 patch 了 ffmpeg。"""
-    p = tmp_path / "test.mp4"
-    p.write_bytes(b"fake video bytes")
+def audio_file(tmp_path: Path) -> Path:
+    """假 wav 文件:transcribe() 只吃 wav(2026-09-09 T3 起)。"""
+    p = tmp_path / "test.wav"
+    p.write_bytes(b"fake wav bytes")
     return p
 
 
@@ -102,150 +103,76 @@ class TestProtocol:
         assert isinstance(transcriber, AudioTranscriber)
 
 
-# ---------------- ffmpeg 抽音轨 ----------------
+# ---------------- 契约测试(2026-09-09 T3) ----------------
 
 
-class TestExtractAudio:
-    def test_calls_ffmpeg_with_correct_args(self, transcriber, video_file, tmp_path, mock_model):
-        """ffmpeg 必须带 -ar 16000 -ac 1 -c:a pcm_s16le 抽 16kHz 单声道 PCM。"""
-        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
-            mock_run.return_value = FakeCompletedProcess(returncode=0)
-            # 模拟 ffmpeg 生成了 wav 文件
-            (video_file.with_suffix(".wav")).write_bytes(b"fake wav")
+class TestTranscribeContract:
+    """T3 新契约:transcribe() 只接 wav,且不调 ffmpeg/不删源。"""
 
-            transcriber.transcribe(video_file)
+    def test_transcribe_rejects_mp4(self, transcriber, tmp_path):
+        """传 mp4 → ValueError(期望 wav,spec §4.6 契约)。"""
+        mp4 = tmp_path / "video.mp4"
+        mp4.write_bytes(b"fake video bytes")
+        with pytest.raises(ValueError, match="wav"):
+            transcriber.transcribe(mp4)
 
-            args = mock_run.call_args.args[0]
-            assert args[0] == "ffmpeg"
-            assert "-i" in args
-            assert str(video_file) in args
-            assert "-ar" in args and "16000" in args
-            assert "-ac" in args and "1" in args
-            assert "-c:a" in args and "pcm_s16le" in args
-            assert "-y" in args  # 强制覆盖
+    def test_transcribe_rejects_webm(self, transcriber, tmp_path):
+        """传 webm → ValueError(典型 F2-10 scan_today_dir 输入,但 transcribe 不认)。"""
+        webm = tmp_path / "video.webm"
+        webm.write_bytes(b"fake video bytes")
+        with pytest.raises(ValueError, match="wav"):
+            transcriber.transcribe(webm)
 
-    def test_audio_path_has_wav_suffix(self, transcriber, video_file, mock_model, tmp_path):
-        """输出文件应该是 .wav(同名换后缀)。"""
-        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
-            mock_run.return_value = FakeCompletedProcess(returncode=0)
-            (video_file.with_suffix(".wav")).write_bytes(b"fake wav")
+    def test_transcribe_does_not_call_subprocess(self, transcriber, audio_file):
+        """transcribe 只做 Whisper,ffmpeg 抽音已迁到 extract.extract_audio(§4.6)。"""
+        with patch("subprocess.run") as mock_run:
+            transcriber.transcribe(audio_file)
+            assert not mock_run.called, "transcribe 不应调 subprocess.run(ffmpeg 已迁出)"
 
-            transcriber.transcribe(video_file)
-
-            # model.transcribe 收到的第一个位置参数是 audio_path
-            audio_arg = mock_model.transcribe.call_args.args[0]
-            assert audio_arg.endswith(".wav")
-
-    def test_ffmpeg_failure_raises_runtime_error(self, transcriber, video_file, mock_model):
-        """ffmpeg 返回非 0 → RuntimeError(带 stderr 摘要)。"""
-        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
-            mock_run.return_value = FakeCompletedProcess(
-                returncode=1, stderr="some ffmpeg error here"
-            )
-
-            with pytest.raises(RuntimeError, match="ffmpeg"):
-                transcriber.transcribe(video_file)
-
-            # 模型不应该被调用
-            mock_model.transcribe.assert_not_called()
-
-    def test_ffmpeg_no_output_file_raises(self, transcriber, video_file, mock_model):
-        """ffmpeg 退出 0 但没生成文件 → RuntimeError(防御性)。"""
-        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
-            mock_run.return_value = FakeCompletedProcess(returncode=0)
-            # 不创建 wav 文件
-
-            with pytest.raises(RuntimeError, match="音频文件"):
-                transcriber.transcribe(video_file)
-
-
-# ---------------- 边转写边清理:删视频源 ----------------
-
-
-class TestDeleteVideoSource:
-    def test_video_deleted_after_audio_extract(self, transcriber, video_file, mock_model):
-        """FR-3.3: 音频就绪后立即删视频源。"""
-        assert video_file.exists()  # 起始存在
-
-        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
-            mock_run.return_value = FakeCompletedProcess(returncode=0)
-            (video_file.with_suffix(".wav")).write_bytes(b"fake wav")
-
-            transcriber.transcribe(video_file)
-
-            assert not video_file.exists()
-
-    def test_video_delete_does_not_block_if_already_gone(self, transcriber, video_file, mock_model):
-        """极端情况: 视频已被其他进程删了(并发)→ 主流程仍继续。"""
-        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
-            mock_run.return_value = FakeCompletedProcess(returncode=0)
-            (video_file.with_suffix(".wav")).write_bytes(b"fake wav")
-            # 先删视频
-            video_file.unlink()
-
-            # 不抛错
-            text = transcriber.transcribe(video_file)
-            assert text is not None
+    def test_transcribe_does_not_unlink_source(self, transcriber, audio_file):
+        """FR-3.3 删视频源逻辑已迁到 fetch_asset(T7);transcribe 不再 unlink。"""
+        assert audio_file.exists()
+        transcriber.transcribe(audio_file)
+        assert audio_file.exists(), "transcribe 不应删 wav"
 
 
 # ---------------- faster-whisper 转写 ----------------
 
 
 class TestWhisperTranscribe:
-    def test_uses_config_language(self, transcriber, video_file, mock_model):
+    def test_uses_config_language(self, transcriber, audio_file, mock_model):
         """language 来自 config.whisper.language。"""
-        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
-            mock_run.return_value = FakeCompletedProcess(returncode=0)
-            (video_file.with_suffix(".wav")).write_bytes(b"fake wav")
+        transcriber.transcribe(audio_file)
+        kwargs = mock_model.transcribe.call_args.kwargs
+        assert kwargs["language"] == "zh"
 
-            transcriber.transcribe(video_file)
-
-            kwargs = mock_model.transcribe.call_args.kwargs
-            assert kwargs["language"] == "zh"
-
-    def test_vad_filter_enabled(self, transcriber, video_file, mock_model):
+    def test_vad_filter_enabled(self, transcriber, audio_file, mock_model):
         """FR-3.x: vad_filter=True 必须开(过滤静音段)。"""
-        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
-            mock_run.return_value = FakeCompletedProcess(returncode=0)
-            (video_file.with_suffix(".wav")).write_bytes(b"fake wav")
+        transcriber.transcribe(audio_file)
+        kwargs = mock_model.transcribe.call_args.kwargs
+        assert kwargs["vad_filter"] is True
 
-            transcriber.transcribe(video_file)
-
-            kwargs = mock_model.transcribe.call_args.kwargs
-            assert kwargs["vad_filter"] is True
-
-    def test_segments_joined_with_newline(self, transcriber, video_file, mock_model):
+    def test_segments_joined_with_newline(self, transcriber, audio_file, mock_model):
         """segments 文本用 \\n 拼接返回。"""
         mock_model.transcribe.return_value = (
             make_fake_segments("你好", "这是", "一段测试"),
             MagicMock(language_probability=0.95),
         )
+        text = transcriber.transcribe(audio_file)
+        assert text == "你好\n这是\n一段测试"
 
-        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
-            mock_run.return_value = FakeCompletedProcess(returncode=0)
-            (video_file.with_suffix(".wav")).write_bytes(b"fake wav")
-
-            text = transcriber.transcribe(video_file)
-
-            assert text == "你好\n这是\n一段测试"
-
-    def test_transcribe_failure_propagates(self, cfg, video_file, mock_model):
+    def test_transcribe_failure_propagates(self, cfg, audio_file, mock_model):
         """model.transcribe 抛错 → 异常向上传播(供 FR-3.5 记录)。"""
         mock_model.transcribe.side_effect = RuntimeError("whisper OOM")
-
         transcriber = StreamingTranscriber(cfg, model=mock_model)
-        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
-            mock_run.return_value = FakeCompletedProcess(returncode=0)
-            (video_file.with_suffix(".wav")).write_bytes(b"fake wav")
-
-            with pytest.raises(RuntimeError, match="whisper OOM"):
-                transcriber.transcribe(video_file)
+        with pytest.raises(RuntimeError, match="whisper OOM"):
+            transcriber.transcribe(audio_file)
 
 
 class TestPostprocessWiring:
     """2026-09-02:StreamingTranscriber 串接 postprocess 的端到端测试。"""
 
-    def test_postprocess_disabled_returns_raw_segments(self, cfg, video_file, mock_model):
+    def test_postprocess_disabled_returns_raw_segments(self, cfg, audio_file, mock_model):
         """postprocess_enabled=False → 返回原始 \\n 拼接(不合并碎片)。"""
         cfg.whisper.postprocess_enabled = False
         mock_model.transcribe.return_value = (
@@ -253,13 +180,10 @@ class TestPostprocessWiring:
             MagicMock(language_probability=0.95),
         )
         transcriber = StreamingTranscriber(cfg, model=mock_model)
-        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
-            mock_run.return_value = FakeCompletedProcess(returncode=0)
-            (video_file.with_suffix(".wav")).write_bytes(b"fake wav")
-            text = transcriber.transcribe(video_file)
+        text = transcriber.transcribe(audio_file)
         assert text == "你好\n这是\n一段测试"
 
-    def test_postprocess_enabled_merges_short_lines(self, cfg, video_file, mock_model):
+    def test_postprocess_enabled_merges_short_lines(self, cfg, audio_file, mock_model):
         """postprocess_enabled=True → 短碎片行被合并。"""
         cfg.whisper.postprocess_enabled = True
         mock_model.transcribe.return_value = (
@@ -267,10 +191,7 @@ class TestPostprocessWiring:
             MagicMock(language_probability=0.95),
         )
         transcriber = StreamingTranscriber(cfg, model=mock_model)
-        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
-            mock_run.return_value = FakeCompletedProcess(returncode=0)
-            (video_file.with_suffix(".wav")).write_bytes(b"fake wav")
-            text = transcriber.transcribe(video_file)
+        text = transcriber.transcribe(audio_file)
         # "了"(1 字符) → 并入上一行
         assert text == "第一句長度已經八個字符\n這是另一句也是夠長了"
 
@@ -285,7 +206,7 @@ class TestLazyModelLoad:
             StreamingTranscriber(cfg, model=None)
             mock_cls.assert_not_called()
 
-    def test_model_loaded_on_first_transcribe(self, cfg, video_file):
+    def test_model_loaded_on_first_transcribe(self, cfg, audio_file):
         """首次调用 transcribe 才加载模型。"""
         with patch("vla.transcribe.streaming.WhisperModel") as mock_cls:
             mock_instance = MagicMock()
@@ -300,11 +221,7 @@ class TestLazyModelLoad:
             # 此时还没加载
             mock_cls.assert_not_called()
 
-            with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
-                mock_run.return_value = FakeCompletedProcess(returncode=0)
-                (video_file.with_suffix(".wav")).write_bytes(b"fake wav")
-
-                t.transcribe(video_file)
+            t.transcribe(audio_file)
 
             # 现在加载了
             mock_cls.assert_called_once()
@@ -313,15 +230,11 @@ class TestLazyModelLoad:
             assert args[0] == "small"  # cfg.whisper.model
             assert kwargs["compute_type"] == "int8"
 
-    def test_injected_model_used_directly(self, cfg, video_file, mock_model):
+    def test_injected_model_used_directly(self, cfg, audio_file, mock_model):
         """构造函数注入 model → 不重新加载。"""
         with patch("vla.transcribe.streaming.WhisperModel") as mock_cls:
             t = StreamingTranscriber(cfg, model=mock_model)
-            with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
-                mock_run.return_value = FakeCompletedProcess(returncode=0)
-                (video_file.with_suffix(".wav")).write_bytes(b"fake wav")
-
-                t.transcribe(video_file)
+            t.transcribe(audio_file)
 
             # 没有调用 WhisperModel 构造
             mock_cls.assert_not_called()
@@ -370,17 +283,10 @@ class TestCleanup:
 
 
 class TestAudioFileLifecycle:
-    def test_audio_kept_after_successful_transcribe(self, transcriber, video_file, mock_model, tmp_path):
+    def test_audio_kept_after_successful_transcribe(self, transcriber, audio_file):
         """transcribe() 成功 → 音频文件保留(等 cleanup() / 质量检查通过后再删)。"""
-        audio_path = video_file.with_suffix(".wav")
-
-        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
-            mock_run.return_value = FakeCompletedProcess(returncode=0)
-            audio_path.write_bytes(b"fake wav")
-
-            transcriber.transcribe(video_file)
-
-            assert audio_path.exists()
+        transcriber.transcribe(audio_file)
+        assert audio_file.exists()
 
 
 # ---------------- FR-3.8 / FR-2.15c:落盘 transcript.txt + cleaned.txt ----------------
@@ -412,20 +318,16 @@ class TestTranscriptAndCleanedWrite:
             "llm_client": {"provider": "openai", "api_key_env": "OPENAI_API_KEY", "base_url_env": "OPENAI_BASE_URL", "refine_model": "x"},
         })
         cfg.logging.log_dir = tmp_path / "logs"
-        video_file = tmp_path / "test.mp4"
-        video_file.write_bytes(b"x")
+        audio_file = tmp_path / "test.wav"
+        audio_file.write_bytes(b"x")
         transcriber = StreamingTranscriber(cfg, model=mock_model)
 
-        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
-            mock_run.return_value = FakeCompletedProcess(returncode=0)
-            video_file.with_suffix(".wav").write_bytes(b"fake wav")
+        transcriber.transcribe(audio_file)
 
-            transcriber.transcribe(video_file)
-
-            transcript_path = tmp_path / "logs" / "transcripts" / f"{video_file.stem}.transcript.txt"
-            assert transcript_path.exists()
-            assert "你好" in transcript_path.read_text(encoding="utf-8")
-            assert "世界" in transcript_path.read_text(encoding="utf-8")
+        transcript_path = tmp_path / "logs" / "transcripts" / f"{audio_file.stem}.transcript.txt"
+        assert transcript_path.exists()
+        assert "你好" in transcript_path.read_text(encoding="utf-8")
+        assert "世界" in transcript_path.read_text(encoding="utf-8")
 
     def test_transcribe_with_postprocess_writes_cleaned_txt(
         self, tmp_path, mock_model
@@ -452,15 +354,11 @@ class TestTranscriptAndCleanedWrite:
             "llm_client": {"provider": "openai", "api_key_env": "OPENAI_API_KEY", "base_url_env": "OPENAI_BASE_URL", "refine_model": "x"},
         })
         cfg.logging.log_dir = tmp_path / "logs"
-        video_file = tmp_path / "test.mp4"
-        video_file.write_bytes(b"x")
+        audio_file = tmp_path / "test.wav"
+        audio_file.write_bytes(b"x")
         transcriber = StreamingTranscriber(cfg, model=mock_model)
 
-        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
-            mock_run.return_value = FakeCompletedProcess(returncode=0)
-            video_file.with_suffix(".wav").write_bytes(b"fake wav")
-
-            transcriber.transcribe(video_file)
+        transcriber.transcribe(audio_file)
 
         transcripts_dir = tmp_path / "logs" / "transcripts"
         assert (transcripts_dir / "test.transcript.txt").exists()
@@ -512,16 +410,12 @@ class TestRefinerIntegration:
         """refine_enabled=False → 不写 .refined.txt,返回 cleaned_text。"""
         cfg = self._make_cfg_with_refiner(tmp_path, refine_enabled=False)
         cfg.logging.log_dir = tmp_path / "logs"
-        video_file = tmp_path / "BV1disabled.mp4"
-        video_file.write_bytes(b"x")
+        audio_file = tmp_path / "BV1disabled.wav"
+        audio_file.write_bytes(b"x")
         # mock_model 默认 "你好" + "世界",clean_transcript 后是 "你好 世界" 这种
 
         transcriber = StreamingTranscriber(cfg, model=mock_model)
-        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
-            mock_run.return_value = FakeCompletedProcess(returncode=0)
-            video_file.with_suffix(".wav").write_bytes(b"fake wav")
-
-            result = transcriber.transcribe(video_file)
+        result = transcriber.transcribe(audio_file)
 
         transcripts_dir = tmp_path / "logs" / "transcripts"
         assert not (transcripts_dir / "BV1disabled.refined.txt").exists()
@@ -537,8 +431,8 @@ class TestRefinerIntegration:
 
         cfg = self._make_cfg_with_refiner(tmp_path, refine_enabled=True)
         cfg.logging.log_dir = tmp_path / "logs"
-        video_file = tmp_path / "BV1refine.mp4"
-        video_file.write_bytes(b"x")
+        audio_file = tmp_path / "BV1refine.wav"
+        audio_file.write_bytes(b"x")
 
         # mock SubtitleRefiner.refine → 返回固定 cleaned_text
         refined_text = "你好世界。(refined)"
@@ -554,11 +448,7 @@ class TestRefinerIntegration:
         mock_refiner.refine.return_value = fake_result
 
         transcriber = StreamingTranscriber(cfg, model=mock_model, refiner=mock_refiner)
-        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
-            mock_run.return_value = FakeCompletedProcess(returncode=0)
-            video_file.with_suffix(".wav").write_bytes(b"fake wav")
-
-            result = transcriber.transcribe(video_file)
+        result = transcriber.transcribe(audio_file)
 
         transcripts_dir = tmp_path / "logs" / "transcripts"
         # refined.txt 写了
@@ -580,8 +470,8 @@ class TestRefinerIntegration:
 
         cfg = self._make_cfg_with_refiner(tmp_path, refine_enabled=True)
         cfg.logging.log_dir = tmp_path / "logs"
-        video_file = tmp_path / "BV1fail.mp4"
-        video_file.write_bytes(b"x")
+        audio_file = tmp_path / "BV1fail.wav"
+        audio_file.write_bytes(b"x")
 
         # refiner 返回 cleaned_text == original → 视为 fallback
         fallback_result = RefinementResult(
@@ -596,12 +486,9 @@ class TestRefinerIntegration:
         mock_refiner.refine.return_value = fallback_result
 
         transcriber = StreamingTranscriber(cfg, model=mock_model, refiner=mock_refiner)
-        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
-            mock_run.return_value = FakeCompletedProcess(returncode=0)
-            video_file.with_suffix(".wav").write_bytes(b"fake wav")
 
-            # 不抛
-            result = transcriber.transcribe(video_file)
+        # 不抛
+        result = transcriber.transcribe(audio_file)
 
         transcripts_dir = tmp_path / "logs" / "transcripts"
         # refined.txt 仍写(fallback 也落盘供审计)
@@ -618,16 +505,13 @@ class TestRefinerIntegration:
         """refine_enabled=True 但 refiner=None → 跳过(不抛),退化用 cleaned。"""
         cfg = self._make_cfg_with_refiner(tmp_path, refine_enabled=True)
         cfg.logging.log_dir = tmp_path / "logs"
-        video_file = tmp_path / "BV1norfnr.mp4"
-        video_file.write_bytes(b"x")
+        audio_file = tmp_path / "BV1norfnr.wav"
+        audio_file.write_bytes(b"x")
 
         transcriber = StreamingTranscriber(cfg, model=mock_model, refiner=None)
-        with patch("vla.transcribe.streaming.subprocess.run") as mock_run:
-            mock_run.return_value = FakeCompletedProcess(returncode=0)
-            video_file.with_suffix(".wav").write_bytes(b"fake wav")
 
-            # 不抛
-            result = transcriber.transcribe(video_file)
+        # 不抛
+        result = transcriber.transcribe(audio_file)
 
         transcripts_dir = tmp_path / "logs" / "transcripts"
         # refined.txt 不写(没注入 refiner,跳过整段)
