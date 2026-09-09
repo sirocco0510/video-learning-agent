@@ -460,18 +460,23 @@ class TestDurationSecPassed:
 
 
 class TestScanTodayDirPath:
-    """F2-10:弹窗 "enabled" 改走扫今天日期目录路径。
+    """T4:弹窗 "enabled" → _try_browser 返回 None,扫目录与转写委派给 fetch_asset (T7)。
 
-    流程:用户手动按 Cmd+Shift+R + 手动点 downloadWavBtn → 拖到
-    <cfg.audio.downloads_dir>/<今天>/。代码扫今天目录 *.webm,过滤 .transcribed.txt,
-    调 transcriber.transcribe(audio_path, out_dir=today_dir) → touch sidecar。
+    旧 F2-10 行为(已迁出 / T4 删除):
+      - 扫今天目录 → 调 transcriber.transcribe → touch sidecar → 返回 text + meta
+      - mark_available
 
-    验证:_try_browser 的 enabled 分支调对了 transcribe + touch,正确返回 metadata。
+    新行为(per Ruling 1 in progress.md,避免与 T7 fetch_asset path ④ double-scan):
+      - 不调 scan_untranscribed_audio
+      - 不调 transcriber.transcribe
+      - 不抽音、不 touch sidecar
+      - 不 mark_available(留给 fetch_asset 决定)
+      - 返回 None
     """
 
     @pytest.fixture
     def cfg_with_downloads_dir(self, tmp_path):
-        """VLAConfig mock:cfg.audio.downloads_dir 指向 tmp_path(测试用临时根)。"""
+        """VLAConfig mock:cfg.audio.downloads_dir 指向 tmp_path。保留 fixture 以便未来 T7 复用。"""
         from vla.config import AudioConfig
         audio_cfg = AudioConfig(downloads_dir=tmp_path)
         cfg = MagicMock()
@@ -482,10 +487,11 @@ class TestScanTodayDirPath:
     def enabled_strategy(
         self, adapter, driver, notifier, plugin_status, log, cfg_with_downloads_dir
     ) -> SubtitleStrategy:
-        """SubtitleStrategy w/ transcriber 已 mock,无 tab_recorder 链路依赖。"""
+        """SubtitleStrategy w/ transcriber 已 mock,验证不调 transcribe。"""
         cfg, _root = cfg_with_downloads_dir
         tab_rec = MagicMock()  # 保留(类不删),但 _try_browser 不调 start/click
         trans = MagicMock()
+        # 即便返回非 None,新行为不应调 transcribe
         trans.transcribe.return_value = "tab audio 字幕文本"
         return SubtitleStrategy(
             registry=StubRegistry(adapter),
@@ -502,42 +508,24 @@ class TestScanTodayDirPath:
             cfg=cfg,
         )
 
-    async def test_enabled_scans_today_dir_and_transcribes(
+    async def test_enabled_returns_none(
         self, enabled_strategy, adapter, url, cfg_with_downloads_dir
     ):
-        """enabled → 扫到 webm → 调 transcriber.transcribe(audio_path, out_dir=today_dir) + touch sidecar。"""
+        """弹窗 enabled → _try_browser 返回 None(策略 ③ 也 miss → 整体 None)。"""
         cfg, root = cfg_with_downloads_dir
-        # 预放一个未转写 webm 到今天目录
         today_dir = root / __import__("datetime").date.today().isoformat()
         today_dir.mkdir(parents=True, exist_ok=True)
-        webm = today_dir / "1788852384504.webm"
-        webm.write_bytes(b"x" * 16)
-        adapter.api_return = None
-        adapter.browser_return = None  # 触发弹窗
-        result = await enabled_strategy.get_subtitle(url, duration_sec=90)
+        (today_dir / "x.webm").write_bytes(b"x")  # 即便有 webm,也不应处理
+        adapter.browser_return = None  # 触发弹窗 → notifier 返 "enabled"
+        result = await enabled_strategy.get_subtitle(url)
 
-        assert result is not None
-        assert result.source == "whisper"  # via=tab_audio_recorder → source=whisper
-        assert result.text == "tab audio 字幕文本"
-        # transcriber.transcribe 被调,传 audio_path + out_dir=today_dir
-        enabled_strategy.transcriber.transcribe.assert_called_once_with(
-            webm, out_dir=today_dir,
-        )
-        # sidecar 已 touch
-        sidecar = webm.with_suffix(".transcribed.txt")
-        assert sidecar.exists()
-        # metadata 暴露 audio_path / transcript_path / method
-        assert result.metadata["via"] == "tab_audio_recorder"
-        assert result.metadata["method"] == "scan_today_dir"
-        assert result.metadata["audio_path"] == str(webm)
-        assert result.metadata["transcript_path"] == str(
-            today_dir / "1788852384504.transcript.txt"
-        )
+        # enabled 路径不再返回任何结果,fetch_asset (T7) 接管
+        assert result is None
 
-    async def test_enabled_records_plugin_as_available(
-        self, enabled_strategy, adapter, plugin_status, url, cfg_with_downloads_dir
+    async def test_enabled_does_not_transcribe(
+        self, enabled_strategy, adapter, url, cfg_with_downloads_dir
     ):
-        """成功 enabled → mark_available(FR-2.9 session 单例)。"""
+        """弹窗 enabled → transcriber.transcribe NOT called(转写归 fetch_asset T7)。"""
         cfg, root = cfg_with_downloads_dir
         today_dir = root / __import__("datetime").date.today().isoformat()
         today_dir.mkdir(parents=True, exist_ok=True)
@@ -545,21 +533,37 @@ class TestScanTodayDirPath:
         adapter.browser_return = None
         await enabled_strategy.get_subtitle(url)
 
-        plugin_status.mark_available.assert_called_once()
+        enabled_strategy.transcriber.transcribe.assert_not_called()
 
-    async def test_enabled_no_audio_falls_back(
+    async def test_enabled_does_not_touch_sidecar(
+        self, enabled_strategy, adapter, url, cfg_with_downloads_dir
+    ):
+        """弹窗 enabled → 不 touch .transcribed.txt sidecar。"""
+        cfg, root = cfg_with_downloads_dir
+        today_dir = root / __import__("datetime").date.today().isoformat()
+        today_dir.mkdir(parents=True, exist_ok=True)
+        webm = today_dir / "x.webm"
+        webm.write_bytes(b"x")
+        sidecar = webm.with_suffix(".transcribed.txt")
+        adapter.browser_return = None
+        await enabled_strategy.get_subtitle(url)
+
+        assert not sidecar.exists()
+
+    async def test_enabled_does_not_mark_plugin_available(
         self, enabled_strategy, adapter, plugin_status, url, cfg_with_downloads_dir
     ):
-        """今天目录无 webm → 降级 ③ ffmpeg,不 mark_unavailable。"""
-        cfg, root = cfg_with_downloads_dir
-        # root 存在但 today_dir 内部无 .webm(find_today_dir 会自动建,但空)
-        adapter.browser_return = None
-        result = await enabled_strategy.get_subtitle(url)
+        """弹窗 enabled 但本函数不返回结果 → 不应 mark_available / mark_unavailable。
 
-        # 降级后 ③ 也 miss → 全失败返回 None
-        assert result is None
-        # 关键断言:没 mark_unavailable(避免污染整个 session)
-        plugin_status = enabled_strategy.plugin_status
-        assert not plugin_status.mark_unavailable.called
-        # 关键断言:没调 transcriber.transcribe
-        enabled_strategy.transcriber.transcribe.assert_not_called()
+        "enabled" 是用户主动响应,不是失败,所以 mark_unavailable 也不应被调
+        (避免污染整个 session — 跟旧"无 webm 降级 ③"逻辑保持一致)。
+        """
+        cfg, root = cfg_with_downloads_dir
+        today_dir = root / __import__("datetime").date.today().isoformat()
+        today_dir.mkdir(parents=True, exist_ok=True)
+        (today_dir / "x.webm").write_bytes(b"x")
+        adapter.browser_return = None
+        await enabled_strategy.get_subtitle(url)
+
+        plugin_status.mark_available.assert_not_called()
+        plugin_status.mark_unavailable.assert_not_called()

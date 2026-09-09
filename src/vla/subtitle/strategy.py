@@ -34,7 +34,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from vla.models import SubtitleResult
-from vla.subtitle.audio_scan import find_today_dir, scan_untranscribed_audio
 
 if TYPE_CHECKING:
     from vla.audio.source_factory import AudioSourceFactory
@@ -344,7 +343,8 @@ class SubtitleStrategy:
             return first
 
         # 3. 暂停视频 + 弹窗(若 driver 为 None,跳过 pause 但仍弹窗)
-        page = self._new_page_safely()
+        # v3.2.1.9 (2026-09-08):复用用户已开 B站 tab,不开新空白页 — 同 Phase A/C 思路
+        page = self._new_page_safely(url)
         if page is not None:
             from vla.subtitle.page_control import pause_page_video
             # v3.2.1.3: page.evaluate 必须在 dispatcher thread;driver 提供
@@ -355,7 +355,7 @@ class SubtitleStrategy:
                 self.log.warning("暂停页面视频失败(best-effort):%s", e)
 
         self.log.info(
-            "策略 ② 第一次未拿到字幕,触发弹窗询问用户开启 Screen Recorder"
+            "策略 ② 第一次未拿到字幕,触发弹窗询问用户开启 %s", self.plugin_name,
         )
         response = self.notifier.ask_open_browser(
             url=url,
@@ -374,59 +374,16 @@ class SubtitleStrategy:
             self.log.info("弹窗超时未响应,降级到策略 ③")
             return None
 
-        # 5. "enabled" → F2-10 扫今天日期目录路径(替代 F2-8 模拟 click_download)
-        # 流程:用户按 Cmd+Shift+R 启停 Tab Audio Recorder + 手动点 editor.html
-        # downloadWavBtn 下载 webm → 拖到 <cfg.audio.downloads_dir>/<今天>/。
-        # 代码扫今天目录的 *.webm → 过滤 .transcribed.txt → Whisper 转写 → 标 sidecar。
-        if page is None:
-            self.log.warning(
-                "无法创建 page,降级策略 ③(ffmpeg)"
-            )
-            return None
-        if self.cfg is None or not hasattr(self.cfg, "audio") or self.cfg.audio is None:
-            self.log.warning(
-                "未注入 cfg.audio,降级策略 ③(ffmpeg)"
-            )
-            return None
-
-        _safe_close_page(page)  # 弹窗后 page 用完,关掉释放
-
-        downloads_root = self.cfg.audio.downloads_dir
-        today_dir = find_today_dir(downloads_root)  # 自动 mkdir
-        audio_path = scan_untranscribed_audio(today_dir)
-        if audio_path is None:
-            self.log.warning(
-                "今天文件夹 %s 无 webm(或全部已转写),降级策略 ③(ffmpeg)",
-                today_dir,
-            )
-            return None
-
+        # 5. "enabled" → T4 委派给 fetch_asset (T7) 接管扫今天目录与转写
+        # 本分支不再调 scan_untranscribed_audio / transcriber.transcribe / 抽音 / sidecar touch
+        # (Ruling 1 from progress.md: 消除 T4 与 T7 之间的 double-scan 风险。
+        #  T7 path ④ 是唯一扫今天目录的地方;plugin_status.mark_available 也留给 fetch_asset。)
+        if page is not None:
+            _safe_close_page(page)  # 弹窗后 page 用完,关掉释放
         self.log.info(
-            "找到用户手动下载的 webm: %s,开始转写(out_dir=%s)",
-            audio_path, today_dir,
+            "弹窗 enabled → 返回 None,扫今天目录与转写由 fetch_asset path ④ 接管"
         )
-        try:
-            # out_dir=today_dir → 保留源 webm(用户产物),transcript 落同文件夹
-            text = self.transcriber.transcribe(audio_path, out_dir=today_dir)
-        except Exception as e:
-            self.log.warning("Whisper 转写失败 %s: %s", audio_path, e)
-            return None
-
-        # 标记已转写(sidecar touch)
-        try:
-            audio_path.with_suffix(".transcribed.txt").touch()
-            self.log.info("已标记已转写: %s", audio_path)
-        except Exception as e:
-            self.log.warning("touch sidecar 失败 %s: %s", audio_path, e)
-
-        if not self.plugin_status.is_known():
-            self.plugin_status.mark_available()
-        return text, {
-            "via": "tab_audio_recorder",  # 保留 key,batch 总结 source 判断仍用
-            "method": "scan_today_dir",
-            "audio_path": str(audio_path),
-            "transcript_path": str(today_dir / f"{audio_path.stem}.transcript.txt"),
-        }
+        return None
 
     def _fetch_browser_once(
         self, adapter: Any, url: str, *, label: str
@@ -442,12 +399,39 @@ class SubtitleStrategy:
             self.log.warning("策略 ② %s 失败: %s", label, e)
         return None
 
-    def _new_page_safely(self) -> Any:
-        """开一个 background page 用来 pause video(若 driver=None 则返回 None)。"""
+    def _new_page_safely(self, url: str) -> Any | None:
+        """v3.2.1.9 (2026-09-08):复用用户已开的 B站 tab 来 pause video(不再开新空白页)。
+
+        旧实现调 driver.new_background_page() 开空白 tab — 跟 Phase A/C v3.2.1.8 修复的
+        "开了新空白页tab" 抱怨同源。修法:跟 Phase A 一致,从 url 提 bvid,用
+        find_page_by_url_substring 复用现有 tab;找不到 → return None
+        (popup 仍会弹,但跳过 pause video — 用户已 Cmd+Shift+R 启停后,暂停不重要)。
+
+        设计动机:
+        - 用户已经在 Chrome 打开 B站(他自己按播放);popup 期间我们不应再加 tab
+        - 复用现有 tab 可避免 Chrome memory saver 关闭 background tab 的 race
+        - 跟 Phase A 统一路径,降低认知成本
+
+        Args:
+            url: 视频 URL(用来提 bvid 找 user tab)
+
+        Returns:
+            已开 B站 tab 的 page 对象;找不到 / driver=None / URL 无 bvid → None
+        """
         if self.driver is None:
             return None
+        import re
+        bvid_m = re.search(r"([Bb][Vv][A-Za-z0-9]+)", url)
+        if not bvid_m:
+            self.log.warning(
+                "_new_page_safely: URL 不含 bvid (%s) → 返回 None", url,
+            )
+            return None
+        bvid = bvid_m.group(1)
         try:
-            return self.driver.new_background_page()
+            return self.driver.find_page_by_url_substring(bvid)
         except Exception as e:
-            self.log.warning("new_background_page 失败(不影响 popup):%s", e)
+            self.log.warning(
+                "_new_page_safely: find_page_by_url_substring 失败(不影响 popup):%s", e,
+            )
             return None
