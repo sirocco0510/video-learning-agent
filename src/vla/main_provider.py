@@ -59,6 +59,7 @@ class RealTextProvider:
         log: TranscriptionLog | None = None,
         checker: Any | None = None,
         refiner: Any | None = None,
+        today_dir: Path | None = None,
     ) -> None:
         """
         Args:
@@ -72,6 +73,10 @@ class RealTextProvider:
             log: TranscriptionLog(可选,默认从 cfg.logging.log_dir 构造)
             checker: QualityChecker(可选,process_asset 质量门控用)
             refiner: SubtitleRefiner(可选,process_asset Refine 步骤用)
+            today_dir: 用户手动下载音频的今日目录(F2-10 scan_today_dir 路径
+                       §4.2 ④ 用;build_text_provider 自动从 cfg.audio.downloads_dir
+                       计算,测试 fixture 也可手动注入,None 时 fetch_asset 路径 ④
+                       仍走 audio_scan 但目录需由调用方保证存在)
         """
         self.cfg = cfg
         self.strategy = strategy
@@ -83,6 +88,7 @@ class RealTextProvider:
         self.log = log or TranscriptionLog(cfg.logging.log_dir)
         self.checker = checker
         self.refiner = refiner
+        self._today_dir = today_dir
 
     async def fetch_asset(self, task: VideoTask) -> Asset | None:
         """输入链(Task 7 实装):4 路径回落,产出 Asset 或 None。
@@ -113,6 +119,7 @@ class RealTextProvider:
                 logger.warning("internal spider 返回无 video_url,跳过: %s", result)
                 return None
             wav_path = self._save_dir / "audio_raw" / f"{task.id}.wav"
+            wav_path.parent.mkdir(parents=True, exist_ok=True)
             try:
                 extract_audio(Path(video_url), wav_path)
             except Exception as e:
@@ -263,7 +270,8 @@ def build_text_provider(
     monkey-patch 命中真实组件。
 
     Args:
-        cfg: VLAConfig
+        cfg: VLAConfig(若 cfg.audio 存在,装配时会自动算 today_dir = find_today_dir(
+             cfg.audio.downloads_dir) 并注入 provider)
         transcriber: StreamingTranscriber(可选 — 测试 fixture 注入 MagicMock;
                   None 时内部 auto-create)
         notifier: MacOSNotifier(必填 — 弹窗)
@@ -280,6 +288,8 @@ def build_text_provider(
         strategy: SubtitleStrategy(可选 — spike 注入预构造的 strategy,内部
                   audio_factory / tab_recorder / bilibili_adapter 等组件可被
                   monkey-patch 复用;None 时内部 auto-construct)
+                  装配后 today_dir 会被算出来传给 RealTextProvider(若 cfg.audio 不为 None),
+                  fetch_asset 路径 ④ scan_today_dir(§4.2 ④)才能跑通。
 
     Returns:
         (fetch_asset, process_asset):两个独立 callable,分别对应"取资产"和"处理资产"。
@@ -288,12 +298,20 @@ def build_text_provider(
     """
     from vla.audio.source_factory import AudioSourceFactory
     from vla.source.video_source import VideoSourceFactory
+    from vla.subtitle.audio_scan import find_today_dir
     from vla.subtitle.strategy import SubtitleStrategy
     from vla.subtitle.tab_audio_recorder import TabAudioRecorder
     from vla.transcribe.streaming import StreamingTranscriber
 
     save_dir = Path(save_dir) if save_dir else Path(cfg.storage.tmp_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
+
+    # T14 (2026-09-09 asset-pipeline-refactor):算今天日期目录并注入 provider,
+    # 让 fetch_asset 路径 ④ audio_scan.scan_untranscribed_audio(self._today_dir)
+    # 在生产里不再 AttributeError。audio 为 None 时保持 None(向后兼容测试)。
+    today_dir: Path | None = None
+    if cfg.audio is not None:
+        today_dir = find_today_dir(Path(cfg.audio.downloads_dir))
 
     log = log or TranscriptionLog(cfg.logging.log_dir)
 
@@ -353,6 +371,7 @@ def build_text_provider(
         log=log,
         checker=checker,
         refiner=refiner,
+        today_dir=today_dir,
     )
 
     return provider.fetch_asset, provider.process_asset

@@ -142,3 +142,67 @@ def test_build_text_provider_auto_constructs_refiner_when_enabled(tmp_path: Path
     provider = _stub_provider(cfg, tmp_path)
     assert provider.refiner is not None
     assert isinstance(provider.refiner, SubtitleRefiner)
+
+
+# ---------------- T14: today_dir 注入(回归 fix 1) ----------------
+
+
+def _full_cfg_with_audio(tmp_path: Path, refine_enabled: bool = False) -> VLAConfig:
+    """T14:_full_cfg + audio.downloads_dir = tmp_path/audio_downloads。
+
+    F2-10 scan_today_dir(§4.2 path ④)需要 cfg.audio.downloads_dir;
+    原 _full_cfg 没填 audio → build_text_provider 跑 build_text_provider 时
+    cfg.audio 字段访问会 AttributeError,所以 T14 单独构造一份带 audio 的 cfg。
+    """
+    from vla.config import AudioConfig
+
+    base = _full_cfg(refine_enabled=refine_enabled)
+    return base.model_copy(
+        update={"audio": AudioConfig(downloads_dir=tmp_path / "audio_downloads")}
+    )
+
+
+def test_real_text_provider_today_dir_defaults_to_none():
+    """T14:RealTextProvider(...) 不传 today_dir → _today_dir is None(向后兼容)。"""
+    p = RealTextProvider(
+        cfg=MagicMock(),
+        strategy=MagicMock(),
+        source_factory=MagicMock(),
+        transcriber=MagicMock(),
+        notifier=MagicMock(),
+        plugin_status=MagicMock(),
+    )
+    assert p._today_dir is None
+
+
+def test_real_text_provider_today_dir_accepts_path(tmp_path: Path):
+    """T14:RealTextProvider(..., today_dir=...) → _today_dir = 该路径。"""
+    target = tmp_path / "today"
+    p = RealTextProvider(
+        cfg=MagicMock(),
+        strategy=MagicMock(),
+        source_factory=MagicMock(),
+        transcriber=MagicMock(),
+        notifier=MagicMock(),
+        plugin_status=MagicMock(),
+        today_dir=target,
+    )
+    assert p._today_dir == target
+
+
+def test_build_text_provider_wires_today_dir(tmp_path: Path):
+    """T14 regression:build_text_provider 装配时必须把 today_dir 算出来注入 provider。
+
+    之前 __init__ 没声明 self._today_dir → fetch_asset 路径 ④
+    audio_scan.scan_untranscribed_audio(self._today_dir) 在生产里
+    AttributeError 被 except 吞掉,fallback §4.2 路径 ④ 永远走不到。
+    """
+    from vla.subtitle.audio_scan import find_today_dir
+
+    cfg = _full_cfg_with_audio(tmp_path)
+    provider = _stub_provider(cfg, tmp_path)
+
+    expected = find_today_dir(Path(cfg.audio.downloads_dir))
+    assert provider._today_dir == expected
+    assert provider._today_dir is not None
+    assert provider._today_dir.exists()
