@@ -56,6 +56,9 @@ class RealTextProvider:
         notifier: Any,
         plugin_status: Any,
         save_dir: Path | None = None,
+        log: TranscriptionLog | None = None,
+        checker: Any | None = None,
+        refiner: Any | None = None,
     ) -> None:
         """
         Args:
@@ -66,6 +69,9 @@ class RealTextProvider:
             notifier: MacOSNotifier(必填 — 弹窗)
             plugin_status: PluginStatus(必填 — session 单例)
             save_dir: 临时文件目录
+            log: TranscriptionLog(可选,默认从 cfg.logging.log_dir 构造)
+            checker: QualityChecker(可选,process_asset 质量门控用)
+            refiner: SubtitleRefiner(可选,process_asset Refine 步骤用)
         """
         self.cfg = cfg
         self.strategy = strategy
@@ -74,6 +80,9 @@ class RealTextProvider:
         self.notifier = notifier
         self.plugin_status = plugin_status
         self._save_dir = Path(save_dir) if save_dir else Path("./tmp")
+        self.log = log or TranscriptionLog(cfg.logging.log_dir)
+        self.checker = checker
+        self.refiner = refiner
 
     async def fetch_asset(self, task: VideoTask) -> Asset | None:
         """输入链(Task 7 实装):4 路径回落,产出 Asset 或 None。
@@ -238,12 +247,20 @@ def build_text_provider(
     plugin_status: Any = None,
     save_dir: Path | None = None,
     driver: Any = None,
-    recorder: Any = None,  # F2-8:deprecated,保留以兼容老调用方(始终 None)
+    recorder: Any | None = None,  # F2-8:deprecated,保留以兼容老调用方(始终 None)
+    log: TranscriptionLog | None = None,
+    checker: Any | None = None,
+    refiner: Any | None = None,
+    strategy: Any | None = None,
 ) -> tuple[FetchAssetFn, ProcessAssetFn]:
     """工厂函数:装配一个完整的 RealTextProvider,返回 (fetch_asset, process_asset) 两个 callable。
 
     Task 9(2026-09-09 asset-pipeline-refactor):返回二元组,调用方按需 await,
     中间可插入 quota 检查 / 日志 / 状态更新。
+
+    Task 12(2026-09-09 spike 装配):新增 strategy/log/checker/refiner 可选 kwarg,
+    允许 spike 在传入预构造 strategy 时复用其内部 adapter / recorder,以便
+    monkey-patch 命中真实组件。
 
     Args:
         cfg: VLAConfig
@@ -254,6 +271,14 @@ def build_text_provider(
         save_dir: 临时文件目录(默认 cfg.storage.tmp_dir)
         driver: BrowserDriver(可选,字幕策略需要)
         recorder: deprecated(F2-8:旧 Screen Recorder 已删,传参保留但运行时忽略)
+        log: TranscriptionLog(可选,默认从 cfg.logging.log_dir 构造)
+        checker: QualityChecker(可选,spike/装配时注入;None 时 process_asset
+                 跳过质量门控,默认 None — 由 spike / 调用方按需注入)
+        refiner: SubtitleRefiner(可选,spike/装配时注入;None 时 process_asset
+                 跳过 Refine)
+        strategy: SubtitleStrategy(可选 — spike 注入预构造的 strategy,内部
+                  audio_factory / tab_recorder / bilibili_adapter 等组件可被
+                  monkey-patch 复用;None 时内部 auto-construct)
 
     Returns:
         (fetch_asset, process_asset):两个独立 callable,分别对应"取资产"和"处理资产"。
@@ -269,38 +294,40 @@ def build_text_provider(
     save_dir = Path(save_dir) if save_dir else Path(cfg.storage.tmp_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    log = TranscriptionLog(cfg.logging.log_dir)
+    log = log or TranscriptionLog(cfg.logging.log_dir)
     source_factory = VideoSourceFactory(tmp_dir=save_dir, log=log, config=cfg)
     if transcriber is None:
         transcriber = StreamingTranscriber(cfg)
-    audio_factory = AudioSourceFactory(save_dir=save_dir / "audio_raw")
-    tab_recorder = TabAudioRecorder(
-        match_keyword=getattr(
-            getattr(cfg, "extension", None), "tab_audio_recorder.match_keyword", "tab audio",
-        ),
-        save_dir=save_dir / "audio_raw",
-    )
 
-    # F2-8:不再自动构造旧 Screen Recorder。弹窗 enabled 路径已废弃 —
-    # 真实录屏兜底走策略 ③ adapter.fetch_via_recording(只剩 yt-dlp path ①)。
-    # driver 仍按需自动连 Chrome CDP。
-    if driver is None:
-        driver = _try_connect_chrome(cfg, transcriber, notifier)
+    if strategy is None:
+        # F2-8:不再自动构造旧 Screen Recorder。弹窗 enabled 路径已废弃 —
+        # 真实录屏兜底走策略 ③ adapter.fetch_via_recording(只剩 yt-dlp path ①)。
+        # driver 仍按需自动连 Chrome CDP。
+        if driver is None:
+            driver = _try_connect_chrome(cfg, transcriber, notifier)
 
-    strategy = SubtitleStrategy(
-        registry=_build_registry(cfg, save_dir=save_dir),
-        driver=driver,
-        recorder=recorder,  # 保留(测试 fixture 注入 MagicMock,enabled 路径 stub)
-        notifier=notifier,
-        plugin_status=plugin_status,
-        remind_timeout_sec=cfg.browser_plugin.remind_timeout_sec,
-        plugin_name=cfg.browser_plugin.name,
-        audio_factory=audio_factory,
-        tab_recorder=tab_recorder,
-        transcriber=transcriber,
-        save_dir=save_dir,
-        cfg=cfg,  # F2-10:扫今天 YYYY-MM-DD/ 用
-    )
+        audio_factory = AudioSourceFactory(save_dir=save_dir / "audio_raw")
+        tab_recorder = TabAudioRecorder(
+            match_keyword=getattr(
+                getattr(cfg, "extension", None), "tab_audio_recorder.match_keyword", "tab audio",
+            ),
+            save_dir=save_dir / "audio_raw",
+        )
+
+        strategy = SubtitleStrategy(
+            registry=_build_registry(cfg, save_dir=save_dir),
+            driver=driver,
+            recorder=recorder,  # 保留(测试 fixture 注入 MagicMock,enabled 路径 stub)
+            notifier=notifier,
+            plugin_status=plugin_status,
+            remind_timeout_sec=cfg.browser_plugin.remind_timeout_sec,
+            plugin_name=cfg.browser_plugin.name,
+            audio_factory=audio_factory,
+            tab_recorder=tab_recorder,
+            transcriber=transcriber,
+            save_dir=save_dir,
+            cfg=cfg,  # F2-10:扫今天 YYYY-MM-DD/ 用
+        )
 
     provider = RealTextProvider(
         cfg=cfg,
@@ -310,6 +337,9 @@ def build_text_provider(
         notifier=notifier,
         plugin_status=plugin_status,
         save_dir=save_dir,
+        log=log,
+        checker=checker,
+        refiner=refiner,
     )
 
     return provider.fetch_asset, provider.process_asset

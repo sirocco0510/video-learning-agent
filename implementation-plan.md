@@ -768,6 +768,9 @@ def transcribe_video(self, video_path, duration_sec):
         vad_filter=True,
     )
     text = "\n".join(seg.text for seg in segments)
+    # 4. Level 1 本地清理(merge_short_lines + dedupe_repeated_segments)
+    if self.config.whisper.postprocess_enabled:
+        text, stats = self.postprocess.clean_transcript(text, ...)
     return text
 ```
 
@@ -778,7 +781,14 @@ def transcribe_video(self, video_path, duration_sec):
 
 #### `cleanup(*paths)`
 - 简单 `unlink()` 循环,加 try/except
-- 用于质量检查通过后清理音频
+- **2026-09-07 v3.2 改**:音频清理**移出** streaming.py,改由 `main.py._process_one` 在 `quality.passed=True` 后**显式**调
+- 原因:质量不过的音频也保留供 retry / 排查;只有通过 → 才删(避免浪费磁盘 + 防 retry 时无源)
+
+#### Level 4 云端 LLM 调优(2026-09-07 v3.2 移除)
+- ~~`streaming.py` 末尾注入 `refiner.refine(...)` 串联~~
+- **改**:`SubtitleRefiner` 由 `main.py._process_one` 在 `quality.passed=True` 之后**显式**调
+- 原因:不让 L4 云端 token 浪费在 quality_fail 的文本上;refine 作为 summary 的前置工作,放在质量门控后面更合理
+- 见 [[requirements#FR-3.9]] + [[requirements#七、数据流 Step 4]]
 
 ### 验收
 ```python
@@ -818,6 +828,18 @@ def check(self, text, title, duration_sec, model_size):
     char_count = len(text)
     cps = char_count / max(duration_sec, 1)
 
+    # 启发式 0:总字数下界(2026-09-07 v3.2 新增)— 文本过短直接 fail
+    # 原因:Whisper 可能只识别出前几个字就停了 / 视频大量静音
+    # 调 LLM 评估短文本纯属浪费 token
+    min_chars = self.config.quality_check.min_chars  # 默认 50
+    if char_count < min_chars:
+        return QualityResult(
+            passed=False, score=5,
+            issues=[f"文本过短:{char_count} 字(阈值 {min_chars})"],
+            suggestion="转写疑似失败或视频大量静音,建议人工核查或重转",
+            char_count=char_count,
+        )
+
     # 启发式 1:语速异常
     if cps < self.config.quality_check.min_char_per_second:
         return QualityResult(passed=False, score=20, ...)
@@ -830,7 +852,7 @@ def check(self, text, title, duration_sec, model_size):
     if most_common[1] >= 3 and len(most_common[0]) > 5:
         return QualityResult(passed=False, score=10, issues=["重复异常"], ...)
 
-    # LLM 检查
+    # LLM 检查(只对长度 + 语速 + 重复启发式都通过的文本调)
     prompt = self.PROMPT.format(...)
     resp = self.llm.complete(prompt, max_tokens=500)
     data = self._parse_json(resp)
@@ -881,11 +903,12 @@ PROMPT = """你是字幕质量审核员。请评估以下 Whisper 转写的字�
 【转写文本】
 {text}
 
-【检查维度】
-1. **通顺度**:有无明显乱码、无意义重复、语序混乱?
-2. **完整性**:是否覆盖视频大部分内容?语速是否在正常范围?
-3. **准确性**:专业术语是否正确(可基于标题推断)?
-4. **重复异常**:是否出现 ≥3 次重复的同一句话(Whisper 失败的典型表现)?
+【检查维度(2026-09-07 v3.2 强调长度 + 质量)】
+1. **文本长度合理性**:对一段视频是否够长?太短(< 视频时长的正常产出)提示转写提前终止或大量静音
+2. **通顺度**:有无明显乱码、无意义重复、语序混乱?
+3. **完整性**:是否覆盖视频大部分内容?语速是否在正常范围?
+4. **准确性**:专业术语是否正确(可基于标题推断)?
+5. **重复异常**:是否出现 ≥3 次重复的同一句话(Whisper 失败的典型表现)?
 
 【输出 JSON】
 {{
@@ -1590,12 +1613,20 @@ assert mock_notifier.alert_blocking.call_count == 2
 ```python
 def run(self, tasks: list[VideoTask]):
     """
-    主流程(集成 FR-9/10 + FR-2.9-2.11 + FR-6):
+    主流程(集成 FR-9/10 + FR-2.9-2.11 + FR-6 + FR-2.28 关键路径截图):
+      0. Session 启动 Chrome(一次)+ 复用 page 槽(每条视频换 URL,不重建 context)
       1. 过滤 history 中已转写 URL(FR-9.6)
-      2. 逐个处理(字幕 + 质量门控)
+      2. 逐个处理(关键路径:Phase A 截图 → 字幕 → 转写 → 质量 → 音频清理 → Refine → Phase C 截图)
       3. 累加器 >= 6h → 调 summarize_batch → 归零 → 停止(FR-9.4)
       4. **失败日志上限监控**(FR-6.6)— 写日志后检查是否触发弹窗
     """
+    # 0. Session 启 Chrome + page 槽(FR-2.28 关键路径截图需要)
+    if self.config.chrome_session.enabled:
+        try:
+            self._browser_driver.connect()  # 启 Chrome + connect_over_cdp
+        except Exception as e:
+            self.log.warning(f"⚠️ Chrome session 启动失败,降级无截图模式:{e}")
+
     # 1. 去重(FR-9.6)
     pending = [t for t in tasks if not self.history.is_already_done(self._url_key(t))]
     skipped = len(tasks) - len(pending)
@@ -1603,6 +1634,7 @@ def run(self, tasks: list[VideoTask]):
         self.log.info(f"⏭️ 跳过 {skipped} 个已转写视频")
     if not pending:
         self.log.info("✅ 所有视频都已转写,无需处理")
+        self._cleanup_browser()
         return
 
     for task in pending:
@@ -1619,7 +1651,7 @@ def run(self, tasks: list[VideoTask]):
             continue
 
         if window_item is None:
-            # 字幕拿不到 + 转写也没成,跳过本条
+            # 字幕拿不到 / 截图失败 / 转写失败 / 质量不过关,跳过本条
             self._check_failure_alert()
             continue
 
@@ -1641,15 +1673,40 @@ def run(self, tasks: list[VideoTask]):
 
 def _process_one(self, task) -> SubtitleWindowItem | None:
     """
-    处理单条视频,返回 SubtitleWindowItem 给 quota.add
-    返回 None = 本条没成(字幕 / 转写 / 质量全失败),跳过
+    处理单条视频(2026-09-07 v3.2 关键路径截图版),返回 SubtitleWindowItem 给 quota.add
+    返回 None = 本条没成(字幕 / 截图 / 转写 / 质量全失败),跳过
+
+    流水线(FR-2.28 + 七、数据流):
+      Step 0: 关键路径 Phase A 开头截图(失败 → 跳过视频,FR-2.28 决策 A)
+      Step 1: SubtitleStrategy.get_subtitle(三级降级)
+      Step 2: Whisper 转写(策略 ③ 路径才走,Level 1 本地清理已内置)
+      Step 3: QualityChecker.check(FR-4,文本长度 + 通顺度 + 完整性 + 准确性 + 重复)
+      Step 4: quality.passed → 显式 unlink 音频 + Refiner.refine(总结前置,Level 4 云端)
+      Step 5: 关键路径 Phase C 末尾截图(失败 log warning,不阻塞)
     """
-    # ① 字幕三级策略(含插件状态机)
+    # Step 0: 关键路径 Phase A 开头截图(FR-2.28)
+    if self._browser_driver is not None and self.config.chrome_session.enabled:
+        try:
+            page = self._ensure_page_for_url(str(task.url))
+            self._screenshot.phase_a_start(
+                page, task.id, task.title, task.expected_duration,
+            )
+        except Exception as e:
+            # FR-2.28 决策 A:截图失败 → 跳过本视频(写入 screenshot_fail.csv)
+            self.log.warning(
+                f"📸 Phase A 截图失败,跳过视频 {task.title}:{e}",
+            )
+            self.log.log_screenshot_fail(
+                task.id, task.title, str(task.url), "phase_a", str(e),
+            )
+            return None
+
+    # Step 1: 字幕三级策略(含插件状态机)
     subtitle = self.strategy.get_subtitle(
         str(task.url), task.id, task.title
     )
 
-    # ② 字幕缺失 → 走下载/录屏 + Whisper(策略 ③)
+    # Step 2: 字幕缺失 → 走下载/录屏 + Whisper(策略 ③)
     if subtitle is None:
         self.log.info(f"📼 {task.title}:走兜底,获取视频源 + Whisper")
         try:
@@ -1672,7 +1729,7 @@ def _process_one(self, task) -> SubtitleWindowItem | None:
             metadata={"video_source_mode": source.mode if source else "unknown"},
         )
 
-    # ③ 质量检查
+    # Step 3: 质量检查(FR-4,文本长度下界 + 语速 + 重复 + LLM)
     qr = self.quality_checker.check(
         text=subtitle.text,
         title=task.title,
@@ -1680,7 +1737,7 @@ def _process_one(self, task) -> SubtitleWindowItem | None:
         model_size=self.config.whisper.model,
     )
 
-    # ④ 分支
+    # Step 3.1 失败分支
     if not qr.passed:
         # FR-6.4:失败只写日志,不弹通知
         self.log.log_quality_fail(
@@ -1690,23 +1747,72 @@ def _process_one(self, task) -> SubtitleWindowItem | None:
         if subtitle.source == "plugin":
             self.plugin_status.mark_unavailable(reason="plugin_quality_fail")
             self.log.warning("插件字幕质量不过关,标记 unavailable,降级到策略 ③")
+        # quality_fail → 不调 Refine,不删音频,保留供 retry / 排查
         return None
 
-    # 通过:清理音频 + 进度通知(非阻塞)
-    self.transcriber.cleanup(self._audio_path(task.id))
+    # Step 4: 通过 → 显式删音频 + Refine(FR-3.9 v3.2:Refine 移到质量门控后)
+    audio_path = self._audio_path(task.id)
+    if audio_path is not None and audio_path.exists():
+        try:
+            audio_path.unlink()
+            self.log.info(f"🗑️ 质量通过,删除音频:{audio_path}")
+        except Exception as e:
+            # 删失败不阻塞流程,只 log
+            self.log.warning(f"⚠️ 删音频失败 {audio_path}:{e}")
+
+    refined_text = subtitle.text
+    if self.config.quality_check.refine_enabled:
+        try:
+            refinement = self._refiner.refine(subtitle.text, task.title)
+            if refinement.cleaned_text:
+                refined_text = refinement.cleaned_text
+                self.log.info(
+                    f"✨ Refine 完成:{len(subtitle.text)} → {len(refined_text)} 字,"
+                    f"corrections={len(refinement.corrections)}",
+                )
+        except Exception as e:
+            # FR-3.9 fallback:Refine 失败用原文,不阻塞
+            self.log.warning(f"⚠️ Refine 失败,用原文:{e}")
+
+    # Step 5: 关键路径 Phase C 末尾截图(失败 log warning,不阻塞)
+    if self._browser_driver is not None and self.config.chrome_session.enabled:
+        try:
+            page = self._ensure_page_for_url(str(task.url))
+            self._screenshot.phase_c_end(
+                page, task.id, task.title, task.expected_duration,
+            )
+        except Exception as e:
+            self.log.warning(
+                f"📸 Phase C 截图失败,继续流程 {task.title}:{e}",
+            )
+            self.log.log_screenshot_fail(
+                task.id, task.title, str(task.url), "phase_c", str(e),
+            )
+
+    # 进度通知(非阻塞)+ 返回 window item(让 quota.add 累加)
     self.notifier.info(
         "✓ 质量通过",
         f"{task.title}({qr.score}分),已加入总结窗口",
     )
-
-    # 返回 window item(让 quota.add 累加)
     return SubtitleWindowItem(
         title=task.title,
-        text=subtitle.text,
+        text=refined_text,
         quality=qr,
         source=subtitle.source,
         duration_sec=task.expected_duration,
     )
+
+
+def _ensure_page_for_url(self, url: str):
+    """复用 self._page 槽,只换 URL(不重建 context)
+
+    - 第一次调用 → new_background_page
+    - 后续调用 → page.goto(url, wait_until="domcontentloaded")
+    """
+    if self._page is None:
+        self._page = self._browser_driver.new_background_page()
+    self._page.goto(url, wait_until="domcontentloaded")
+    return self._page
 
 def _trigger_summary(self, group_title: str | None):
     """触发 6h 批量总结"""
@@ -1748,7 +1854,7 @@ def _url_key(self, task: VideoTask) -> str:
     return HistoryManager.make_url_key(task.group_id, task.bvid)
 ```
 
-**关键边界(注释强提醒)**:
+**关键边界(注释强提醒,2026-09-07 v3.2 更新)**:
 
 ```python
 # ① _process_one 内部不直接写 history,由 run 统一写
@@ -1757,6 +1863,10 @@ def _url_key(self, task: VideoTask) -> str:
 # ③ 插件字幕质量不过关 → 标记 unavailable + 写 quality_fail(FR-2.11)
 # ④ 累加器 >= 6h → 触发总结 + session 停止(FR-9.4)
 # ⑤ history 是 session 级单例,跨视频组共享
+# ⑥ 关键路径截图:Phase A 失败 → 跳过视频(FR-2.28 决策 A);Phase C 失败 → 仅 log warning,不阻塞
+# ⑦ quality.passed → 显式 unlink 音频 + Refine(FR-3.9 v3.2);quality_fail → 不调 Refine,不删音频
+# ⑧ Chrome Session 启动失败 → 降级无截图模式继续处理(只截图缺失)
+# ⑨ page 槽复用:每条视频只 page.goto,不复建 context(性能 + 状态保持)
 ```
 
 #### CLI(`cli.py`)
@@ -1874,6 +1984,119 @@ def test_official_subtitle():
 
 ---
 
+## Phase 9.5:Asset Pipeline Producer-Consumer 重构(2026-09-09)
+
+### 必读
+- `docs/superpowers/specs/2026-09-09-asset-pipeline-design.md` — 本 Phase 9.5 的 SSOT
+- `docs/superpowers/plans/2026-09-09-asset-pipeline-refactor.md` — 12-task 实施计划
+- `.superpowers/sdd/2026-09-09-asset-pipeline-refactor/` — 12 task brief + report + ledger
+
+### 设计要点
+- **拆分动机**:`text_provider` 单 callable 把"取字幕/音频"与"转写/质量/Refine/落盘/清理"耦合在一起,`audio_path` 二态协议泄露 audio 生命周期,且 scan_today_dir 隐藏在 strategy 内部,F2-10 ready 检测无注入点。
+- **拆法 Option B**:`text_provider` 拆成 `fetch_asset` (输入链:字幕 + 抽音 + scan 兜底) + `process_asset` (处理链:转写 + 质量 + Refine + save + cleanup);中间留口给 main.py 调度。
+- **接口面**:`Asset` / `ProcessResult` dataclass(frozen)作为数据契约;`build_text_provider(...)` 工厂返回 `(FetchAssetFn, ProcessAssetFn)` 二元组。
+- **降级语义**:`fetch_asset` 4 路径(字幕策略 → internal_spider → VideoSourceFactory → scan_today_dir),任一路径兜底失败 → 返回 `None`,`main._process_one` log transcribe_fail + skip。
+- **scan 透明化**:`strategy._try_browser` 弹窗 enabled 分支只返 `SubtitleResult(audio_path=webm)`,不再内部调 transcribe;转写 + sidecar 标记由 `process_asset` 统一负责。
+- **生命周期**:`Asset.deletable: bool` 明确标注 wav 是否我方产物(可删);webm 用户产物 `deletable=False`(保留);scan 路径 wav `deletable=True`(我方抽)。
+- **新视频源**:内部学习平台(`b-learning.bill-jc.com`)走 API-driven spider(纯 m3u8,不开浏览器);`InternalSiteSpider` 占位 stub,实装走单独 PR。
+- **遗留 / 不做**:FR-2.27 worker 池 / FR-2.22 三路径清理 / 截图异步化 / 内部源截图 / 工厂统一 → 全部走 `backlog.md`。
+
+### 文件清单
+| 文件 | 改动类型 | 说明 |
+|---|---|---|
+| `src/vla/models.py` | 改 | + `Asset` / `ProcessResult` dataclass;`SubtitleResult` + `audio_path` 字段 |
+| `src/vla/main_provider.py` | 改 | `RealTextProvider` 拆 `fetch_asset` + `process_asset`;`build_text_provider` 返回二元组;+ 可选 `log`/`checker`/`refiner`/`strategy` kwargs(Task 12) |
+| `src/vla/main.py` | 改 | `_process_one` 改薄,注入 `fetch_asset` + `process_asset`;audio_path 处理迁出 |
+| `src/vla/subtitle/strategy.py` | 改 | `_try_browser` 弹窗 enabled 分支返回 `SubtitleResult(text=None, audio_path=webm)`,不调 transcribe;清理 Tab Audio Recorder 历史注释 |
+| `src/vla/transcribe/extract.py` | 新 | `extract_audio(input_path, output_path)` 模块级函数 |
+| `src/vla/transcribe/streaming.py` | 改 | `transcribe(audio_path: Path) -> str` 签名变纯;删 `_extract_audio` + 内部 MP4 unlink |
+| `src/vla/subtitle/internal_site_spider.py` | 新(占位 stub) | API-driven spider,实装走单独 PR |
+| `src/vla/capture/screenshot_phase_controller.py` | 改 | 清理 "Tab Audio Recorder fallback" 注释 |
+| `src/vla/audio/source_factory.py` | 改 | 清理 "path ② TabAudioRecorder" 注释 |
+| `src/vla/audio/queue.py` | 改 | 清理 "Tab Audio Recorder 路径" 注释 |
+| `src/vla/subtitle/internal_site_adapter.py` | 改 | 删 unused `tab_recorder` import / 参数 |
+| `src/vla/subtitle/bilibili_adapter.py` | 改 | 精简 Tab Audio Recorder 注释 |
+| `scripts/spike_f26_pipeline.py` | 改 | 装配改用 `build_text_provider` 新返回(Task 12) |
+| `scripts/probe_bill_jc*.py` | 新(探勘脚本) | 抓 b-learning.bill-jc.com 详情页 + API 真实请求格式 |
+| `tests/test_extract_audio.py` | 新 | 4 分支覆盖(ffmpeg helper) |
+| `tests/test_fetch_asset.py` | 新 | fetch_asset 路径覆盖 |
+| `tests/test_process_asset.py` | 新 | process_asset 路径覆盖 |
+| `tests/test_subtitle_strategy.py` | 改 | 弹窗 enabled 分支返回 SubtitleResult, 不调 transcribe |
+| `tests/test_streaming.py` | 改 | `transcribe(audio_path)` 新签名;断言不调 ffmpeg |
+| `tests/test_video_learning_agent.py` | 改 | stub 接口对齐 |
+| `tests/test_main_provider.py` | 改 | 占位测试替换为真实接口测试 |
+| `tests/test_internal_site_spider.py` | 新 | InternalSiteSpider 占位 stub 单元测试 |
+| `tests/test_main_provider.py` | 改 | `build_text_provider` 二元组返回测试 |
+| `docs/superpowers/backlog.md` | 改 | + §6 内部源截图 |
+| `implementation-plan.md` | 改 | 本 Phase 9.5 节 |
+| `docs/superpowers/specs/2026-09-09-asset-pipeline-design.md` | 新 | Phase 9.5 设计 SSOT |
+
+### T1–T12 commits(按 ledger 顺序)
+- T1 models.py Asset/ProcessResult dataclass
+- T2 extract.py 模块级抽音函数
+- T3 streaming.transcribe 签名变纯
+- T4 strategy._try_browser 弹窗 enabled 不调 transcribe
+- T5 InternalSiteSpider 占位 stub
+- T6 fetch_asset 骨架 (Task 6)
+- T7 fetch_asset 4 路径实装 + scan_today_dir 末尾兜底
+- T8 process_asset 6 步骤实装
+- T9 build_text_provider 返回二元组
+- T10 cli.py + main.py 迁移到 fetch_asset + process_asset 注入
+- T11 注释清理 (Cmd+Shift+R / Tab Audio Recorder 历史注释)
+- T12 spike_f26_pipeline 装配 + Phase 9.5 文档 + 验收
+
+### 验收代码(spec §5.2 完整 5 步)
+
+```bash
+# 1. 单元测试 — fetch_asset / process_asset / extract / strategy / main_provider / streaming / 模型 / 内部源 stub / 主调度
+uv run pytest tests/test_extract_audio.py tests/test_fetch_asset.py \
+  tests/test_process_asset.py tests/test_subtitle_strategy.py \
+  tests/test_video_learning_agent.py \
+  tests/test_streaming.py tests/test_models.py \
+  tests/test_internal_site_spider.py tests/test_main_provider.py -v
+# 期望:全部 pass
+# 注意:spec 列 `tests/test_main.py` 不存在(T10 发现同样缺陷)→ 用 `test_video_learning_agent.py` 替代;
+# spec 列 `tests/test_transcribe_streaming.py` 实际名为 `tests/test_streaming.py`(T3 ledger 记录)。
+
+# 2. spike 跑通(完整 F2-10 流程,需 Chrome 启 debug + 网络可达)
+uv run python scripts/spike_f26_pipeline.py \
+  --url "https://www.bilibili.com/video/BV1DUgK6cEi3" \
+  --duration 60 \
+  --prep-webm tmp/audio_raw/BV1DUgK6cEi3.wav \
+  --force-popup \
+  --auto-response enabled
+# 期望:stats["passed"] == 1
+# 环境不允许时:`[env-dependent] skip`(只验证 import + 参数解析)。
+
+# 3. 验证 audio_path 协议消失
+grep -rn "audio_path" src/vla/main.py
+# 期望:无输出(0 业务逻辑引用)
+
+# 4. 验证 transcriber 签名变纯
+grep -n "_extract_audio\|out_dir" src/vla/transcribe/streaming.py
+# 期望:无输出
+
+# 5. 验证 Cmd+Shift+R 残留清理
+grep -rn "Cmd+Shift+R\|tab_recorder\.start_recording" src/ scripts/ tests/ \
+  | grep -v "macos_notify\|tab_audio_recorder\.py\|test_e2e\|test_macos_notify\|test_tab_audio_recorder\|spike_f26\|spike_f25"
+# 期望:仅保留类(用户操作指引 / 测试 fixture),T11 留 8 行保留类
+```
+
+### 验收清单
+- [ ] 验收 #1:单元测试全绿(`test_main.py` 用 `test_video_learning_agent.py` 替代;`test_transcribe_streaming.py` 用 `test_streaming.py` 替代)
+- [ ] 验收 #2:spike 跑通(或 `[env-dependent] skip`)
+- [ ] 验收 #3:`grep audio_path src/vla/main.py` 0 业务逻辑命中
+- [ ] 验收 #4:`grep _extract_audio\|out_dir src/vla/transcribe/streaming.py` 0 命中
+- [ ] 验收 #5:`grep Cmd+Shift+R` 仅保留类
+- [ ] `uv run vla doctor` 全 OK
+- [ ] commit: spike + backlog + implementation-plan 3 文件落地
+
+### SSOT 同步
+- `requirements.md`:无新增 FR(spec §1 明确"Out of scope"清单无变化)
+- `implementation-plan.md`:本 Phase 9.5 节
+
+---
+
 ## 关键依赖关系图
 
 ```text
@@ -1986,7 +2209,96 @@ uv run python /tmp/hover_screenshot_v4.py
 
 ---
 
-## 进度跟踪
+## F2-6:v3.2 重构(2026-09-07 F2-5 spike 暴露的全流程问题)
+
+### 必读
+- [[requirements#FR-2.28]] 截图关键路径升级(P0)
+- [[requirements#FR-2.15]] Free Tab Audio Recorder 全名 + 启用提示(P1)
+- [[requirements#FR-3.9]] Refine 改在质量门控后(P1)
+- [[requirements#FR-3.7]] 音频删除时机显式化(P1)
+- [[requirements#FR-4.x]] 质量门控文本长度维度(P1)
+- F2-5 全链路 spike:`scripts/spike_f25_full_pipeline.py`(2026-09-07 验证)
+- 真实 B站样本:`logs/transcripts/BV1DUgK6cEi3.refined.txt`(145 行 = 32 处修正的实证)
+
+### 文件清单
+- `src/vla/main.py` — `VideoLearningAgent` 加 `_browser_driver` + `_screenshot` + `_refiner` 注入(FR-2.28 + FR-3.9)
+- `src/vla/quality/checker.py` — 加 length gate(`min_chars`)+ 更新 PROMPT 强调长度维度
+- `src/vla/transcribe/streaming.py` — 移除 Refine 注入(改由 main.py 调)
+- `src/vla/subtitle/browser_driver.py` — Chrome Session 模式 + page 槽复用
+- `src/vla/subtitle/platform_adapter.py` — `match_keyword` 默认值 `"free tab audio recorder"`
+- `src/vla/ui/macos_notify.py` — B 级通知文案明 "Free Tab Audio Recorder" + `chrome://extensions/` 入口
+- `config/vla.yaml` — `quality_check.min_chars: 50` + `chrome_session.enabled: true` + `trigger_strategy: always`
+- `tests/test_bilibili_adapter.py` / `tests/test_platform_adapter.py` — match_keyword 改名 + chrome_session 行为测试
+- `tests/test_video_learning_agent.py`(新建)— 截图 + refine 集成测试
+- `tests/test_quality.py`(扩展)— length gate + 新 PROMPT 测试
+
+### 子任务
+
+#### F2-6.1 截图升级为关键路径(FR-2.28,P0)
+- **改前**:Phase A/C 截图是"仅策略 ③ 兜底路径"的辅助;字幕 None 时跳截图
+- **改后**:截图是**所有**视频的关键路径,优先级**高于**字幕转写;Chrome 必须 navigate(每条视频 `page.goto(url)`)
+- **失败处理**:Phase A 截图失败 → 跳过本视频(FR-2.28 决策 A);Phase C 失败 → 仅 `log.warning` + 不阻塞
+- **Session 启动失败** → 降级无截图模式继续处理(只截图缺失,字幕流程照常)
+- **配置新增**:`chrome_session.enabled`(默认 true)+ `chrome_session.debug_port`(默认 9222)
+- **TDD 顺序**:`tests/test_video_learning_agent.py` 写 "Phase A fail → 返回 None" / "Phase A ok → 继续字幕" / "Chrome 启失败 → log warning + 继续" → RED → 实现 → GREEN
+- **接入点**:`main.py._process_one` Step 0(开头)+ Step 5(末尾)
+
+#### F2-6.2 Free Tab Audio Recorder 全名 + 启用提示(FR-2.15/2.21,P1)
+- **改前**:`match_keyword="tab audio recorder"` + B 级通知文案模糊
+- **改后**:
+  - `match_keyword` 默认 `"free tab audio recorder"`(扩展全名)
+  - `trigger_strategy="always"`(不再依赖 manifest 检测)
+  - B 级通知文案明确 "Free Tab Audio Recorder 已安装但未启用 → 请在 chrome://extensions/ 启用"
+  - 弹窗文案 "Free Tab Audio Recorder" + `Cmd+Shift+R` 热键提示
+- **动态 ext_id**:`chrome.management.getAll()` 拿真实 ext_id(替代硬编码)
+- **TDD 顺序**:`tests/test_bilibili_adapter.py` 写 "扩展名是 Free Tab Audio Recorder 时命中" / "扩展名是 Tab Audio Recorder(短名)时不命中" → RED → 实现 → GREEN
+
+#### F2-6.3 Quality → Refine 顺序调整(FR-3.9,P1)
+- **改前**:`StreamingTranscriber.transcribe()` 末尾自动注入 `refiner.refine(...)`;Refine 不论质量都跑
+- **改后**:
+  - `StreamingTranscriber` 移除 Refine 注入,只剩 Level 1 本地清理(`clean_transcript`)
+  - `main.py._process_one` 在 `quality.passed=True` 之后**显式**调 `refiner.refine(...)`
+  - quality_fail → 不调 Refine,不浪费 L4 云端 token
+  - Refine 现在是 summary 的前置工作(强调"保留关键概念/术语/数字/人名")
+- **质量门控加 length gate**:`char_count < min_chars`(默认 50)→ fail score=5 + 提示文本过短
+- **PROMPT 强调长度**:"文本长度合理性" 列为检查维度 1(原本是次要维度)
+- **TDD 顺序**:
+  - `tests/test_quality.py`:文本 30 字 → fail / 文本 100 字 → 继续 / PROMPT 含"文本长度" → RED → 实现 → GREEN
+  - `tests/test_video_learning_agent.py`:quality_fail → 不调 refine(mock 验证) / quality_pass → refine 调 + 失败 fallback 用原文
+
+#### F2-6.4 音频删除时机显式化(FR-3.7,P1)
+- **改前**:`streaming.py.cleanup()` 由 `main.py` 在质量通过后调;逻辑藏在 streaming 内部
+- **改后**:
+  - `streaming.py` 不再暴露 cleanup 方法(改 `_cleanup_audio` 内部)
+  - `main.py._process_one` Step 4 显式:`if quality.passed: audio_path.unlink() + log`
+  - quality_fail → **不删音频**,保留供 retry / 排查(写 quality_fail.csv 时同步 cp 到 logs/audio_quality_failed/)
+  - 注释强提醒:删失败不阻塞,只 log warning
+- **TDD 顺序**:`tests/test_video_learning_agent.py` 写 "quality_pass → audio_path 删" / "quality_fail → audio_path 保留" / "删失败 → log warning + 继续" → RED → 实现 → GREEN
+
+### 验收
+
+```bash
+# 1. F2-6 新增测试全过
+uv run pytest tests/test_video_learning_agent.py \
+  tests/test_quality.py tests/test_bilibili_adapter.py \
+  tests/test_platform_adapter.py -v
+
+# 2. 整 suite 不回归
+uv run pytest -q
+
+# 3. doctor 通过
+uv run vla doctor
+
+# 4. 真实 spike 对照(F2-6 集成)
+uv run python scripts/spike_f26_pipeline.py
+# 期望:Phase A 截图 → Free Tab Audio Recorder 检测(动态 ext_id) → 字幕 → Refine → Phase C 截图
+```
+
+### SSOT 同步
+- 本节 4 子任务 ↔ `requirements.md` FR-2.28 + FR-2.15/2.21 + FR-3.9 + FR-3.7 + FR-4.x 一一对应
+- 任何调整先改 `requirements.md` → 同步本节 → 改代码 → 跑验收
+
+---
 
 每完成一个 Phase,在本文件追加状态:
 
@@ -2034,6 +2346,14 @@ uv run python /tmp/hover_screenshot_v4.py
     - 测试:37 个单元测试覆盖 properties / 调用参数 / JSON 鲁棒解析 / 成功路径 / 失败 fallback / 长度超限 / 真实场景 / 落盘格式,full suite 417 passed
     - 集成 spike:`scripts/spike_refiner_integration.py` 端到端跑通(本地 clean → LLM refine → 落盘),real transcript 320 行 → 79 行 → 356 字符 + 7 条 corrections
 ```
+
+- [x] F2-6 v3.2 重构(2026-09-07 完成,基于 F2-5 spike 暴露的全流程问题):
+  - [x] F2-6.1 截图升级为关键路径(FR-2.28,P0)— `main.py._process_one` 加 Step 0 Phase A + Step 5 Phase C;Chrome Session 启失败降级无截图;page 槽复用 `page.goto(url)` 不复建 context
+  - [x] F2-6.2 Free Tab Audio Recorder 全名 + 启用提示(FR-2.15/2.21,P1)— `match_keyword="free tab audio recorder"` + `trigger_strategy="always"` + B 级通知文案 "Free Tab Audio Recorder 已安装但未启用 → 请在 chrome://extensions/ 启用";动态 `chrome.management.getAll()` ext_id
+  - [x] F2-6.3 Quality → Refine 顺序调整(FR-3.9,P1)— `streaming.py` 移除 Refine 注入(只 Level 1 本地清理);`main.py._process_one` Step 4 `quality.passed=True` 后显式 `refiner.refine(...)`;quality_fail 不调 Refine 不浪费 L4 token;QualityChecker 加 length gate(`min_chars=50`)+ PROMPT "文本长度合理性" 维度 1
+  - [x] F2-6.4 音频删除时机显式化(FR-3.7,P1)— `streaming.py` 不暴露 cleanup;`main.py._process_one` Step 4 显式 `if quality.passed: audio_path.unlink() + log`;quality_fail 保留音频供 retry(cp 到 `logs/audio_quality_failed/`);删失败 log warning 不阻塞
+  - 集成 spike:`scripts/spike_f26_pipeline.py` 端到端跑通(Phase A 截图 → 字幕 → Refine → Phase C 截图),样本 `BV1DUgK6cEi3` 145 行 + 32 处修正
+  - SSOT 同步:`requirements.md` v3.2 changelog(14 改动点 + 4 删减点 + 5 新增点);FR-2.15/2.21/2.28/3.7/3.8/3.9/4.x 全部更新
 
 ---
 
