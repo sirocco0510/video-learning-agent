@@ -14,9 +14,8 @@ B站平台的 PlatformAdapter 实现:
 (BilibiliAdapter 不自己构造),保证职责单一 + 易测试。
 
 **F2-10 (2026-09-08) 删 tab_recorder / screenshot_controller 依赖**:
-  Tab Audio Recorder 改"用户手动下载 → 代码扫今天目录",路径迁到
-  strategy._try_browser 弹窗 enabled 分支。截图由 main.py 触发
-  ScreenshotPhaseController,不再由 adapter 副管。
+  改成"用户手动下载 → 代码扫今天目录",路径迁到 strategy._try_browser
+  弹窗 enabled 分支。截图由 main.py 直接调 ScreenshotPhaseController。
 """
 
 from __future__ import annotations

@@ -191,7 +191,7 @@ class SubtitleStrategy:
         remind_timeout_sec: int,
         *,
         audio_factory: "AudioSourceFactory",
-        tab_recorder: "TabAudioRecorder",
+        tab_recorder: "TabAudioRecorder",  # F2-10:probe-only, 无生产调用,保留兼容测试 fixture
         transcriber: "AudioTranscriber",
         screenshot_controller: "ScreenshotPhaseController | None" = None,
         plugin_name: str = "VideoTrans",
@@ -209,7 +209,7 @@ class SubtitleStrategy:
             plugin_status: PluginStatus(必填 — FR-2.9/2.10 session 单例)
             remind_timeout_sec: 弹窗超时(秒),默认 30
             audio_factory: F2-7 必填 — 传给 adapter.fetch_via_recording path ①
-            tab_recriber: F2-7 必填 — 传给 adapter.fetch_via_recording path ②
+            tab_recorder: F2-7 必填(F2-10 后 probe-only)— 保留签名兼容既有测试
             transcriber: F2-7 必填 — 传给 adapter.fetch_via_recording
             screenshot_controller: F2-7 可选 — FR-2.28 PHASE A/B/C/D 触发器
             plugin_name: 弹窗里展示的插件名
@@ -268,7 +268,7 @@ class SubtitleStrategy:
             try:
                 # FR-2.12 enum:source ∈ {api, browser, whisper}
                 # - 字幕探测纯命中 → "browser"
-                # - 录制路径(Screen Recorder / Tab Audio Recorder)→ "whisper"
+                # - 录制路径 → "whisper"
                 #   (metadata.via 区分具体路径)
                 source = "whisper" if (
                     isinstance(meta, dict)
@@ -285,8 +285,8 @@ class SubtitleStrategy:
         # 改为 to_thread 隔离到 default executor。
         try:
             # F2-10:tab_recorder / screenshot_controller 已从 PlatformAdapter.fetch_via_recording
-            # 签名删除 — 不再传。Tab Audio Recorder 路径迁到本类 _try_browser 弹窗 enabled
-            # 分支;截图由 main.py 直接调 ScreenshotPhaseController 触发。
+            # 签名删除 — 不再传。scan 路径迁到 fetch_asset path ④ 兜底;
+            # 截图由 main.py 直接调 ScreenshotPhaseController 触发。
             result = await asyncio.to_thread(
                 adapter.fetch_via_recording,
                 self.driver,
@@ -405,7 +405,7 @@ class SubtitleStrategy:
         旧实现调 driver.new_background_page() 开空白 tab — 跟 Phase A/C v3.2.1.8 修复的
         "开了新空白页tab" 抱怨同源。修法:跟 Phase A 一致,从 url 提 bvid,用
         find_page_by_url_substring 复用现有 tab;找不到 → return None
-        (popup 仍会弹,但跳过 pause video — 用户已 Cmd+Shift+R 启停后,暂停不重要)。
+        (popup 仍会弹,但跳过 pause video — 用户已手动录屏后,暂停不重要)。
 
         设计动机:
         - 用户已经在 Chrome 打开 B站(他自己按播放);popup 期间我们不应再加 tab

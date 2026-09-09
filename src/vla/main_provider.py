@@ -282,7 +282,7 @@ def build_text_provider(
     )
 
     # F2-8:不再自动构造旧 Screen Recorder。弹窗 enabled 路径已废弃 —
-    # 真实录屏兜底走策略 ③ adapter.fetch_via_recording(yt-dlp / Tab Audio Recorder)。
+    # 真实录屏兜底走策略 ③ adapter.fetch_via_recording(只剩 yt-dlp path ①)。
     # driver 仍按需自动连 Chrome CDP。
     if driver is None:
         driver = _try_connect_chrome(cfg, transcriber, notifier)

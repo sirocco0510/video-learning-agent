@@ -1,7 +1,6 @@
 """ScreenshotPhaseController:4-phase 截图管线(SSOT: spec 2026-09-03-fr2-fr3 §3.7)。
 
-FR-2.28 触发点:PlatformAdapter.fetch_via_recording path ② (Tab Audio Recorder fallback)。
-路径① yt-dlp 不触发(无浏览器 page)。
+FR-2.28 触发点:PlatformAdapter.fetch_via_recording path ① (yt-dlp 不触发,无浏览器 page)。
 """
 from __future__ import annotations
 

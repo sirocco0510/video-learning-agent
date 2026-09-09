@@ -15,7 +15,7 @@ class AudioTask:
     """音频转写任务单元.
 
     Attributes:
-        audio_id: 唯一标识(yt-dlp 路径用 bvid,Tab Audio Recorder 路径用 extension-assigned id)。
+        audio_id: 唯一标识(yt-dlp 路径用 bvid)。
         audio_path: 已落盘的音频文件路径(.wav / .webm)。
         video_meta: 透传给下游 quality / summarize 的元数据(bvid / title / duration_sec / group_id)。
     """

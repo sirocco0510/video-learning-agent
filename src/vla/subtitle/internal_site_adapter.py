@@ -16,6 +16,11 @@ F2-7 改造:
 - __init__ 接 4 F2-7 deps(audio_factory / tab_recorder / transcriber / screenshot_controller),
   存为 private attributes;fetch_via_recording stub 仍返回 None
   (等内部站真正接入后再考虑 override 转发 base impl)
+
+F2-10 (2026-09-08) 状态:
+- tab_recorder / screenshot_controller 已无生产调用,但 __init__ 签名保留以兼容
+  tests/test_internal_site_adapter.py `_stub_deps()` 注入 MagicMock
+  (删除会触发 TypeError, 安全移除留待后续统一清理 PR)
 """
 
 from __future__ import annotations

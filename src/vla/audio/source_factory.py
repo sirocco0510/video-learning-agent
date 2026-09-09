@@ -30,7 +30,7 @@ class AudioExtractionResult:
     """音频抽取结果(SSOT: spec §3.2)。"""
 
     audio_path: Path
-    source: str  # 当前实现固定 "yt-dlp"(path ② TabAudioRecorder 会用别的 source)
+    source: str  # 当前实现固定 "yt-dlp"
     duration_sec: int
 
 
@@ -61,7 +61,7 @@ class AudioSourceFactory:
     def is_downloadable(self, url: str) -> bool:
         """FR-1.4: yt-dlp --simulate 先验证 URL 可下载。
 
-        返回 True / False,不抛。失败 = 不可下载(主调度走 path ② TabAudioRecorder)。
+        返回 True / False,不抛。失败 = 不可下载(主调度走策略 ③ fetch_via_recording)。
         ~2-5s typical;timeout 默认 30s。
         """
         try:
