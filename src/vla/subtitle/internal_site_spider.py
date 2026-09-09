@@ -14,13 +14,12 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import httpx
 from playwright.async_api import async_playwright
 
-if TYPE_CHECKING:
-    from vla.models import VideoTask
+from vla.models import VideoTask
 
 
 logger = logging.getLogger(__name__)
@@ -109,8 +108,73 @@ class InternalSiteSpider:
         root_label: str | None = None,
         limit: int = 10,
     ) -> list[VideoTask]:
-        # 实装见 Task 3
-        raise NotImplementedError("实装见 Task 3")
+        """爬 tree + pagelist → VideoTask list(最多 limit 条)。
+
+        Args:
+            root_label: 限定根目录 label(如 "技术分享");None = 全树。
+            limit: 最多返回多少条 VideoTask。
+
+        Raises:
+            RuntimeError: cookie 借取失败或 tree HTTP 非 200。
+            ValueError: root_label 在目录树里找不到。
+        """
+        cookies = await self._borrow_cookies()
+        headers = {**_DEFAULT_HEADERS, "Cookie": self._cookie_header(cookies)}
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            # 第 1 步:tree(拿 catalog 树)
+            tree_resp = await client.post(
+                _TREE_URL,
+                json={"pmType": "0", "collegeId": self.college_id},
+                headers=headers,
+            )
+            if tree_resp.status_code != 200:
+                raise RuntimeError(
+                    f"tree 失败 status={tree_resp.status_code}(cookie 可能过期): "
+                    f"{tree_resp.text[:300]}"
+                )
+            leaves = _flatten_leaves(tree_resp.json() or [], root_label=root_label)
+            logger.info("catalog tree → %d 个非空叶子(root_label=%r)", len(leaves), root_label)
+
+            # 第 2 步:对每个叶子 catalog 调 pagelist,累积到 limit 条
+            tasks: list[VideoTask] = []
+            for leaf in leaves:
+                if len(tasks) >= limit:
+                    break
+                page_resp = await client.post(
+                    _PAGELIST_URL,
+                    params={"limit": 16, "offset": 0, "orderType": "desc", "orderBy": "createTime"},
+                    json={
+                        "collegeId": self.college_id,
+                        "catalogId": leaf["id"],
+                        "title": "",
+                        "type": "",
+                        "allTag": 1,
+                        "tagIds": [],
+                    },
+                    headers=headers,
+                )
+                if page_resp.status_code != 200:
+                    logger.warning(
+                        "pagelist catalog=%s 失败 status=%d,跳过该目录",
+                        leaf["id"],
+                        page_resp.status_code,
+                    )
+                    continue
+                for v in page_resp.json().get("datas") or []:
+                    if len(tasks) >= limit:
+                        break
+                    kng_id = v["id"]
+                    tasks.append(
+                        VideoTask(
+                            id=kng_id,
+                            title=v.get("title") or f"kng-{kng_id}",
+                            url=f"https://b-learning.bill-jc.com/learn/{kng_id}",
+                            expected_duration=3600,
+                        )
+                    )
+
+        return tasks
 
     async def fetch_m3u8(self, kng_id: str) -> str:
         """走 preinit + kngPlay, 返回 resolution 匹配的 m3u8 URL。
@@ -160,3 +224,46 @@ class InternalSiteSpider:
         url = match["url"] if match else play_details[0]["url"]
         logger.info("fetch_m3u8 kng=%s resolution=%s → %s", kng_id, self.resolution, url)
         return url
+
+
+def _flatten_leaves(
+    tree: list[dict[str, Any]],
+    *,
+    root_label: str | None,
+) -> list[dict[str, Any]]:
+    """递归找 catalog 树里 kngCount > 0 的叶子节点(无 children 的节点)。
+
+    root_label 非空 → 只返回该子树内的叶子;多个子树同名时取 DFS 首个匹配
+    (确定性,spec §4.1);无匹配 → ValueError,让用户重选而非悄悄返空。
+    """
+
+    def _find_subtree(nodes: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+        """DFS 找首个 label == root_label 的节点,返回 [该节点] 作为遍历范围。"""
+        for node in nodes:
+            if node.get("label") == root_label:
+                return [node]
+            found = _find_subtree(node.get("children") or [])
+            if found is not None:
+                return found
+        return None
+
+    if root_label is None:
+        scope = tree
+    else:
+        matched = _find_subtree(tree)
+        if matched is None:
+            raise ValueError(f"root_label not found in catalog tree: {root_label!r}")
+        scope = matched
+
+    leaves: list[dict[str, Any]] = []
+
+    def _walk(nodes: list[dict[str, Any]]) -> None:
+        for node in nodes:
+            children = node.get("children") or []
+            if children:
+                _walk(children)
+            elif node.get("kngCount", 0) > 0:
+                leaves.append(node)
+
+    _walk(scope)
+    return leaves

@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from vla.models import VideoTask
 from vla.subtitle.internal_site_spider import InternalSiteSpider
 
 
@@ -78,6 +79,11 @@ def _fake_client(post):
     client.__aexit__ = AsyncMock(return_value=None)
     client.post = post
     return client
+
+
+async def _fake_cookies():
+    """_borrow_cookies 的 async 替身(list_tasks 里是 await 调用)。"""
+    return [{"name": "tk", "value": "tv", "domain": ".yunxuetang.cn"}]
 
 
 @pytest.mark.asyncio
@@ -169,3 +175,162 @@ async def test_fetch_m3u8_raises_on_401(monkeypatch):
         with pytest.raises(RuntimeError, match="preinit 失败"):
             await spider.fetch_m3u8("kng-x")
     assert fake_post.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_walks_tree_then_paginates(monkeypatch):
+    """list_tasks 调 tree, 找 leaf, 对每个 leaf 调 pagelist, 转 VideoTask。"""
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
+    monkeypatch.setattr(spider, "_borrow_cookies", _fake_cookies)
+
+    tree_payload = [
+        {"id": "leaf-1", "parentId": "root", "label": "技术分享", "kngCount": 2, "children": []},
+        {
+            "id": "node-1",
+            "parentId": "root",
+            "label": "中间",
+            "kngCount": 0,
+            "children": [
+                {
+                    "id": "leaf-2",
+                    "parentId": "node-1",
+                    "label": "叶子2",
+                    "kngCount": 1,
+                    "children": [],
+                }
+            ],
+        },
+    ]
+    pagelist_leaf1 = {
+        "datas": [
+            {"id": "kng-001", "title": "视频1", "coverUrl": "..."},
+            {"id": "kng-002", "title": "视频2", "coverUrl": "..."},
+        ],
+        "totalCount": 2,
+    }
+    pagelist_leaf2 = {
+        "datas": [{"id": "kng-003", "title": "视频3", "coverUrl": "..."}],
+        "totalCount": 1,
+    }
+
+    tree_payloads = []
+    pagelist_calls = []
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        if "tree" in url:
+            tree_payloads.append((json, headers))
+            return MagicMock(status_code=200, json=lambda: tree_payload)
+        if "pagelist" in url:
+            pagelist_calls.append(json["catalogId"])
+            body = pagelist_leaf1 if json["catalogId"] == "leaf-1" else pagelist_leaf2
+            assert json["collegeId"] == "cid"
+            return MagicMock(status_code=200, json=lambda: body)
+        raise ValueError(f"unexpected URL: {url}")
+
+    with patch(
+        "vla.subtitle.internal_site_spider.httpx.AsyncClient", return_value=_fake_client(fake_post)
+    ):
+        tasks = await spider.list_tasks(limit=10)
+
+    # tree 请求带上 collegeId + 借来的 cookie
+    assert tree_payloads[0][0] == {"pmType": "0", "collegeId": "cid"}
+    assert tree_payloads[0][1]["Cookie"] == "tk=tv"
+    # leaf-2 应被 visit(它 kngCount=1 > 0);kngCount=0 的中间节点(node-1)不直接查
+    assert pagelist_calls == ["leaf-1", "leaf-2"]
+    assert len(tasks) == 3
+    assert all(isinstance(t, VideoTask) for t in tasks)
+    assert tasks[0].id == "kng-001"
+    assert tasks[0].title == "视频1"
+    assert str(tasks[0].url) == "https://b-learning.bill-jc.com/learn/kng-001"
+    assert [t.id for t in tasks] == ["kng-001", "kng-002", "kng-003"]
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_filters_by_root_label(monkeypatch):
+    """root_label 只走该子树内的叶子。"""
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
+    monkeypatch.setattr(spider, "_borrow_cookies", _fake_cookies)
+    tree_payload = [
+        {"id": "leaf-1", "parentId": "root", "label": "技术分享", "kngCount": 1, "children": []},
+        {"id": "leaf-2", "parentId": "root", "label": "财务培训", "kngCount": 1, "children": []},
+    ]
+    pagelist_calls = []
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        if "tree" in url:
+            return MagicMock(status_code=200, json=lambda: tree_payload)
+        if "pagelist" in url:
+            pagelist_calls.append(json["catalogId"])
+            body = {"datas": [{"id": f"kng-{json['catalogId']}", "title": "t"}]}
+            return MagicMock(status_code=200, json=lambda: body)
+        raise ValueError(url)
+
+    with patch(
+        "vla.subtitle.internal_site_spider.httpx.AsyncClient", return_value=_fake_client(fake_post)
+    ):
+        tasks = await spider.list_tasks(root_label="技术分享", limit=10)
+    assert pagelist_calls == ["leaf-1"]  # 只访问 leaf-1
+    assert [t.id for t in tasks] == ["kng-leaf-1"]
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_root_label_not_found_raises(monkeypatch):
+    """root_label 找不到 → ValueError。"""
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
+    monkeypatch.setattr(spider, "_borrow_cookies", _fake_cookies)
+    tree_payload = [{"id": "leaf-1", "label": "其他分类", "kngCount": 1, "children": []}]
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        assert "tree" in url, f"root_label 无匹配时不该继续调 {url}"
+        return MagicMock(status_code=200, json=lambda: tree_payload)
+
+    with patch(
+        "vla.subtitle.internal_site_spider.httpx.AsyncClient", return_value=_fake_client(fake_post)
+    ):
+        with pytest.raises(ValueError, match="root_label not found"):
+            await spider.list_tasks(root_label="不存在的目录")
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_respects_limit(monkeypatch):
+    """limit=3 时只返 3 条, 即使 leaf 内有更多。"""
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
+    monkeypatch.setattr(spider, "_borrow_cookies", _fake_cookies)
+    tree_payload = [{"id": "leaf-1", "label": "L", "kngCount": 5, "children": []}]
+    pagelist_body = {"datas": [{"id": f"kng-{i}", "title": f"t{i}"} for i in range(5)]}
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        if "tree" in url:
+            return MagicMock(status_code=200, json=lambda: tree_payload)
+        return MagicMock(status_code=200, json=lambda: pagelist_body)
+
+    with patch(
+        "vla.subtitle.internal_site_spider.httpx.AsyncClient", return_value=_fake_client(fake_post)
+    ):
+        tasks = await spider.list_tasks(limit=3)
+    assert [t.id for t in tasks] == ["kng-0", "kng-1", "kng-2"]
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_skips_empty_leaves(monkeypatch):
+    """kngCount=0 节点不调 pagelist。"""
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
+    monkeypatch.setattr(spider, "_borrow_cookies", _fake_cookies)
+    tree_payload = [
+        {"id": "empty-leaf", "label": "空", "kngCount": 0, "children": []},
+        {"id": "full-leaf", "label": "满", "kngCount": 1, "children": []},
+    ]
+    pagelist_calls = []
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        if "tree" in url:
+            return MagicMock(status_code=200, json=lambda: tree_payload)
+        pagelist_calls.append(json["catalogId"])
+        body = {"datas": [{"id": f"kng-{json['catalogId']}", "title": "t"}]}
+        return MagicMock(status_code=200, json=lambda: body)
+
+    with patch(
+        "vla.subtitle.internal_site_spider.httpx.AsyncClient", return_value=_fake_client(fake_post)
+    ):
+        await spider.list_tasks(limit=10)
+    assert pagelist_calls == ["full-leaf"]
