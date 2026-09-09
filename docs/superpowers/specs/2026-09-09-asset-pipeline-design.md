@@ -1,9 +1,9 @@
 # Asset Pipeline Producer-Consumer 重构设计 (2026-09-09) — Option B
 
 > **Status:** Draft for user review.
-> **Scope:** 把 `text_provider` 拆成两条独立链路 — 输入链(产字幕文件或音频文件) + 处理链(转写 + 质量 + 优化 + 落盘 + 清理);scan_today_dir 转写从 strategy 内部挪到处理链;纳入 F2-10 ready 检测;清理历史 `Cmd+Shift+R` 类残留注释;**新增内部学习平台(`b-learning.bill-jc.com`)作为视频源**(复用 Chrome CDP SSO cookie → 3 个 yunxuetang API → m3u8 URL → ffmpeg → wav,**不**开 BrowserDriver)。
+> **Scope:** 把 `text_provider` 拆成两条独立链路 — 输入链(产字幕文件或音频文件) + 处理链(转写 + 质量 + 优化 + 落盘 + 清理);scan_today_dir 转写从 strategy 内部挪到处理链;纳入 F2-10 ready 检测;清理历史 `Cmd+Shift+R` 类残留注释;**新增内部学习平台(`b-learning.bill-jc.com`)作为视频源**(复用 Chrome CDP SSO cookie → 4 个 yunxuetang API 调用 → m3u8 URL → ffmpeg → wav,**纯 API 不开浏览器,不做截图**;截图走 backlog 后续 PR)。
 > **Predecessor:** 讨论起点 = `main.py:9` 注释 "返回 audio_path 让主调度知道质量失败时音频是否需要保留" 的协议别扭,以及 spike_f26_pipeline 实测中暴露的"录制中 vla 抢半成品 webm" race。
-> **Out of scope:** 截图异步化(已 user deferred,见 `backlog.md` 项 4)、FR-2.27 worker 池并发、FR-2.22 三路径清理 — 全部走 backlog 后续 PR。**InternalSiteSpider API 实现细节**(3 个 yunxuetang API 调用 + Chrome cookie 借用)— 本轮只在 `fetch_asset` 加分支接住 `SubtitleResult(metadata={"video_url": "<m3u8>"})`,Spider 实现走单独 PR;Spider 类本身也走单独 PR。
+> **Out of scope:** 截图异步化(已 user deferred,见 `backlog.md` 项 4)、FR-2.27 worker 池并发、FR-2.22 三路径清理 — **内部源截图(start / near-end)** — 全部走 backlog 后续 PR。**InternalSiteSpider 实现细节** — 本轮只在 `fetch_asset` 加分支接住 `SubtitleResult(metadata={"video_url": "<m3u8>"})`,Spider 实现走单独 PR。
 
 ---
 
@@ -74,10 +74,11 @@ main.run() [串行循环,本轮不改并发]
     │      │     · scan_today_dir 命中 → 抽出 webm → wav
     │      │       返回 Asset(text=None, audio_path=wav, source="whisper_scan",
     │      │                    deletable=True)
-    │      │     · internal_spider 命中(yunxuetang 3 个 API + Chrome SSO cookie 拿 m3u8 URL)
+    │      │     · internal_spider 命中(纯 API 驱动:submit/preinit + kngPlay → m3u8 URL)
     │      │       → ffmpeg 抽 m3u8 → wav
     │      │       返回 Asset(text=None, audio_path=wav, source="whisper_internal_download",
     │      │                    deletable=True)
+    │      │       **注:**"开始学习" 完全程序化 — 不开浏览器 / 不模拟点击 / 不需用户干预
     │      ├─ 全 miss → VideoSourceFactory 下载 MP4
     │      │     · 抽出 MP4 → wav,unlink MP4(FR-3.3)
     │      │     · 返回 Asset(text=None, audio_path=wav, source="whisper_download",
@@ -559,32 +560,32 @@ user 决定(2026-09-09):ready 检测先不做,后续单独 PR。代码维持现�
 
 ### 4.7 `src/vla/subtitle/internal_site_spider.py`(新,API-driven spider)
 
-**职责**:通过 3 个 yunxuetang API 把"b-learning.bill-jc.com 的视频 task"变成"m3u8 URL"。
-**关键发现(2026-09-09 探勘 probe_bill_jc_start.py 验证)**:"开始学习" 按钮的点击**完全可以用 API 程序化替代** —
-实为 `submit/preinit` + `kngPlay` 两个 POST,**不**需要打开浏览器 / 模拟点击 / 用户干预。
-(此前担心"每次手动点开始学习"是误判。)
+**职责**:通过 4 个 yunxuetang API 把"b-learning.bill-jc.com 的视频 task"变成"m3u8 URL"。
+**关键决策(2026-09-09 与用户对齐)**:
+- **不开浏览器** — 之前讨论过"点击开始学习后截图"的需求,用户确认**截图走 backlog**(暂不做),既然不开浏览器就没截图;纯 API 即可。
+- **不模拟点击** — 探勘 probe_bill_jc_start.py 证明"开始学习"按钮的点击 = `submit/preinit` + `kngPlay` 两个 API 调用,完全可程序化。
 
-**核心数据流**:
+**核心数据流(纯 API,4 步)**:
 ```
 task(kngId)
    │
    ├─ POST /kng/kngCatalog/student/tree     # 拿 catalog 树
    │     body: {"pmType": "0", "collegeId": "<cid>"}
-   │     → 用于按叶子 catalog id 拿视频列表(本接口本 spider 不调 pagelist,
+   │     → 用于按叶子 catalog id 拿视频列表(本接口本 spider 不直接调 pagelist,
    │       实际是从 strategy 已扫到的 task 里拿 kngId,直接跳到下面)
    │
    ├─ POST /kng/knowledge/pagelist           # 拿子目录下视频列表(可选,本 spider 不直接调)
    │     body: {"collegeId": "<cid>", "catalogId": "<leaf_id>", ...}
    │     → 实际集成时由 strategy 在 yield task 前调一次
    │
-   ├─ POST /kng/study/submit/preinit         # **关键:开启 study session,等价于"点开始学习"**
+   ├─ POST /kng/study/submit/preinit         # 关键:开启 study session,等价于"点开始学习"
    │     body: {"kngId": "<kngId>", "courseId": "",
    │            "studyParam": {"originOrgId": "", "previewType": 0},
    │            "targetCode": "kng", "targetId": "",
    │            "targetParam": {"taskId": "", "projectId": "", "flipId": "", "batchId": ""},
    │            "customFunctionCode": ""}
    │     → 不返回 m3u8,只是预热(等同用户点击"开始学习"按钮)
-   │     → 实测:跳过此步直接调 kngPlay 也可能返回 200,但 m3u8 URL 鉴权可能失效;
+   │     → 实测:跳过此步直接调 kngPlay 也可能 200,但 m3u8 URL 鉴权可能失效;
    │       探勘推荐两步都调,确保 m3u8 可达
    │
    └─ POST /kng/study/kngPlay                # 拿 m3u8 URL(关键 API)
@@ -607,7 +608,7 @@ class InternalSiteSpider:
     async def list_tasks(self) -> list[VideoTask]:
         """走 tree + pagelist,递归拉所有叶子 catalog 下的视频,生成 VideoTask 列表。"""
     async def fetch_m3u8(self, kng_id: str) -> str:
-        """调 kngPlay,按 resolution 选 playDetails[].url 返回。"""
+        """先调 submit/preinit(开 study session),再调 kngPlay,按 resolution 选 playDetails[].url 返回。"""
 ```
 
 **fetch_asset 集成点**:`strategy.get_subtitle` 调 `InternalSiteSpider.list_tasks()` 之前已经
@@ -617,14 +618,18 @@ class InternalSiteSpider:
 
 **为什么不开 BrowserDriver**(经探勘 probe_bill_jc_play.py 验证):
 - kngPlay 返回完整 m3u8 URL,无需解析页面 DOM
-- 浏览器只用来借 cookie,不参与抓取逻辑
 - 探勘实测:m3u8 URL 是公开 CDN(`video.bill-jc.com/conversion/...`),签名 token 在 URL 里,无需 cookie 拉取
+- "开始学习" 完全可 API 化(无需 UI 点击)
 - 减少 chrome page 开销 + 不抢用户焦点
+
+**截图需求处理**(用户 2026-09-09 决定):
+- "点击开始学习后截图 / 即将结束前截图" → **走 backlog 后续 PR**(本轮不做)
+- 现 spec 不为内部源实现截图;若以后需要,可在 InternalSiteSpider 加 browser 子流程(再开 BrowserDriver)
 
 **探勘脚本(本轮一并落盘)**:
 - `scripts/probe_bill_jc.py` — 抓详情页 network,确认 HLS/m3u8 模式
 - `scripts/probe_bill_jc_api.py` — 抓 catalog tree + pagelist API 真实请求格式
-- `scripts/probe_bill_jc_play.py` — 抓 play 页 kngPlay API 真实请求格式
+- `scripts/probe_bill_jc_play.py` — 抓 play 页 kngPlay + submit/preinit API 真实请求格式
 
 三个 probe 都已在本轮跑通,raw 落到 `logs/probe_bill_jc_*.json`。
 
@@ -760,6 +765,7 @@ grep -rn "Cmd+Shift+R\|tab_recorder\.start_recording" src/ scripts/ tests/ \
 | yunxuetang API 调用需 Chrome SSO cookie(yunxuetang.cn / bill-jc.com 域) | 没 cookie API 直接 401 | InternalSiteSpider 连 `localhost:9222` 借 Chrome cookie;用户未启 Chrome debug 时 fail-fast,提示"请启 Chrome debug" |
 | yunxuetang API 字段 / URL 变更(平台重构) | Spider 集成测试 break | 探勘脚本(probe_bill_jc_api.py / probe_bill_jc_play.py)留作回归工具;Spider 实装 PR 必跑 probe 验证 API 仍 200 |
 | 注释清理可能误删 valid 引用 | 维护者困惑 | §4.8 列出三档分类;review 时逐个核对;保留类的 grep 校验如 §5.2 验收 #5 |
+| 内部源 start / near-end 截图需求 | 用户后续可能要做 | 走 backlog 后续 PR(本轮不做);InternalSiteSpider 现 spec 不开浏览器;若以后要截图,在 Spider 加 browser 子流程即可 |
 
 ---
 
@@ -769,6 +775,7 @@ grep -rn "Cmd+Shift+R\|tab_recorder\.start_recording" src/ scripts/ tests/ \
 |---|---|---|
 | FR-2.27 worker 池并发 | P1 | backlog §2 |
 | FR-2.22 三路径音频清理 | P1 | backlog §3 |
-| 截图异步化 | P2(已 user deferred) | backlog §4 |
+| 截图异步化(B 站源) | P2(已 user deferred) | backlog §4 |
+| **内部源 start / near-end 截图**(2026-09-09 用户提出) | P2(用户决定本轮不做) | spec §4.7 截图需求处理段 |
 | video_source / audio_source 工厂统一 | P3 | backlog §5 |
 | **F2-10 scan ready 检测**(回到 backlog) | P0(用户明示) | backlog §1 |
