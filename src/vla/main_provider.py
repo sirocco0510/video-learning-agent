@@ -272,10 +272,11 @@ def build_text_provider(
         driver: BrowserDriver(可选,字幕策略需要)
         recorder: deprecated(F2-8:旧 Screen Recorder 已删,传参保留但运行时忽略)
         log: TranscriptionLog(可选,默认从 cfg.logging.log_dir 构造)
-        checker: QualityChecker(可选,spike/装配时注入;None 时 process_asset
-                 跳过质量门控,默认 None — 由 spike / 调用方按需注入)
-        refiner: SubtitleRefiner(可选,spike/装配时注入;None 时 process_asset
-                 跳过 Refine)
+        checker: QualityChecker(可选,spike/装配时注入;None 时自动构造
+                 `QualityChecker(cfg)`,供 process_asset 质量门控)
+        refiner: SubtitleRefiner(可选,spike/装配时注入;None 且
+                 `cfg.quality_check.refine_enabled=True` 时自动构造
+                 `SubtitleRefiner(cfg)`,否则保持 None — 避免无谓 LLM 客户端浪费)
         strategy: SubtitleStrategy(可选 — spike 注入预构造的 strategy,内部
                   audio_factory / tab_recorder / bilibili_adapter 等组件可被
                   monkey-patch 复用;None 时内部 auto-construct)
@@ -295,6 +296,18 @@ def build_text_provider(
     save_dir.mkdir(parents=True, exist_ok=True)
 
     log = log or TranscriptionLog(cfg.logging.log_dir)
+
+    # T13 (2026-09-09 asset-pipeline-refactor):auto-construct QualityChecker +
+    # SubtitleRefiner。修复 cli._build_real_provider 不传 checker / refiner 时
+    # process_asset 在 self.checker.check(...) 处 AttributeError 的生产路径 bug
+    # (spike 显式传了 checker / refiner 所以未暴露)。
+    if checker is None:
+        from vla.quality.checker import QualityChecker
+        checker = QualityChecker(cfg)
+    if refiner is None and cfg.quality_check.refine_enabled:
+        from vla.quality.refiner import SubtitleRefiner
+        refiner = SubtitleRefiner(cfg)
+
     source_factory = VideoSourceFactory(tmp_dir=save_dir, log=log, config=cfg)
     if transcriber is None:
         transcriber = StreamingTranscriber(cfg)
