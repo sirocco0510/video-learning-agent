@@ -8,6 +8,9 @@
   - RefinementResult LLM 语义清理结果(2026-09-02 Level 4)
 """
 
+from __future__ import annotations
+
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import BaseModel, Field, HttpUrl
@@ -38,9 +41,39 @@ class SubtitleResult(BaseModel):
       - "whisper":本地 faster-whisper 转写(策略 ③)
     """
 
+    text: str | None = None            # scan / internal_spider 路径可空
+    source: str
+    audio_path: Path | None = None      # 新增(spec §3.2)
+    metadata: dict | None = None
+
+
+@dataclass(frozen=True)
+class Asset:
+    """输入链产出:字幕(text)或音频(audio_path),二选一(spec §3.1)。
+
+    字段语义:
+    - text: 字幕已就绪(API / Browser 命中)
+    - audio_path: 永远是 wav(由 fetch_asset 抽好)
+    - source: "api" | "browser" | "whisper_scan" | "whisper_download" | "whisper_internal_download"
+    - deletable: 质量 pass 后是否 unlink 该 wav
+    """
+    text: str | None
+    source: str
+    audio_path: Path | None
+    deletable: bool = False
+
+    @property
+    def needs_transcribe(self) -> bool:
+        return self.audio_path is not None
+
+
+@dataclass(frozen=True)
+class ProcessResult:
+    """处理链结果(spec §3.3)。"""
     text: str
-    source: str  # "api" | "browser" | "whisper"
-    metadata: dict
+    qr: QualityResult
+    source: str
+    duration_sec: int
 
 
 class QualityResult(BaseModel):

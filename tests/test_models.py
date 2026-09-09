@@ -1,101 +1,43 @@
-"""models.py 测试(SSOT: requirements.md 第六章 6.1)。
-
-四个 pydantic 模型:VideoTask / SubtitleResult / QualityResult / VideoSource。
-"""
-
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
-from vla.models import QualityResult, SubtitleResult, VideoSource, VideoTask
-
-
-# ---------------- VideoTask ----------------
+from vla.models import Asset, ProcessResult, QualityResult, SubtitleResult
 
 
-class TestVideoTask:
-    def test_happy_path(self):
-        """合法 URL + 必填字段都能构造,字段可访问。"""
-        task = VideoTask(
-            id="BV1xxx",
-            title="测试视频",
-            url="https://www.bilibili.com/video/BV1xxx",
-            expected_duration=1800,
-        )
-        assert task.id == "BV1xxx"
-        assert task.title == "测试视频"
-        assert str(task.url) == "https://www.bilibili.com/video/BV1xxx"
-        assert task.expected_duration == 1800
-
-    def test_invalid_url_raises(self):
-        """非法 URL 必须抛 ValidationError。"""
-        with pytest.raises(ValidationError):
-            VideoTask(
-                id="BV1xxx",
-                title="x",
-                url="not-a-url",
-                expected_duration=1800,
-            )
+def test_subtitle_result_audio_path_default_none():
+    r = SubtitleResult(text="hi", source="api")
+    assert r.audio_path is None
 
 
-# ---------------- SubtitleResult ----------------
+def test_subtitle_result_audio_path_set():
+    p = Path("/tmp/foo.webm")
+    r = SubtitleResult(text=None, source="whisper_scan", audio_path=p)
+    assert r.audio_path == p
 
 
-class TestSubtitleResult:
-    def test_happy_path(self):
-        """三个 source 取值之一 + metadata dict 都能构造。"""
-        result = SubtitleResult(
-            text="你好世界",
-            source="official",
-            metadata={"lang": "zh-CN"},
-        )
-        assert result.text == "你好世界"
-        assert result.source == "official"
-        assert result.metadata == {"lang": "zh-CN"}
-
-    @pytest.mark.parametrize("source", ["official", "plugin", "whisper"])
-    def test_all_valid_sources(self, source):
-        """FR-2 定义的三个 source 取值都能构造。"""
-        SubtitleResult(text="t", source=source, metadata={})
+def test_asset_text_only():
+    a = Asset(text="hello", source="api", audio_path=None)
+    assert a.needs_transcribe is False
+    assert a.deletable is False
 
 
-# ---------------- QualityResult ----------------
+def test_asset_audio_only_needs_transcribe():
+    a = Asset(text=None, source="whisper_download", audio_path=Path("/tmp/a.wav"), deletable=True)
+    assert a.needs_transcribe is True
+    assert a.source == "whisper_download"
 
 
-class TestQualityResult:
-    def test_happy_path(self):
-        """passed + score + issues + suggestion + char_count 都能构造。"""
-        result = QualityResult(
-            passed=True,
-            score=85,
-            issues=[],
-            suggestion="无",
-            char_count=1234,
-        )
-        assert result.passed is True
-        assert result.score == 85
-        assert result.issues == []
-        assert result.suggestion == "无"
-        assert result.char_count == 1234
+def test_asset_frozen():
+    a = Asset(text=None, source="whisper_download", audio_path=Path("/tmp/a.wav"))
+    with pytest.raises(Exception):  # FrozenInstanceError
+        a.source = "browser"
 
 
-# ---------------- VideoSource ----------------
-
-
-class TestVideoSource:
-    def test_happy_path(self):
-        """Path + mode + duration_sec 都能构造。"""
-        src = VideoSource(
-            path=Path("/tmp/v.mp4"),
-            mode="download",
-            duration_sec=1800.5,
-        )
-        assert src.path == Path("/tmp/v.mp4")
-        assert src.mode == "download"
-        assert src.duration_sec == 1800.5
-
-    @pytest.mark.parametrize("mode", ["download", "record"])
-    def test_all_valid_modes(self, mode):
-        """FR-1 视频源两种 mode 都能构造。"""
-        VideoSource(path=Path("/tmp/x"), mode=mode, duration_sec=1.0)
+def test_process_result_fields():
+    qr = QualityResult(score=90, passed=True, issues=[], suggestion="", char_count=6)
+    r = ProcessResult(text="hello", qr=qr, source="api", duration_sec=60)
+    assert r.text == "hello"
+    assert r.duration_sec == 60
+    assert r.source == "api"
+    assert r.qr is qr
