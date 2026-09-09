@@ -16,6 +16,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
+import httpx
 from playwright.async_api import async_playwright
 
 if TYPE_CHECKING:
@@ -112,5 +113,50 @@ class InternalSiteSpider:
         raise NotImplementedError("实装见 Task 3")
 
     async def fetch_m3u8(self, kng_id: str) -> str:
-        # 实装见 Task 2
-        raise NotImplementedError("实装见 Task 2")
+        """走 preinit + kngPlay, 返回 resolution 匹配的 m3u8 URL。
+
+        Raises:
+            RuntimeError: cookie 借取失败, preinit/kngPlay HTTP 非 200,
+                          或 playDetails 为空。
+        """
+        cookies = await self._borrow_cookies()
+        headers = {**_DEFAULT_HEADERS, "Cookie": self._cookie_header(cookies)}
+
+        base_payload: dict[str, Any] = {
+            "kngId": kng_id,
+            "courseId": "",
+            "studyParam": {"originOrgId": "", "previewType": 0},
+            "targetCode": "kng",
+            "targetId": "",
+            "targetParam": {"taskId": "", "projectId": "", "flipId": "", "batchId": ""},
+            "customFunctionCode": "",
+        }
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            # 第 1 步:preinit(预热 study session)
+            preinit_resp = await client.post(_PREINIT_URL, json=base_payload, headers=headers)
+            if preinit_resp.status_code != 200:
+                raise RuntimeError(
+                    f"preinit 失败 status={preinit_resp.status_code}(cookie 可能过期): "
+                    f"{preinit_resp.text[:300]}"
+                )
+
+            # 第 2 步:kngPlay(拿 m3u8 URL)
+            kngplay_payload = {**base_payload, "fullname": "", "lang": ""}
+            kngplay_resp = await client.post(_KNGPLAY_URL, json=kngplay_payload, headers=headers)
+            if kngplay_resp.status_code != 200:
+                raise RuntimeError(
+                    f"kngPlay 失败 status={kngplay_resp.status_code}: {kngplay_resp.text[:300]}"
+                )
+
+            data = kngplay_resp.json()
+
+        play_details = data.get("playDetails") or []
+        if not play_details:
+            raise RuntimeError(f"kngPlay 返回空 playDetails: {data}")
+
+        # 选 desc == self.resolution;找不到 fallback 到第一档
+        match = next((p for p in play_details if p.get("desc") == self.resolution), None)
+        url = match["url"] if match else play_details[0]["url"]
+        logger.info("fetch_m3u8 kng=%s resolution=%s → %s", kng_id, self.resolution, url)
+        return url

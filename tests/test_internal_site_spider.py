@@ -70,3 +70,102 @@ async def test_borrow_cookies_raises_with_chrome_debug_hint():
         ap.return_value.__aexit__ = AsyncMock(return_value=None)
         with pytest.raises(RuntimeError, match="Chrome debug"):
             await spider._borrow_cookies()
+
+
+def _fake_client(post):
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    client.post = post
+    return client
+
+
+@pytest.mark.asyncio
+async def test_fetch_m3u8_calls_preinit_then_kngplay(monkeypatch):
+    """fetch_m3u8 顺序调 preinit + kngPlay, 从 playDetails 选 resolution 匹配的 url。"""
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid-1", resolution="720p")
+
+    async def fake_borrow():
+        return [{"name": "tk", "value": "tv", "domain": ".yunxuetang.cn"}]
+
+    monkeypatch.setattr(spider, "_borrow_cookies", fake_borrow)
+
+    kngplay_payload = {
+        "playDetails": [
+            {"url": "https://video.bill-jc.com/a_720p.m3u8", "desc": "720p", "vertical": False},
+            {"url": "https://video.bill-jc.com/a_480p.m3u8", "desc": "480p", "vertical": False},
+            {"url": "https://video.bill-jc.com/a_360p.m3u8", "desc": "360p", "vertical": False},
+        ],
+        "fileId": "uuid-1",
+    }
+    responses = [
+        MagicMock(status_code=200, json=lambda: {"code": 0, "msg": "success"}),
+        MagicMock(status_code=200, json=lambda: kngplay_payload),
+    ]
+    call_log = []
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        call_log.append((url, json, headers))
+        return responses[len(call_log) - 1]
+
+    with patch(
+        "vla.subtitle.internal_site_spider.httpx.AsyncClient", return_value=_fake_client(fake_post)
+    ):
+        url = await spider.fetch_m3u8("kng-id-abc")
+
+    assert url == "https://video.bill-jc.com/a_720p.m3u8"
+    assert len(call_log) == 2
+    assert "preinit" in call_log[0][0]
+    assert "kngPlay" in call_log[1][0]
+    assert call_log[0][1]["kngId"] == "kng-id-abc"
+    assert call_log[1][1]["kngId"] == "kng-id-abc"
+    # cookie 带上了
+    assert call_log[0][2]["Cookie"] == "tk=tv"
+    assert call_log[0][2]["Origin"] == "https://b-learning.bill-jc.com"
+
+
+@pytest.mark.asyncio
+async def test_fetch_m3u8_falls_back_to_first_if_resolution_missing(monkeypatch):
+    """resolution 不存在时 fallback 到 playDetails[0]。"""
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid", resolution="720p")
+
+    async def fake_borrow():
+        return [{"name": "tk", "value": "tv", "domain": ".yunxuetang.cn"}]
+
+    monkeypatch.setattr(spider, "_borrow_cookies", fake_borrow)
+
+    kngplay_payload = {"playDetails": [{"url": "https://video.bill-jc.com/a_480p.m3u8", "desc": "480p"}]}
+    responses = [
+        MagicMock(status_code=200, json=lambda: {"code": 0}),
+        MagicMock(status_code=200, json=lambda: kngplay_payload),
+    ]
+    call_log = []
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        call_log.append(url)
+        return responses[len(call_log) - 1]
+
+    with patch(
+        "vla.subtitle.internal_site_spider.httpx.AsyncClient", return_value=_fake_client(fake_post)
+    ):
+        url = await spider.fetch_m3u8("kng-x")
+    assert url == "https://video.bill-jc.com/a_480p.m3u8"
+
+
+@pytest.mark.asyncio
+async def test_fetch_m3u8_raises_on_401(monkeypatch):
+    """preinit 401 → RuntimeError 提示 preinit 失败, 且不再调 kngPlay。"""
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
+
+    async def fake_borrow():
+        return [{"name": "tk", "value": "tv", "domain": ".yunxuetang.cn"}]
+
+    monkeypatch.setattr(spider, "_borrow_cookies", fake_borrow)
+
+    fake_post = AsyncMock(return_value=MagicMock(status_code=401, text="Unauthorized"))
+    with patch(
+        "vla.subtitle.internal_site_spider.httpx.AsyncClient", return_value=_fake_client(fake_post)
+    ):
+        with pytest.raises(RuntimeError, match="preinit 失败"):
+            await spider.fetch_m3u8("kng-x")
+    assert fake_post.await_count == 1
