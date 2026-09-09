@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from typing import Any
 
 import httpx
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 # yunxuetang 域(大小写不敏感匹配 Playwright cookie["domain"],需 suffix 匹配防 evil-yunxuetang.cn.attacker.com)
 _YUNXUETANG_DOMAINS = (".yunxuetang.cn", ".bill-jc.com")
+
 
 
 def _is_yunxuetang_domain(domain: str) -> bool:
@@ -46,12 +48,17 @@ _PAGELIST_URL = "https://api-phx-ali.yunxuetang.cn/kng/knowledge/pagelist"
 _PREINIT_URL = "https://api-phx-ali.yunxuetang.cn/kng/study/submit/preinit"
 _KNGPLAY_URL = "https://api-phx-ali.yunxuetang.cn/kng/study/kngPlay"
 
-# 公共 header(含 Origin + Referer, yunxuetang 校验)
+# 公共 header:含 Origin + Referer + yunxuetang SPA 自定义字段
+# `source: 501` = PC web 客户端(501 是 yunxuetang 内部枚举值;移动 app 是其他)
+# `yxt-orgdomain` / `x-yxt-product` = 浏览器 SDK 写死的固定值
 _DEFAULT_HEADERS = {
     "Origin": "https://b-learning.bill-jc.com",
     "Referer": "https://b-learning.bill-jc.com/",
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
     "Content-Type": "application/json",
+    "source": "501",
+    "yxt-orgdomain": "b-learning.bill-jc.com",
+    "x-yxt-product": "xxv2",
 }
 
 
@@ -70,6 +77,7 @@ class InternalSiteSpider:
         self.resolution = resolution
         self._cookie_ttl_sec = cookie_ttl_sec
         self._cookie_cache: list[dict[str, Any]] | None = None
+        self._token_cache: str = ""
         self._cookie_fetched_at: float = 0.0
 
     async def _borrow_cookies(self) -> list[dict[str, Any]]:
@@ -82,61 +90,133 @@ class InternalSiteSpider:
         if self._cookie_cache is not None and (now - self._cookie_fetched_at) < self._cookie_ttl_sec:
             return self._cookie_cache
 
+        cookies, _ = await self._fetch_cookies_and_token()
+        self._cookie_cache = cookies
+        self._cookie_fetched_at = now
+        logger.info("borrowed %d yunxuetang cookies", len(cookies))
+        return cookies
+
+    async def _borrow_auth(self) -> tuple[list[dict[str, Any]], str]:
+        """借 Chrome CDP cookies + localStorage token。
+
+        yunxuetang API 身份校验用 `Authorization: Bearer <JWT>`,token 存在
+        b-learning.bill-jc.com 域的 localStorage (key=`token`)而非 cookie。
+        cookies 还是要带的(可能含其他 metadata / session)。
+
+        缓存: 默认 30 min TTL, cookies 和 token 同步缓存。
+        Returns: (yunxuetang_cookies, bearer_token)。token 可能为空字符串
+        (如 Chrome debug 启了但用户没登录 b-learning.bill-jc.com)。
+        """
+        now = time.monotonic()
+        if self._cookie_cache is not None and (now - self._cookie_fetched_at) < self._cookie_ttl_sec:
+            return self._cookie_cache, self._token_cache
+
+        cookies, token = await self._fetch_cookies_and_token()
+        self._cookie_cache = cookies
+        self._token_cache = token
+        self._cookie_fetched_at = now
+        logger.info("borrowed %d yunxuetang cookies + token (token_len=%d)", len(cookies), len(token))
+        return cookies, token
+
+    async def _fetch_cookies_and_token(self) -> tuple[list[dict[str, Any]], str]:
+        """实际从 Chrome 借 cookies + 找 b-learning.bill-jc.com 页面读 localStorage token。"""
         try:
             async with async_playwright() as p:
                 browser = await p.chromium.connect_over_cdp(self.cdp_url)
                 context = browser.contexts[0]
                 all_cookies = await context.cookies()
+
+                # 借 localStorage token:遍历 page 找 bill-jc 域(否则 localStorage 隔离)
+                token = ""
+                for pg in context.pages:
+                    if "bill-jc.com" in pg.url:
+                        try:
+                            token = await pg.evaluate(
+                                "() => localStorage.getItem('token') || ''"
+                            )
+                        except Exception:
+                            continue
+                        if token:
+                            break
         except Exception as e:
             raise RuntimeError(
-                f"无法借 cookie(检查 Chrome debug 是否启动: chrome --remote-debugging-port=9222): {e}"
+                f"无法借 auth (检查 Chrome debug 是否启动: chrome --remote-debugging-port=9222): {e}"
             ) from e
 
         filtered = [c for c in all_cookies if _is_yunxuetang_domain(c.get("domain", ""))]
-        self._cookie_cache = filtered
-        self._cookie_fetched_at = now
-        logger.info("borrowed %d yunxuetang cookies", len(filtered))
-        return filtered
+        return filtered, token or ""
 
     def _cookie_header(self, cookies: list[dict[str, Any]]) -> str:
         """把 cookie dict list 合并成 Cookie header 字符串。"""
         return "; ".join(f"{c['name']}={c['value']}" for c in cookies)
 
+    def _auth_headers(self, cookies: list[dict[str, Any]], token: str) -> dict[str, str]:
+        """构造 yunxuetang API 完整 headers:Origin/Referer + Cookie + token + yxtspanid。
+
+        关键 header(从浏览器 Network 抓包验证):
+        - `token: <JWT>` — yunxuetang API 身份校验,token 来自
+          b-learning.bill-jc.com 页面 localStorage(`localStorage.getItem('token')`),
+          不是 Cookie。
+        - `yxtspanid: <12hex>` — yunxuetang 前端 SDK 动态生成(每次请求随机),
+          外部调用方也随机生成一个即可。
+        - Cookie header 也保留:服务端可能用 Cookie 做辅助校验。
+        """
+        h = {**_DEFAULT_HEADERS, "Cookie": self._cookie_header(cookies)}
+        if token:
+            h["token"] = token
+        # 每次请求生成新的 yxtspanid(对应浏览器 SPA 行为)
+        h["yxtspanid"] = uuid.uuid4().hex[:12]
+        return h
+
     async def list_tasks(
         self,
         *,
         root_label: str | None = None,
+        catalog_id: str | None = None,
         limit: int = 10,
     ) -> list[VideoTask]:
         """爬 tree + pagelist → VideoTask list(最多 limit 条)。
 
         Args:
             root_label: 限定根目录 label(如 "技术分享");None = 全树。
+                与 catalog_id 互斥。
+            catalog_id: 直接指定 catalogId(从 bill-jc 页面 URL 拿),
+                跳过 tree API 直接 pagelist。当 catalog 树太大或已知目标时用。
             limit: 最多返回多少条 VideoTask。
 
         Raises:
-            RuntimeError: cookie 借取失败或 tree HTTP 非 200。
-            ValueError: root_label 在目录树里找不到。
+            ValueError: root_label 与 catalog_id 同时设置,或 root_label 不存在。
+            RuntimeError: cookie 借取失败 / tree 或 pagelist HTTP 非 200。
         """
-        cookies = await self._borrow_cookies()
-        headers = {**_DEFAULT_HEADERS, "Cookie": self._cookie_header(cookies)}
+        if root_label is not None and catalog_id is not None:
+            raise ValueError("root_label 与 catalog_id 互斥,只能设一个")
+
+        cookies, token = await self._borrow_auth()
+        headers = self._auth_headers(cookies, token)
 
         async with httpx.AsyncClient(timeout=30) as client:
-            # 第 1 步:tree(拿 catalog 树)
-            tree_resp = await client.post(
-                _TREE_URL,
-                json={"pmType": "0", "collegeId": self.college_id},
-                headers=headers,
-            )
-            if tree_resp.status_code != 200:
-                raise RuntimeError(
-                    f"tree 失败 status={tree_resp.status_code}(cookie 可能过期): "
-                    f"{tree_resp.text[:300]}"
+            if catalog_id is not None:
+                # 直通模式:跳过 tree,直接对给定 catalogId pagelist
+                logger.info("list_tasks: 直接模式 catalog_id=%s", catalog_id)
+                leaves = [{"id": catalog_id, "label": f"<catalog_id={catalog_id}>"}]
+            else:
+                # 树模式:tree → leaves → pagelist per leaf
+                tree_resp = await client.post(
+                    _TREE_URL,
+                    json={"pmType": "0", "collegeId": self.college_id},
+                    headers=headers,
                 )
-            leaves = _flatten_leaves(tree_resp.json() or [], root_label=root_label)
-            logger.info("catalog tree → %d 个非空叶子(root_label=%r)", len(leaves), root_label)
+                if tree_resp.status_code != 200:
+                    raise RuntimeError(
+                        f"tree 失败 status={tree_resp.status_code}(cookie 可能过期): "
+                        f"{tree_resp.text[:300]}"
+                    )
+                leaves = _flatten_leaves(tree_resp.json() or [], root_label=root_label)
+                logger.info(
+                    "catalog tree → %d 个非空叶子(root_label=%r)", len(leaves), root_label
+                )
 
-            # 第 2 步:对每个叶子 catalog 调 pagelist,累积到 limit 条
+            # pagelist per leaf,累积到 limit 条
             tasks: list[VideoTask] = []
             for leaf in leaves:
                 if len(tasks) >= limit:
@@ -169,7 +249,7 @@ class InternalSiteSpider:
                         VideoTask(
                             id=kng_id,
                             title=v.get("title") or f"kng-{kng_id}",
-                            url=f"https://b-learning.bill-jc.com/learn/{kng_id}",
+                            url=f"https://b-learning.bill-jc.com/kng/#/video/play?kngId={kng_id}&projectId=&btid=&gwnlUrl=",
                             expected_duration=3600,
                         )
                     )
@@ -183,8 +263,8 @@ class InternalSiteSpider:
             RuntimeError: cookie 借取失败, preinit/kngPlay HTTP 非 200,
                           或 playDetails 为空。
         """
-        cookies = await self._borrow_cookies()
-        headers = {**_DEFAULT_HEADERS, "Cookie": self._cookie_header(cookies)}
+        cookies, token = await self._borrow_auth()
+        headers = self._auth_headers(cookies, token)
 
         base_payload: dict[str, Any] = {
             "kngId": kng_id,

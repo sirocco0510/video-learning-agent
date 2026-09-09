@@ -82,8 +82,12 @@ def _fake_client(post):
 
 
 async def _fake_cookies():
-    """_borrow_cookies 的 async 替身(list_tasks 里是 await 调用)。"""
-    return [{"name": "tk", "value": "tv", "domain": ".yunxuetang.cn"}]
+    """_fetch_cookies_and_token 的 async 替身(返回 (cookies, token) 元组)。
+
+    生产代码 list_tasks / fetch_m3u8 走 _borrow_auth → _fetch_cookies_and_token,
+    此 helper 让测试绕过真实 Chrome CDP,直接注入假数据。
+    """
+    return [{"name": "tk", "value": "tv", "domain": ".yunxuetang.cn"}], "fake-jwt-token"
 
 
 @pytest.mark.asyncio
@@ -92,9 +96,9 @@ async def test_fetch_m3u8_calls_preinit_then_kngplay(monkeypatch):
     spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid-1", resolution="720p")
 
     async def fake_borrow():
-        return [{"name": "tk", "value": "tv", "domain": ".yunxuetang.cn"}]
+        return [{"name": "tk", "value": "tv", "domain": ".yunxuetang.cn"}], "fake-jwt-token"
 
-    monkeypatch.setattr(spider, "_borrow_cookies", fake_borrow)
+    monkeypatch.setattr(spider, "_fetch_cookies_and_token", fake_borrow)
 
     kngplay_payload = {
         "playDetails": [
@@ -136,9 +140,9 @@ async def test_fetch_m3u8_falls_back_to_first_if_resolution_missing(monkeypatch)
     spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid", resolution="720p")
 
     async def fake_borrow():
-        return [{"name": "tk", "value": "tv", "domain": ".yunxuetang.cn"}]
+        return [{"name": "tk", "value": "tv", "domain": ".yunxuetang.cn"}], "fake-jwt-token"
 
-    monkeypatch.setattr(spider, "_borrow_cookies", fake_borrow)
+    monkeypatch.setattr(spider, "_fetch_cookies_and_token", fake_borrow)
 
     kngplay_payload = {"playDetails": [{"url": "https://video.bill-jc.com/a_480p.m3u8", "desc": "480p"}]}
     responses = [
@@ -164,9 +168,9 @@ async def test_fetch_m3u8_raises_on_401(monkeypatch):
     spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
 
     async def fake_borrow():
-        return [{"name": "tk", "value": "tv", "domain": ".yunxuetang.cn"}]
+        return [{"name": "tk", "value": "tv", "domain": ".yunxuetang.cn"}], "fake-jwt-token"
 
-    monkeypatch.setattr(spider, "_borrow_cookies", fake_borrow)
+    monkeypatch.setattr(spider, "_fetch_cookies_and_token", fake_borrow)
 
     fake_post = AsyncMock(return_value=MagicMock(status_code=401, text="Unauthorized"))
     with patch(
@@ -181,7 +185,7 @@ async def test_fetch_m3u8_raises_on_401(monkeypatch):
 async def test_list_tasks_walks_tree_then_paginates(monkeypatch):
     """list_tasks 调 tree, 找 leaf, 对每个 leaf 调 pagelist, 转 VideoTask。"""
     spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
-    monkeypatch.setattr(spider, "_borrow_cookies", _fake_cookies)
+    monkeypatch.setattr(spider, "_fetch_cookies_and_token", _fake_cookies)
 
     tree_payload = [
         {"id": "leaf-1", "parentId": "root", "label": "技术分享", "kngCount": 2, "children": []},
@@ -241,7 +245,7 @@ async def test_list_tasks_walks_tree_then_paginates(monkeypatch):
     assert all(isinstance(t, VideoTask) for t in tasks)
     assert tasks[0].id == "kng-001"
     assert tasks[0].title == "视频1"
-    assert str(tasks[0].url) == "https://b-learning.bill-jc.com/learn/kng-001"
+    assert str(tasks[0].url) == "https://b-learning.bill-jc.com/kng/#/video/play?kngId=kng-001&projectId=&btid=&gwnlUrl="
     assert [t.id for t in tasks] == ["kng-001", "kng-002", "kng-003"]
 
 
@@ -249,7 +253,7 @@ async def test_list_tasks_walks_tree_then_paginates(monkeypatch):
 async def test_list_tasks_filters_by_root_label(monkeypatch):
     """root_label 只走该子树内的叶子。"""
     spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
-    monkeypatch.setattr(spider, "_borrow_cookies", _fake_cookies)
+    monkeypatch.setattr(spider, "_fetch_cookies_and_token", _fake_cookies)
     tree_payload = [
         {"id": "leaf-1", "parentId": "root", "label": "技术分享", "kngCount": 1, "children": []},
         {"id": "leaf-2", "parentId": "root", "label": "财务培训", "kngCount": 1, "children": []},
@@ -277,7 +281,7 @@ async def test_list_tasks_filters_by_root_label(monkeypatch):
 async def test_list_tasks_root_label_not_found_raises(monkeypatch):
     """root_label 找不到 → ValueError。"""
     spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
-    monkeypatch.setattr(spider, "_borrow_cookies", _fake_cookies)
+    monkeypatch.setattr(spider, "_fetch_cookies_and_token", _fake_cookies)
     tree_payload = [{"id": "leaf-1", "label": "其他分类", "kngCount": 1, "children": []}]
 
     async def fake_post(url, json=None, headers=None, **kwargs):
@@ -295,7 +299,7 @@ async def test_list_tasks_root_label_not_found_raises(monkeypatch):
 async def test_list_tasks_respects_limit(monkeypatch):
     """limit=3 时只返 3 条, 即使 leaf 内有更多。"""
     spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
-    monkeypatch.setattr(spider, "_borrow_cookies", _fake_cookies)
+    monkeypatch.setattr(spider, "_fetch_cookies_and_token", _fake_cookies)
     tree_payload = [{"id": "leaf-1", "label": "L", "kngCount": 5, "children": []}]
     pagelist_body = {"datas": [{"id": f"kng-{i}", "title": f"t{i}"} for i in range(5)]}
 
@@ -315,7 +319,7 @@ async def test_list_tasks_respects_limit(monkeypatch):
 async def test_list_tasks_skips_empty_leaves(monkeypatch):
     """kngCount=0 节点不调 pagelist。"""
     spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
-    monkeypatch.setattr(spider, "_borrow_cookies", _fake_cookies)
+    monkeypatch.setattr(spider, "_fetch_cookies_and_token", _fake_cookies)
     tree_payload = [
         {"id": "empty-leaf", "label": "空", "kngCount": 0, "children": []},
         {"id": "full-leaf", "label": "满", "kngCount": 1, "children": []},
@@ -334,3 +338,127 @@ async def test_list_tasks_skips_empty_leaves(monkeypatch):
     ):
         await spider.list_tasks(limit=10)
     assert pagelist_calls == ["full-leaf"]
+
+
+# --- Phase 9.6.3 真实环境适配 (token/source/yxtspanid/catalog_id) ---
+
+
+@pytest.mark.asyncio
+async def test_fetch_cookies_and_token_reads_localstorage_token():
+    """_fetch_cookies_and_token 从 bill-jc 页面 localStorage 读 token(非 cookie)。"""
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="abc")
+    fake_browser = MagicMock()
+    fake_page = MagicMock()
+    fake_page.url = "https://b-learning.bill-jc.com/kng/#/list?cid=xxx"
+    fake_page.evaluate = AsyncMock(return_value="fake-jwt-from-localstorage")
+    fake_browser.contexts = [MagicMock()]
+    fake_browser.contexts[0].cookies = AsyncMock(
+        return_value=[{"name": "tk", "value": "tv", "domain": ".yunxuetang.cn"}]
+    )
+    fake_browser.contexts[0].pages = [fake_page]
+    with patch("vla.subtitle.internal_site_spider.async_playwright") as ap:
+        ap.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+        ap.return_value.__aenter__.return_value.chromium = MagicMock()
+        ap.return_value.__aenter__.return_value.chromium.connect_over_cdp = AsyncMock(
+            return_value=fake_browser
+        )
+        ap.return_value.__aexit__ = AsyncMock(return_value=None)
+        cookies, token = await spider._fetch_cookies_and_token()
+    assert len(cookies) == 1
+    assert cookies[0]["name"] == "tk"
+    assert token == "fake-jwt-from-localstorage"
+    fake_page.evaluate.assert_awaited_once_with(
+        "() => localStorage.getItem('token') || ''"
+    )
+
+
+@pytest.mark.asyncio
+async def test_fetch_cookies_and_token_returns_empty_token_when_no_bill_jc_page():
+    """bill-jc tab 不存在 → token='' (空字符串,不抛错)。"""
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="abc")
+    fake_browser = MagicMock()
+    fake_browser.contexts = [MagicMock()]
+    fake_browser.contexts[0].cookies = AsyncMock(
+        return_value=[{"name": "tk", "value": "tv", "domain": ".yunxuetang.cn"}]
+    )
+    fake_browser.contexts[0].pages = []  # 无 bill-jc tab
+    with patch("vla.subtitle.internal_site_spider.async_playwright") as ap:
+        ap.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+        ap.return_value.__aenter__.return_value.chromium = MagicMock()
+        ap.return_value.__aenter__.return_value.chromium.connect_over_cdp = AsyncMock(
+            return_value=fake_browser
+        )
+        ap.return_value.__aexit__ = AsyncMock(return_value=None)
+        cookies, token = await spider._fetch_cookies_and_token()
+    assert token == ""
+
+
+def test_auth_headers_includes_source_yxtspanid_and_token():
+    """_auth_headers 输出符合 yunxuetang 后端校验要求的 header 集。"""
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="abc")
+    cookies = [{"name": "tk", "value": "tv", "domain": ".yunxuetang.cn"}]
+    h = spider._auth_headers(cookies, "fake-jwt-token")
+    # 静态 header(从浏览器 Network 抓包验证)
+    assert h["source"] == "501"
+    assert h["yxt-orgdomain"] == "b-learning.bill-jc.com"
+    assert h["x-yxt-product"] == "xxv2"
+    assert h["Origin"] == "https://b-learning.bill-jc.com"
+    assert h["Referer"] == "https://b-learning.bill-jc.com/"
+    # 动态 header
+    assert h["Cookie"] == "tk=tv"
+    assert h["token"] == "fake-jwt-token"
+    # yxtspanid 每次 12 hex(动态生成)
+    assert len(h["yxtspanid"]) == 12
+    assert all(c in "0123456789abcdef" for c in h["yxtspanid"])
+    # 两次调用 yxtspanid 不同
+    h2 = spider._auth_headers(cookies, "fake-jwt-token")
+    assert h["yxtspanid"] != h2["yxtspanid"]
+
+
+def test_auth_headers_omits_token_header_when_token_empty():
+    """token 为空字符串时不加 token header(避免服务端误解析)。"""
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="abc")
+    cookies = [{"name": "tk", "value": "tv", "domain": ".yunxuetang.cn"}]
+    h = spider._auth_headers(cookies, "")
+    assert "token" not in h
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_with_catalog_id_skips_tree(monkeypatch):
+    """catalog_id 模式跳过 tree,直接 pagelist(从 bill-jc URL 拿)。"""
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
+    monkeypatch.setattr(spider, "_fetch_cookies_and_token", _fake_cookies)
+
+    pagelist_calls = []
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        # tree 永远不应该被调
+        assert "tree" not in url, "tree should not be called when catalog_id is provided"
+        pagelist_calls.append(json["catalogId"])
+        body = {
+            "datas": [
+                {"id": "kng-A", "title": "A"},
+                {"id": "kng-B", "title": "B"},
+            ]
+        }
+        return MagicMock(status_code=200, json=lambda: body)
+
+    with patch(
+        "vla.subtitle.internal_site_spider.httpx.AsyncClient", return_value=_fake_client(fake_post)
+    ):
+        tasks = await spider.list_tasks(
+            catalog_id="4ff8c024-219c-4e49-91d0-ec869bcf859f", limit=10
+        )
+    assert pagelist_calls == ["4ff8c024-219c-4e49-91d0-ec869bcf859f"]
+    assert [t.id for t in tasks] == ["kng-A", "kng-B"]
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_rejects_both_root_label_and_catalog_id(monkeypatch):
+    """root_label 与 catalog_id 互斥(避免歧义)。"""
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
+    monkeypatch.setattr(spider, "_fetch_cookies_and_token", _fake_cookies)
+    with pytest.raises(ValueError, match="互斥"):
+        await spider.list_tasks(
+            root_label="技术分享", catalog_id="some-uuid", limit=10
+        )
