@@ -1,4 +1,5 @@
 import pytest
+from unittest.mock import MagicMock
 
 from vla.main_provider import RealTextProvider
 
@@ -49,3 +50,14 @@ async def test_call_delegates_to_fetch_then_process():
     asset, result = await p(task)
     assert asset is fake_asset
     assert result is fake_result
+
+
+def test_build_text_provider_returns_tuple():
+    from vla.main_provider import build_text_provider
+    from vla.models import VideoTask
+    cfg = MagicMock()
+    transcriber = MagicMock()
+    notifier = MagicMock()
+    fetch, process = build_text_provider(cfg, transcriber, notifier)
+    assert callable(fetch)
+    assert callable(process)

@@ -22,8 +22,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from vla.config import VLAConfig
 from vla.log.transcription_log import TranscriptionLog
@@ -33,6 +34,14 @@ from vla.transcribe.extract import extract_audio
 
 
 logger = logging.getLogger(__name__)
+
+
+# Task 9 SSOT(2026-09-09 asset-pipeline-refactor):
+# build_text_provider 不再返回 RealTextProvider 实例,
+# 而是返回 (fetch_asset, process_asset) 两个 callable。
+# 调用方按需 await,中间可插入 main.py 的 step(quota / log / 状态)。
+FetchAssetFn = Callable[["VideoTask"], Awaitable["Asset | None"]]
+ProcessAssetFn = Callable[["Asset", "VideoTask"], Awaitable["ProcessResult | None"]]
 
 
 class RealTextProvider:
@@ -223,29 +232,38 @@ class RealTextProvider:
 
 def build_text_provider(
     cfg: VLAConfig,
+    transcriber: Any | None = None,
+    notifier: Any = None,
     *,
-    notifier: Any,
-    plugin_status: Any,
+    plugin_status: Any = None,
     save_dir: Path | None = None,
     driver: Any = None,
     recorder: Any = None,  # F2-8:deprecated,保留以兼容老调用方(始终 None)
-) -> Callable[[VideoTask], tuple[str, str, Path | None]]:
-    """工厂函数:装配一个完整的 RealTextProvider,供 CLI / E2E 使用。
+) -> tuple[FetchAssetFn, ProcessAssetFn]:
+    """工厂函数:装配一个完整的 RealTextProvider,返回 (fetch_asset, process_asset) 两个 callable。
+
+    Task 9(2026-09-09 asset-pipeline-refactor):返回二元组,调用方按需 await,
+    中间可插入 quota 检查 / 日志 / 状态更新。
 
     Args:
         cfg: VLAConfig
+        transcriber: StreamingTranscriber(可选 — 测试 fixture 注入 MagicMock;
+                  None 时内部 auto-create)
         notifier: MacOSNotifier(必填 — 弹窗)
-        plugin_status: PluginStatus(必填 — session 单例)
+        plugin_status: PluginStatus(可选 — cli.py 生产路径必传,测试 stub 可省)
         save_dir: 临时文件目录(默认 cfg.storage.tmp_dir)
         driver: BrowserDriver(可选,字幕策略需要)
         recorder: deprecated(F2-8:旧 Screen Recorder 已删,传参保留但运行时忽略)
 
     Returns:
-        可调用对象:(task) → (text, source, audio_path)
+        (fetch_asset, process_asset):两个独立 callable,分别对应"取资产"和"处理资产"。
+        fetch_asset: VideoTask → Asset | None
+        process_asset: Asset, VideoTask → ProcessResult | None
     """
+    from vla.audio.source_factory import AudioSourceFactory
     from vla.source.video_source import VideoSourceFactory
     from vla.subtitle.strategy import SubtitleStrategy
-    from vla.subtitle.platform_adapter import PlatformAdapterRegistry
+    from vla.subtitle.tab_audio_recorder import TabAudioRecorder
     from vla.transcribe.streaming import StreamingTranscriber
 
     save_dir = Path(save_dir) if save_dir else Path(cfg.storage.tmp_dir)
@@ -253,7 +271,15 @@ def build_text_provider(
 
     log = TranscriptionLog(cfg.logging.log_dir)
     source_factory = VideoSourceFactory(tmp_dir=save_dir, log=log, config=cfg)
-    transcriber = StreamingTranscriber(cfg)
+    if transcriber is None:
+        transcriber = StreamingTranscriber(cfg)
+    audio_factory = AudioSourceFactory(save_dir=save_dir / "audio_raw")
+    tab_recorder = TabAudioRecorder(
+        match_keyword=getattr(
+            getattr(cfg, "extension", None), "tab_audio_recorder.match_keyword", "tab audio",
+        ),
+        save_dir=save_dir / "audio_raw",
+    )
 
     # F2-8:不再自动构造旧 Screen Recorder。弹窗 enabled 路径已废弃 —
     # 真实录屏兜底走策略 ③ adapter.fetch_via_recording(yt-dlp / Tab Audio Recorder)。
@@ -269,11 +295,14 @@ def build_text_provider(
         plugin_status=plugin_status,
         remind_timeout_sec=cfg.browser_plugin.remind_timeout_sec,
         plugin_name=cfg.browser_plugin.name,
+        audio_factory=audio_factory,
+        tab_recorder=tab_recorder,
+        transcriber=transcriber,
         save_dir=save_dir,
         cfg=cfg,  # F2-10:扫今天 YYYY-MM-DD/ 用
     )
 
-    return RealTextProvider(
+    provider = RealTextProvider(
         cfg=cfg,
         strategy=strategy,
         source_factory=source_factory,
@@ -282,6 +311,8 @@ def build_text_provider(
         plugin_status=plugin_status,
         save_dir=save_dir,
     )
+
+    return provider.fetch_asset, provider.process_asset
 
 
 def _build_registry(
