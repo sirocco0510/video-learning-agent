@@ -2330,6 +2330,17 @@ uv run python scripts/spike_f26_pipeline.py
     - **recorder 返回 transcript 路径**(2026-09-02):`record_and_transcribe` 返回 `Path` 落盘文件路径,Strategy 读一次得 `SubtitleResult.text`,见 FR-2.15b
     - audio_path 处理(2026-09-03 改):屏幕录制路径 audio_path=None(BrowserRecorder 自己清理)→ **改为 audio_id.webm 文件路径**:`logs/audio_raw/<audio_id>.webm`,由 `TabAudioRecorder.start_recording` 返回的 audio_id 命名(FR-2.26);失败文件进 `logs/audio_failed/`
     - 测试:test_subtitle_strategy 加 enabled→record 路径、test_macos_notify 加超时 warning、test_e2e 加整链路 + 真实 spike 验证
+- [x] Phase 9.6.2: bill-jc internal-site spider 实装 + end-to-end spike(2026-09-09 完成,InternalSiteSpider 4 yunxuetang API + cookie 借取 + m3u8→wav 流式抽音 + spike 3 模式 CLI):
+    - 落地:`src/vla/subtitle/internal_site_spider.py` 完全重写(stub → 真模块):`list_tasks`(tree + pagelist DFS + root_label 匹配)+ `fetch_m3u8`(preinit + kngPlay + resolution 选档)+ `_borrow_cookies`(Playwright `connect_over_cdp` + 域过滤 + TTL 1800s 缓存)
+    - 新增 `src/vla/transcribe/extract.py::extract_m3u8_audio`(ffmpeg 流式 m3u8 → wav,不缓存 mp4,符合"磁盘友好 <1GB")
+    - `src/vla/main_provider.py` fetch_asset path ② 调 extract_m3u8_audio(替代 ffmpeg 下载 mp4)
+    - 新增 `src/vla/subtitle/internal_site_adapter.py::InternalSiteAdapter`(no-arg,R3 修复):无 BrowserDriver,直接走 InternalSiteSpider
+    - spike:`scripts/spike_bill_jc_full.py` 3 模式 CLI(--list-only / --kng-id / --college-id),**gitignored**(`scripts/` per .gitignore:25,history 中可找回)
+    - 配置:`config/vla.yaml` `platforms.internal_site.enabled: false`(CLI 默认禁用,等账号下发再 flip)
+    - commits(`git log --oneline 9988db1..a18853d`):T1=bac05b3, T2=a90219f, T3=7a56dc8, T4=5b5a268, T5=d9eb9f7, wire-up=557b622, R3-fix=a18853d
+    - 测试:649 passed(基准 631 + 18 新);pre-existing 16 e2e failures 与本 PR 无关(MEMORY:Pre-existing e2e Broken)
+    - SSOT:设计 `docs/superpowers/specs/2026-09-09-bill-jc-spider-impl-design.md` + 计划 `docs/superpowers/plans/2026-09-09-bill-jc-spider-impl.md`
+    - 剩余子项:cookie 自动检测过期 / m3u8 token 缓存(本轮 fail-fast + 每次重新调,符合"短时效"现实)
 - [x] 字幕清理 Level 3 步骤 1(2026-09-02 完成,本地 postprocess):
     - 新增 `src/vla/transcribe/postprocess.py`:`merge_short_lines()` + `dedupe_repeated_segments()` + `_has_significant_overlap()`(LCS-style) + `clean_transcript()`(组装 + PostprocessStats)
     - `StreamingTranscriber.transcribe()` 末尾 `clean_transcript()` 串联(`whisper.postprocess_enabled` 控制开关,默认开)
