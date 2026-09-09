@@ -25,8 +25,13 @@ video_source:
 
 quality_check:
   enabled: true
-  min_score_to_pass: 70
-  min_char_per_second: 1.0
+  # 2026-09-10 Phase 9.6.4 bill-jc spike 放宽:公司内部培训课程(命令行参数 /
+  # Java 基础)语速 0.5-1 cps + 大量 Whisper 术语错误("花扩号"→"花括号"等),
+  # LLM 给 55-68 分(因术语错误扣分),原阈值 70/1.0 全 fail。
+  # 用户决策:语速 0.5 字/秒以上 + LLM ≥ 50 即可过(关注内容完整性,不卡术语准度)。
+  # 后续若需要更严,可在 requirements.md FR-4 加版本号注释。
+  min_score_to_pass: 50
+  min_char_per_second: 0.5
   max_char_per_second: 20.0  # 2026-09-07 v3.2.1 由 15 → 20(tiny 模型中文峰值 19-25 cps)
   # 2026-09-02 Level 4:LLM 语义清理(faster-whisper 输出整理)
   # refine_enabled=true 才调 LLM

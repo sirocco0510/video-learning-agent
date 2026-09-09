@@ -61,7 +61,63 @@ def parse_json_response(
         if data is not None:
             return data
 
+    # 2026-09-10 容错: LLM 响应被 max_tokens 截断(JSON 缺末尾 '}' 或字符串
+    # 内部被截)。尝试在末尾补闭合括号再 parse。生产影响面:
+    # 仅当 max_tokens 不够 LLM 完整输出 JSON 时触发,补完通常可 parse。
+    truncated = _try_parse_truncated_json(text)
+    if truncated is not None:
+        return truncated
+
     raise ValueError(f"LLM 响应中没有找到 JSON: {text[:200]}")
+
+
+def _try_parse_truncated_json(text: str) -> dict[str, Any] | None:
+    """LLM 输出被截断时的容错:找到首个未闭合 `{`,补足 `}` 再 json.loads。
+
+    风险:被截的 JSON 内有未闭合 string → json.loads 仍 fail → 返回 None。
+    只在标准 brace-counting 全部失败时触发,不影响正常 JSON 解析。
+    """
+    for match in re.finditer(r"\{", text):
+        # 跳过 think / code-block 区域(与主流程一致)
+        skip_regions: list[tuple[int, int]] = []
+        for m in re.finditer(r"<think>.*?</think>", text, re.DOTALL):
+            skip_regions.append((m.start(), m.end()))
+        if any(s <= match.start() < e for s, e in skip_regions):
+            continue
+        start = match.start()
+        # 数 `{` vs `}` ,忽略 string 内的。截断时缺 closing brace,补足。
+        depth = 0
+        in_string = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+        if depth > 0:
+            # 缺 closing brace → 补 + 关闭可能未闭合的 string
+            candidate = text[start:]
+            # 若最后是 string 内(未闭合),补一个 `"` 再补 `}`
+            if in_string:
+                candidate = candidate + '"'
+            candidate = candidate + "}" * depth
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+    return None
 
 
 def _try_parse_balanced_object(

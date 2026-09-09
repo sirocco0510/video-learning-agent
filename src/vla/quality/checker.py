@@ -33,7 +33,8 @@ PROMPT = """你是字幕质量审核员。请评估以下 Whisper 转写的字�
 【视频时长】:{duration_sec} 秒
 【转写引擎】faster-whisper-{model_size}
 【文本长度】{char_count} 字
-【估算语速】{char_per_second:.1f} 字/秒(中文正常 4-7)
+【估算语速】{char_per_second:.1f} 字/秒(中文正常 4-7;公司内部培训课程通常偏慢,
+3-5 也算正常,关注文本是否完整可读而非绝对语速)
 
 【转写文本】
 {text}
@@ -136,7 +137,7 @@ class QualityChecker:
             char_per_second=cps,
             text=text,
         )
-        response = self._llm.complete(prompt, max_tokens=500)
+        response = self._llm.complete(prompt, max_tokens=2000)
         from vla.llm.response import parse_json_response
         data = parse_json_response(response)
 
