@@ -181,3 +181,58 @@ async def test_fetch_asset_internal_spider_uses_extract_m3u8_audio(tmp_path):
     assert asset.source == "whisper_internal_download"
     assert asset.audio_path == fake_wav
     assert asset.deletable is True
+
+
+@pytest.mark.asyncio
+async def test_fetch_asset_internal_spider_falls_back_to_browser_capture_on_drm(tmp_path):
+    """Phase 9.6.4 (2026-09-10):extract_m3u8_audio 抛 RuntimeError(yunxuetang BCE DRM)
+    → fallback 到 extract_browser_audio;成功 → fetch_asset 走 ② 返回
+    Asset(source='whisper_internal_download')。"""
+    p = RealTextProvider.__new__(RealTextProvider)
+    p.cfg = MagicMock()
+    p.strategy = MagicMock()
+    p.transcriber = MagicMock()
+    p.source_factory = MagicMock()
+    p.notifier = MagicMock()
+    p.plugin_status = MagicMock()
+    p._save_dir = tmp_path
+    p.log = MagicMock()
+    p.checker = MagicMock()
+    p.refiner = None
+    p._today_dir = tmp_path  # T14 requirement
+
+    p.strategy.get_subtitle = AsyncMock(return_value=SubtitleResult(
+        text=None, source="internal_spider",
+        metadata={"video_url": "https://video.bill-jc.com/foo.m3u8"},
+    ))
+    p.source_factory.get = MagicMock(return_value=None)
+
+    fake_wav = tmp_path / "audio_raw" / "BV1xx.wav"
+
+    async def fake_browser_audio(video_url, wav_path):
+        wav_path.parent.mkdir(parents=True, exist_ok=True)
+        wav_path.write_bytes(b"RIFF")
+        return wav_path
+
+    with patch(
+        "vla.main_provider.extract_m3u8_audio",
+        side_effect=RuntimeError("DRM key token rejected"),
+    ) as m_m3u8, patch(
+        "vla.main_provider.extract_browser_audio",
+        side_effect=fake_browser_audio,
+    ) as m_browser:
+        task = VideoTask(id="BV1xx", title="t", url="https://b-learning.bill-jc.com/x", expected_duration=3600)
+        asset = await p.fetch_asset(task)
+
+    # m3u8 先被试,失败
+    m_m3u8.assert_called_once()
+    # 然后 fallback 到 browser capture
+    m_browser.assert_called_once()
+    assert m_browser.call_args[0][0] == "https://video.bill-jc.com/foo.m3u8"
+    assert m_browser.call_args[0][1] == fake_wav
+    # 路径 ② 成功 → Asset(source='whisper_internal_download', deletable=True)
+    assert asset is not None
+    assert asset.source == "whisper_internal_download"
+    assert asset.audio_path == fake_wav
+    assert asset.deletable is True
+    assert asset.needs_transcribe is True

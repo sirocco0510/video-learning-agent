@@ -30,7 +30,7 @@ from vla.config import VLAConfig
 from vla.log.transcription_log import TranscriptionLog
 from vla.models import Asset, ProcessResult, VideoTask
 from vla.subtitle import audio_scan
-from vla.transcribe.extract import extract_audio, extract_m3u8_audio
+from vla.transcribe.extract import extract_audio, extract_browser_audio, extract_m3u8_audio
 
 
 logger = logging.getLogger(__name__)
@@ -122,9 +122,19 @@ class RealTextProvider:
             wav_path.parent.mkdir(parents=True, exist_ok=True)
             try:
                 extract_m3u8_audio(video_url, wav_path)
-            except Exception as e:
-                logger.warning("internal spider m3u8 抽音失败 %s: %s", video_url, e)
-                return None
+            except Exception as e1:
+                # Phase 9.6.4 (2026-09-10):yunxuetang BCE DRM-encrypted m3u8 兜底 —
+                # ffmpeg 直抽被服务端 key token 拒, 改走浏览器内 MediaRecorder 录音。
+                logger.warning(
+                    "extract_m3u8_audio failed (%s), fallback browser capture", e1,
+                )
+                try:
+                    await extract_browser_audio(video_url, wav_path)
+                except Exception as e2:
+                    logger.warning(
+                        "extract_browser_audio fallback also failed: %s", e2,
+                    )
+                    return None
             return Asset(text=None, source="whisper_internal_download", audio_path=wav_path, deletable=True)
 
         # 3. VideoSourceFactory
