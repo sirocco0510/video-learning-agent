@@ -84,7 +84,7 @@ class ScreenCapture:
         self.save_dir.mkdir(parents=True, exist_ok=True)
         self._platform = platform_name if platform_name is not None else platform.system()
 
-    async def prepare_for_screenshot(self, page: Any) -> None:
+    async def prepare_for_screenshot(self, page: Any, driver: Any = None) -> None:
         """FR-2.28.2a: prepare page for a clean full-screen capture.
 
         Sequence (per design doc §3.5):
@@ -98,16 +98,41 @@ class ScreenCapture:
         itself fails, downstream writes `partial_flags=["menu_bar_only"]`.
 
         No return value — success/failure signalled only via log line.
+
+        Args:
+            page: Playwright page object.
+            driver: 可选 BrowserDriver 实例。v3.2.1.3 起,如果有 driver 则 page 操作
+                    走 driver.run_on_driver_thread(同 thread = dispatcher thread,
+                    避免 greenlet mismatch)。没 driver 时退化为 asyncio.to_thread
+                    兜底(可能撞 greenlet,但保留向后兼容)。
+
+        v3.2.1.2 (F2-6 spike): page 是 sync Playwright 对象,bind 到 dispatcher
+        fiber 的 greenlet。asyncio.to_thread 启新 worker → 不同 thread → 撞 greenlet。
+        v3.2.1.3: 改用 driver.arun_on_driver_thread(走 driver 自己的 single-worker
+        executor,不阻塞 asyncio loop)。
         """
         try:
-            await page.bring_to_front()
-            await page.evaluate("window.focus()")
-            await page.evaluate(
-                "window.moveTo(0, 0); window.resizeTo(screen.width, screen.height);"
-            )
+            if driver is not None:
+                await driver.arun_on_driver_thread(self._prepare_page_sync, page)
+            else:
+                # 向后兼容:无 driver 时退化为 asyncio.to_thread(可能撞 greenlet)
+                await asyncio.to_thread(self._prepare_page_sync, page)
             await asyncio.sleep(0.3)
         except Exception as e:
             logger.warning("⚠️ prepare_for_screenshot 部分失败: %s", e)
+
+    def _prepare_page_sync(self, page: Any) -> None:
+        """FR-2.28.2a: 同步 page 准备(只给 prepare_for_screenshot 内部用)。
+
+        把三个 sync Playwright 调用打包,确保它们在同一个 thread/greenlet 里跑。
+        v3.2.1.3: 通过 driver.run_on_driver_thread 调用,落到 driver executor
+        worker = dispatcher thread。
+        """
+        page.bring_to_front()
+        page.evaluate("window.focus()")
+        page.evaluate(
+            "window.moveTo(0, 0); window.resizeTo(screen.width, screen.height);"
+        )
 
     async def capture_full_screen(self, save_path: Path) -> bool:
         """FR-2.28: capture the entire primary screen to `save_path`.

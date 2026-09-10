@@ -24,7 +24,6 @@ def cfg(tmp_path: Path) -> VLAConfig:
         "whisper": {"model": "small", "language": "zh", "segment_seconds": 30, "compute_type": "int8"},
         "video_source": {"prefer_download": True, "download": {"format": "worst"}, "record": {"enabled": True, "screen_index": 2, "fps": 30, "crf": 28, "audio_input": "0", "preset": "ultrafast"}},
         "quality_check": {"enabled": True, "model": "x", "min_score_to_pass": 70, "min_char_per_second": 1.0, "max_char_per_second": 15.0},
-        "browser_plugin": {"name": "VideoTrans", "enabled": True, "remind_timeout_sec": 30, "plugin_paths": []},
         "summary": {"model": "x", "target_words_min": 500, "target_words_max": 800, "notes_file": str(tmp_path / "notes.md"), "cross_video_dedup": True, "trigger_mode": "quota", "notes_section_header": "## x"},
         "quota": {"summary_threshold_sec": 21600, "on_exhausted": "stop_session"},
         "history": {"file": str(tmp_path / "h.jsonl")},

@@ -65,18 +65,6 @@ class QualityCheckConfig(BaseModel):
     refine_max_output_tokens: int = 4000
 
 
-class BrowserPluginConfig(BaseModel):
-    """F2-10 简化的浏览器插件配置:只剩 popup 显示相关字段。
-
-    F2-10 已删除 BrowserRecorder 流程,以下字段一并删除(主流程不再读):
-      - enabled / plugin_paths:从未被读取
-      - record_hotkey / record_download_timeout_sec / record_pre_grace_sec /
-        record_post_buffer_sec:F2-7/2-8 BrowserRecorder 流程残留,主流程不用
-    """
-    name: str
-    remind_timeout_sec: int
-
-
 class SummaryConfig(BaseModel):
     model: str
     target_words_min: int
@@ -200,7 +188,6 @@ class VLAConfig(BaseModel):
     whisper: WhisperConfig
     video_source: VideoSourceConfig
     quality_check: QualityCheckConfig
-    browser_plugin: BrowserPluginConfig
     summary: SummaryConfig
     quota: QuotaConfig
     history: HistoryConfig

@@ -22,7 +22,6 @@ video_source:
   prefer_download: true
   download: {format: "best"}
 quality_check: {enabled: true, model: "old-qc-model", min_score_to_pass: 70, min_char_per_second: 1.0, max_char_per_second: 15.0, refine_model: "old-refine-model"}
-browser_plugin: {name: "Screen Recorder", enabled: true, remind_timeout_sec: 30, plugin_paths: []}
 summary: {model: "old-summary-model", target_words_min: 500, target_words_max: 800, notes_file: "./notes/v.md", cross_video_dedup: true, trigger_mode: "quota", notes_section_header: "## x"}
 quota: {summary_threshold_sec: 21600, on_exhausted: "stop_session"}
 history: {file: "./logs/h.jsonl"}
@@ -57,8 +56,7 @@ class TestFromYaml:
         assert cfg.summary.target_words_min == 500
         assert cfg.summary.target_words_max == 800
 
-        # v2 (2026-09-08):popup 显示用短名 "Tab Audio Recorder"
-        assert cfg.browser_plugin.name == "Tab Audio Recorder"
+        # 2026-09-10 轻量化:browser_plugin 字段已删除,不再断言。
 
         # llm_client 配置字段名(不是值)
         assert cfg.llm_client.provider == "minimax"
@@ -85,7 +83,6 @@ video_source:
   download: {format: "worst"}
   record: {enabled: true, screen_index: 1, fps: 30, crf: 28, audio_input: "1:0", preset: "ultrafast"}
 quality_check: {enabled: true, model: "x", min_score_to_pass: 70, min_char_per_second: 1.0, max_char_per_second: 15.0}
-browser_plugin: {name: "VideoTrans", enabled: true, remind_timeout_sec: 30, plugin_paths: []}
 summary: {model: "x", target_words_min: 500, target_words_max: 800, notes_file: "./notes/v.md", cross_video_dedup: true, trigger_mode: "quota", notes_section_header: "## x"}
 quota: {summary_threshold_sec: 21600, on_exhausted: "stop_session"}
 history: {file: "./logs/h.jsonl"}
@@ -107,7 +104,6 @@ video_source:
   download: {format: "worst"}
   record: {enabled: true, screen_index: 1, fps: 30, crf: 28, audio_input: "1:0", preset: "ultrafast"}
 quality_check: {enabled: true, model: "x", min_score_to_pass: 70, min_char_per_second: 1.0, max_char_per_second: 15.0}
-browser_plugin: {name: "VideoTrans", enabled: true, remind_timeout_sec: 30, plugin_paths: []}
 summary: {model: "x", target_words_min: 800, target_words_max: 800, notes_file: "./notes/v.md", cross_video_dedup: true, trigger_mode: "quota", notes_section_header: "## x"}
 quota: {summary_threshold_sec: 21600, on_exhausted: "stop_session"}
 history: {file: "./logs/h.jsonl"}
@@ -129,7 +125,6 @@ video_source:
   download: {format: "worst"}
   record: {enabled: true, screen_index: 1, fps: 30, crf: 28, audio_input: "1:0", preset: "ultrafast"}
 quality_check: {enabled: true, model: "x", min_score_to_pass: 70, min_char_per_second: 1.0, max_char_per_second: 15.0}
-browser_plugin: {name: "VideoTrans", enabled: true, remind_timeout_sec: 30, plugin_paths: []}
 summary: {model: "x", target_words_min: 900, target_words_max: 800, notes_file: "./notes/v.md", cross_video_dedup: true, trigger_mode: "quota", notes_section_header: "## x"}
 quota: {summary_threshold_sec: 21600, on_exhausted: "stop_session"}
 history: {file: "./logs/h.jsonl"}
@@ -156,7 +151,6 @@ video_source:
   download: {format: "worst"}
   record: {enabled: true, screen_index: 1, fps: 30, crf: 28, audio_input: "1:0", preset: "ultrafast"}
 quality_check: {enabled: true, model: "x", min_score_to_pass: 70, min_char_per_second: 1.0, max_char_per_second: 15.0}
-browser_plugin: {name: "VideoTrans", enabled: true, remind_timeout_sec: 30, plugin_paths: []}
 summary: {model: "x", target_words_min: 500, target_words_max: 800, notes_file: "./notes/v.md", cross_video_dedup: true, trigger_mode: "quota", notes_section_header: "## x"}
 quota: {summary_threshold_sec: 21600, on_exhausted: "stop_session"}
 history: {file: "./logs/h.jsonl"}
@@ -183,7 +177,6 @@ video_source:
   download: {format: "worst"}
   record: {enabled: true, screen_index: 1, fps: 30, crf: 28, audio_input: "1:0", preset: "ultrafast"}
 quality_check: {enabled: true, model: "x", min_score_to_pass: 70, min_char_per_second: 1.0, max_char_per_second: 15.0}
-browser_plugin: {name: "VideoTrans", enabled: true, remind_timeout_sec: 30, plugin_paths: []}
 summary: {model: "x", target_words_min: 500, target_words_max: 800, notes_file: "./notes/v.md", cross_video_dedup: true, trigger_mode: "quota", notes_section_header: "## x"}
 quota: {summary_threshold_sec: 21600, on_exhausted: "stop_session"}
 history: {file: "./logs/h.jsonl"}

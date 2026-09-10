@@ -42,20 +42,6 @@ quality_check:
   refine_max_chars: 6000
   refine_max_output_tokens: 4000
 
-browser_plugin:
-  # v2 (2026-09-08):popup 显示用短名 "Tab Audio Recorder" — probe_status 仍按
-  # TabAudioRecorder.match_keyword (默认 "tab audio") 匹配 manifest,与此独立。
-  name: "Tab Audio Recorder"
-  remind_timeout_sec: 30          # 弹窗等用户响应的超时(秒)
-  # F2-10 后 BrowserRecorder 流程已删,Tab Audio Recorder 路径改走 strategy._try_browser
-  # 弹窗 enabled 分支(扫今天 YYYY-MM-DD/ 目录)。以下字段已废弃,主流程不再读:
-  #   - enabled / plugin_paths / record_hotkey
-  #   - record_download_timeout_sec / record_pre_grace_sec / record_post_buffer_sec
-  # FR-2.9/2.10 插件状态:整个 session 只弹一次
-  #   available   用户确认启动 + 等到文件
-  #   unavailable 用户跳过 / 弹窗超时 / 字幕质量不过关
-  # 状态保存在内存,下次启动重置
-
 summary:
   target_words_min: 500
   target_words_max: 800
@@ -113,5 +99,7 @@ platforms:                                 # Phase 3 平台适配器注册(FR-2.
       - "bilibili.com"
       - "b23.tv"
   internal_site:
-    enabled: false                        # 等账号下发
-    match_hosts: []                       # 后续由 config 驱动
+    enabled: true                         # 2026-09-10 bill-jc 实跑打开
+    match_hosts:
+      - "b-learning.bill-jc.com"
+      - "b-learning.bill-jc.com"

@@ -100,7 +100,6 @@ def cfg(tmp_path: Path) -> VLAConfig:
             "record": {"enabled": True, "screen_index": 2, "fps": 30, "crf": 28, "audio_input": "0", "preset": "ultrafast"},
         },
         "quality_check": {"enabled": True, "model": "x", "min_score_to_pass": 70, "min_char_per_second": 1.0, "max_char_per_second": 15.0},
-        "browser_plugin": {"name": "VideoTrans", "enabled": True, "remind_timeout_sec": 30, "plugin_paths": []},
         "summary": {"model": "x", "target_words_min": 500, "target_words_max": 800, "notes_file": "./notes/v.md", "cross_video_dedup": True, "trigger_mode": "quota", "notes_section_header": "## x"},
         "quota": {"summary_threshold_sec": 21600, "on_exhausted": "stop_session"},
         "history": {"file": "./logs/h.jsonl"},
@@ -480,3 +479,117 @@ class TestNewBackgroundPageCallsCleanup:
         result = driver.new_background_page()
         assert result is not None
         assert b_page.close_calls == 0  # B站页不会被误关
+
+
+# ---------------- v3.2.1.4: _submit 重入(嵌套 submit)死锁 ----------------
+
+
+class TestSubmitReentrancy:
+    """v3.2.1.4 root cause:driver thread 上执行的 fn 再调 _submit → 自锁。
+
+    F2-6 spike 卡死链路:
+        controller.phase_a_start_url
+          → driver.arun_on_driver_thread(driver.new_background_page)   # 第 1 层 submit
+              → new_background_page 内部 _submit(_create)              # 第 2 层 submit
+                  → future.result() 阻塞,但唯一消费者 driver thread 正卡在第 1 层
+                      → 永久死锁
+
+    修法:_submit 检测 current_thread is _driver_thread → 直接执行,不入队。
+    """
+
+    def _make_driver(self):
+        ctx = FakeContextWithPages([])
+        ctx.new_page = lambda: MagicMock(name="page")
+        browser = FakeBrowser(contexts=[ctx])
+        cfg = VLAConfig.model_construct()
+        driver = BrowserDriver(cfg)
+        driver.set_browser_provider(lambda: browser)
+        driver.connect()
+        return driver
+
+    def test_nested_submit_does_not_deadlock(self):
+        """driver thread 上的 fn 再调 driver 自己的 _submit 方法 → 不死锁。"""
+        driver = self._make_driver()
+
+        # 这正是 controller 的写法:把内部已 _submit 的方法再 submit 一次
+        result = driver.run_on_driver_thread(driver.new_background_page)
+        assert result is not None
+
+    def test_nested_submit_runs_on_driver_thread(self):
+        """重入路径仍然在 driver thread 上执行(greenlet invariant 不破)。"""
+        import threading
+
+        driver = self._make_driver()
+        seen: list[int] = []
+
+        def outer():
+            seen.append(threading.get_ident())
+            # 嵌套:在 driver thread 上再 submit
+            driver.run_on_driver_thread(lambda: seen.append(threading.get_ident()))
+
+        driver.run_on_driver_thread(outer)
+
+        assert len(seen) == 2
+        # 内外两层必须同 thread — 否则 sync Playwright 会撞 greenlet
+        assert seen[0] == seen[1]
+        assert seen[0] == driver._driver_thread.ident
+
+    @pytest.mark.asyncio
+    async def test_arun_nested_submit_does_not_deadlock(self):
+        """async 入口(controller 实际走的路径)同样不死锁。"""
+        import asyncio
+
+        driver = self._make_driver()
+        page = await asyncio.wait_for(
+            driver.arun_on_driver_thread(driver.new_background_page),
+            timeout=5.0,
+        )
+        assert page is not None
+
+
+# ---------------- v3.2.1.5: BrowserDriver.targets() ----------------
+
+
+class TestTargetsCdp:
+    """v3.2.1.5: 列出所有 CDP 目标 — service_worker / page / iframe / 扩展等。
+
+    TabAudioRecorder.probe_status 用此枚举 chrome-extension service_worker
+    来定位扩展(不依赖 chrome.management API,该 API 在普通页面不可用)。
+
+    Playwright sync API 没暴露 browser.targets(),改走 HTTP /json/list 拿 targets。
+    """
+
+    def test_targets_returns_empty_when_browser_none(self):
+        cfg = VLAConfig.model_construct()
+        d = BrowserDriver(cfg)
+        # 未 connect,_browser = None
+        import asyncio
+        result = asyncio.run(d.targets())
+        assert result == []
+
+    def test_targets_uses_http_json_list(self, monkeypatch):
+        """targets() 必须走 HTTP /json/list,不能调 browser.targets()。"""
+        cfg = VLAConfig.model_construct()
+        d = BrowserDriver(cfg)
+        d._browser = MagicMock(name="browser")
+
+        captured: list[str] = []
+
+        def fake_urlopen(url, timeout=None):
+            captured.append(url)
+            body = b'[{"type":"service_worker","url":"chrome-extension://abcdefghijklmnopqrstuvwxyzabcdef/"}]'
+            cm = MagicMock()
+            cm.__enter__ = lambda self: cm
+            cm.__exit__ = lambda self, *a: None
+            cm.read = lambda: body
+            return cm
+
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+        import asyncio
+        result = asyncio.run(d.targets())
+
+        assert len(captured) == 1
+        assert captured[0].endswith("/json/list")
+        assert isinstance(result, list)
+        assert result[0]["type"] == "service_worker"

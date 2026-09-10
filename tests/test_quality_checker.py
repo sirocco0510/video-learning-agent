@@ -71,9 +71,8 @@ def cfg(tmp_path: Path) -> VLAConfig:
             "model": "gpt-4o-mini",
             "min_score_to_pass": 70,
             "min_char_per_second": 1.0,
-            "max_char_per_second": 15.0,
+            "max_char_per_second": 20.0,
         },
-        "browser_plugin": {"name": "VideoTrans", "enabled": True, "remind_timeout_sec": 30, "plugin_paths": []},
         "summary": {"model": "x", "target_words_min": 500, "target_words_max": 800, "notes_file": "./notes/v.md", "cross_video_dedup": True, "trigger_mode": "quota", "notes_section_header": "## x"},
         "quota": {"summary_threshold_sec": 21600, "on_exhausted": "stop_session"},
         "history": {"file": "./logs/h.jsonl"},
@@ -157,8 +156,8 @@ class TestHeuristicSpeed:
         llm = FakeLLM(response="should not be called")
         checker.set_llm(llm)
 
-        # 1000 字 / 60s = 16.7 cps(高于 15.0)
-        text = normal_text(1000)
+        # 1400 字 / 60s = 23.3 cps(高于 20.0)
+        text = normal_text(1400)
         result = checker.check(text, "t", duration_sec=60, model_size="small")
 
         assert result.passed is False
@@ -182,12 +181,58 @@ class TestHeuristicSpeed:
         llm = FakeLLM(response=make_pass_response())
         checker.set_llm(llm)
 
-        # 600 字 / max(0, 1) = 600 cps → 远超 max=15 → fail
+        # 600 字 / max(0, 1) = 600 cps → 远超 max=20 → fail
         text = normal_text(600)
         result = checker.check(text, "t", duration_sec=0, model_size="small")
 
         assert result.passed is False
         assert any("语速" in i for i in result.issues)
+
+
+# ---------------- 启发式:长度下界(v3.2 新增) ----------------
+
+
+class TestHeuristicLength:
+    """2026-09-07 v3.2 新增:char_count < min_chars → fail score=5,不调 LLM。"""
+
+    def test_short_text_fails_without_llm(self, cfg, checker: QualityChecker):
+        """文本 < min_chars(默认 50)→ fail score=5,不调 LLM。"""
+        llm = FakeLLM(response="should not be called")
+        checker.set_llm(llm)
+
+        # 30 字 < min_chars=50
+        text = "短" * 30
+        result = checker.check(text, "t", duration_sec=600, model_size="small")
+
+        assert isinstance(result, QualityResult)
+        assert result.passed is False
+        assert result.score == 5
+        assert any("文本过短" in i or "过短" in i for i in result.issues)
+        assert len(llm.calls) == 0
+
+    def test_text_at_min_chars_proceeds_to_llm(self, cfg, checker: QualityChecker):
+        """文本 = min_chars(50)→ 启发式通过,继续走 LLM。"""
+        llm = FakeLLM(response=make_pass_response())
+        checker.set_llm(llm)
+
+        # 50 字 + 600s = 0.083 cps → 会触发语速过低启发式,所以这里用 100s 让 cps=0.5
+        # 但语速 0.5 < 1.0 也会 fail ... 我们要测的是长度启发式先放过
+        # 用 10s 视频 + 50 字 = cps 5 在范围内
+        text = "中" * 50
+        result = checker.check(text, "t", duration_sec=10, model_size="small")
+
+        # 应该调 LLM(因为长度恰好不触发)
+        assert len(llm.calls) == 1
+
+    def test_long_text_proceeds_to_llm(self, cfg, checker: QualityChecker):
+        """正常长度文本 → 调 LLM,不被长度启发式拦截。"""
+        llm = FakeLLM(response=make_pass_response())
+        checker.set_llm(llm)
+
+        text = normal_text(600)  # 600 字
+        result = checker.check(text, "t", duration_sec=100, model_size="small")
+
+        assert len(llm.calls) == 1
 
 
 # ---------------- 启发式:重复异常 ----------------
@@ -249,6 +294,17 @@ class TestLLMCall:
         assert "100" in prompt
         assert "small" in prompt
         assert text in prompt
+
+    def test_prompt_contains_length_dimension(self, cfg, checker: QualityChecker):
+        """v3.2:PROMPT 应包含 '文本长度合理性' 检查维度。"""
+        llm = FakeLLM(response=make_pass_response())
+        checker.set_llm(llm)
+
+        text = normal_text(600)
+        checker.check(text, "t", duration_sec=100, model_size="small")
+
+        prompt = llm.calls[0]["prompt"]
+        assert "文本长度合理性" in prompt
 
 
 # ---------------- pass/fail 阈值 ----------------

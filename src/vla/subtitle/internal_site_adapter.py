@@ -7,12 +7,10 @@ Phase 9.6 (2026-09-09) 实装 bill-jc.com 域:`fetch_via_spider` 委托给
 "via": "internal_spider"})`。`strategy.get_subtitle` 在 ① 与 ② 之间探测这个
 方法,命中后 fetch_asset 路径 ② 走 `extract_m3u8_audio`。
 
-F2-7 历史:
-- 继承 PlatformAdapter(base class),与 BilibiliAdapter 风格一致
-- __init__ 接 F2-7 deps(audio_factory / tab_recorder / transcriber /
-  screenshot_controller);tab_recorder / screenshot_controller 已无生产调用,
-  签名保留以兼容 tests/test_internal_site_adapter.py `_stub_deps()` 注入
-  MagicMock(删除会触发 TypeError)。
+2026-09-10 轻量化:tab_recorder 依赖已删除(原 F2-7 4 deps 缩为 3 deps)。
+signature 仍允许 transcriber/screenshot_controller 是因为 fetch_via_recording
+的兜底路径(虽然 bill-jc 实际不触发)可能用到 transcriber,而测试 fixture
+习惯性注入 audio_factory + transcriber。
 
 匹配规则:`b-learning.bill-jc.com` / `internal.example.com` / `video.corp.local`。
 """
@@ -29,7 +27,6 @@ if TYPE_CHECKING:
     from vla.audio.source_factory import AudioSourceFactory
     from vla.capture.screenshot_phase_controller import ScreenshotPhaseController
     from vla.subtitle.internal_site_spider import InternalSiteSpider
-    from vla.subtitle.tab_audio_recorder import TabAudioRecorder
     from vla.transcribe.streaming import AudioTranscriber
 
 
@@ -54,7 +51,6 @@ class InternalSiteAdapter(PlatformAdapter):
         self,
         *,
         audio_factory: "AudioSourceFactory | None" = None,
-        tab_recorder: "TabAudioRecorder | None" = None,
         transcriber: "AudioTranscriber | None" = None,
         screenshot_controller: "ScreenshotPhaseController | None" = None,
         spider: "InternalSiteSpider | None" = None,  # Phase 9.6:bill-jc 用
@@ -62,10 +58,8 @@ class InternalSiteAdapter(PlatformAdapter):
         # Round 3 修复:所有 deps 默认 None — 让 `register(InternalSiteAdapter)`
         # 类注册 fallback 在 internal_spider=None 时仍能实例化,避免生产 CLI
         # 走 bill-jc URL 时 fetch_asset 的兜底 except 把 TypeError 静默吃掉。
-        # 真实 fetch_via_spider 不依赖这些 deps(只调 spider.fetch_m3u8),
-        # _audio_factory / _tab_recorder / _transcriber 仅 F2-7 历史签名保留。
+        # 真实 fetch_via_spider 不依赖这些 deps(只调 spider.fetch_m3u8)。
         self._audio_factory = audio_factory
-        self._tab_recorder = tab_recorder
         self._transcriber = transcriber
         self._screenshot_controller = screenshot_controller
         # Phase 9.6:可空 — 兼容 _stub_deps() 测试 fixture(无 spider 仍能实例化)

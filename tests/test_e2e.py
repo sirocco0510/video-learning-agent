@@ -48,7 +48,6 @@ def cfg(tmp_path: Path) -> VLAConfig:
         "whisper": {"model": "small", "language": "zh", "segment_seconds": 30, "compute_type": "int8"},
         "video_source": {"prefer_download": True, "download": {"format": "worst"}, "record": {"enabled": True, "screen_index": 2, "fps": 30, "crf": 28, "audio_input": "0", "preset": "ultrafast"}},
         "quality_check": {"enabled": True, "model": "x", "min_score_to_pass": 70, "min_char_per_second": 1.0, "max_char_per_second": 15.0},
-        "browser_plugin": {"name": "Screen Recorder", "enabled": True, "remind_timeout_sec": 30, "plugin_paths": []},
         "summary": {"model": "x", "target_words_min": 500, "target_words_max": 800, "notes_file": str(tmp_path / "notes.md"), "cross_video_dedup": True, "trigger_mode": "quota", "notes_section_header": "## x"},
         "quota": {"summary_threshold_sec": 21600, "on_exhausted": "stop_session"},
         "history": {"file": str(tmp_path / "h.jsonl")},
@@ -294,7 +293,7 @@ def test_e2e_2c_plugin_timeout_degrades_to_whisper(cfg, tmp_path):
 # ---------------- E2E-2d: 插件字幕质量不过关 → 标 unavailable ----------------
 
 
-def test_e2e_2d_plugin_quality_fail_marks_unavailable(cfg):
+async def test_e2e_2d_plugin_quality_fail_marks_unavailable(cfg):
     """插件字幕命中但质量不过关 → plugin_status.is_unavailable()=True。"""
     checker = StubChecker(passed=False, score=20, issues=["格式异常"])
     notifier = StubNotifier()
@@ -314,7 +313,7 @@ def test_e2e_2d_plugin_quality_fail_marks_unavailable(cfg):
         text_provider=provider, plugin_status=plugin_status,
     )
 
-    agent.run([make_task("BV2d", "插件差视频")])
+    await agent.run([make_task("BV2d", "插件差视频")])
 
     assert plugin_status.is_unavailable()
     assert plugin_status.reason == "plugin_quality_fail"
@@ -371,7 +370,7 @@ def test_e2e_4_record_only_video_uses_record_path(cfg, tmp_path):
 # ---------------- E2E-5: 静音视频 → quality_fail + audio 保留 ----------------
 
 
-def test_e2e_5_silent_video_quality_fail(cfg, tmp_path):
+async def test_e2e_5_silent_video_quality_fail(cfg, tmp_path):
     """Whisper 转写文本极短(语速异常)→ quality_fail,video 已删但 audio 保留。"""
     work_dir = tmp_path / "tmp"
     work_dir.mkdir()
@@ -401,7 +400,7 @@ def test_e2e_5_silent_video_quality_fail(cfg, tmp_path):
         cfg, checker=checker, notifier=notifier, summarizer=summarizer,
         text_provider=lambda t: (text, src, audio),
     )
-    stats = agent.run([make_task("BV5", "静音视频", duration=600)])
+    stats = await agent.run([make_task("BV5", "静音视频", duration=600)])
 
     assert stats["failed"] == 1
     assert audio.exists()  # 保留
@@ -410,7 +409,7 @@ def test_e2e_5_silent_video_quality_fail(cfg, tmp_path):
 # ---------------- E2E-6: 失败后重试(CSV 重读 + 重新处理) ----------------
 
 
-def test_e2e_6_retry_after_quality_fail(cfg, tmp_path):
+async def test_e2e_6_retry_after_quality_fail(cfg, tmp_path):
     """第一次失败 → 第二次注入 quality text → 通过。"""
     work_dir = tmp_path / "tmp"
     work_dir.mkdir()
@@ -436,7 +435,7 @@ def test_e2e_6_retry_after_quality_fail(cfg, tmp_path):
         cfg, checker=checker1, notifier=notifier, summarizer=summarizer,
         text_provider=provider1,
     )
-    stats1 = agent1.run([make_task("BV6", "重试视频")])
+    stats1 = await agent1.run([make_task("BV6", "重试视频")])
     assert stats1["failed"] == 1
     assert audio1.exists()  # 保留供重试
 
@@ -448,14 +447,14 @@ def test_e2e_6_retry_after_quality_fail(cfg, tmp_path):
         cfg, checker=checker2, notifier=notifier, summarizer=summarizer,
         text_provider=make_text_provider(StubStrategy({}), FakeSF(), tr2, cfg),
     )
-    stats2 = agent2.run([make_task("BV6", "重试视频")])
+    stats2 = await agent2.run([make_task("BV6", "重试视频")])
     assert stats2["passed"] == 1
 
 
 # ---------------- E2E-7: 累计 6h → 触发总结 ----------------
 
 
-def test_e2e_7_quota_triggers_summary(cfg, tmp_path):
+async def test_e2e_7_quota_triggers_summary(cfg, tmp_path):
     """3 条 × 7200s = 21600 → 触发。"""
     strategy = StubStrategy({
         "BV7a": SubtitleResult(text="字幕A" * 30, source="api", metadata={}),
@@ -481,7 +480,7 @@ def test_e2e_7_quota_triggers_summary(cfg, tmp_path):
         make_task("BV7b", "B", duration=7200),
         make_task("BV7c", "C", duration=7200),
     ]
-    stats = agent.run(tasks)
+    stats = await agent.run(tasks)
 
     assert stats["summarized"] == 1
     assert len(summarizer.calls) == 1
@@ -492,7 +491,7 @@ def test_e2e_7_quota_triggers_summary(cfg, tmp_path):
 # ---------------- E2E-8: history 去重 ----------------
 
 
-def test_e2e_8_dedup_skips_already_done(cfg, tmp_path):
+async def test_e2e_8_dedup_skips_already_done(cfg, tmp_path):
     """history 已有 url_key → agent 不调 text_provider。"""
     # 预先记录
     history = HistoryManager(cfg.history.file)
@@ -518,7 +517,7 @@ def test_e2e_8_dedup_skips_already_done(cfg, tmp_path):
         summarizer=summarizer, notifier=notifier, text_provider=provider,
     )
 
-    stats = agent.run([make_task("BV8", "已转写")])
+    stats = await agent.run([make_task("BV8", "已转写")])
 
     assert stats["skipped"] == 1
     assert stats["processed"] == 0
@@ -645,12 +644,9 @@ def _build_real_strategy(cfg, *, popup_response, recorder=None):
         driver=MagicMock() if recorder else None,
         recorder=recorder,
         notifier=notifier, plugin_status=plugin_status,
-        remind_timeout_sec=cfg.browser_plugin.remind_timeout_sec,
-        plugin_name=cfg.browser_plugin.name,
         save_dir=tmp_path_factory_mkdir(),
         # F2-7:4 deps(测试用 MagicMock)
         audio_factory=MagicMock(),
-        tab_recorder=MagicMock(),
         transcriber=MagicMock(),
         screenshot_controller=MagicMock(),
     )
@@ -691,9 +687,9 @@ def test_e2e_2e_plugin_enabled_triggers_recorder_returns_text(cfg, tmp_path):
     assert "屏幕录制转写" in text
     assert src == "whisper"
     assert audio is None  # 屏幕录制路径 recorder 自己清理,无 .wav
-    # 弹窗被调 1 次,plugin_name = "Screen Recorder"(config 已改)
+    # 弹窗被调 1 次,plugin_name = "Free Tab Audio Recorder"(v3.2 扩展全名)
     assert len(notifier.popup_calls) == 1
-    assert notifier.popup_calls[0]["plugin_name"] == "Screen Recorder"
+    assert notifier.popup_calls[0]["plugin_name"] == "Free Tab Audio Recorder"
     assert notifier.popup_calls[0]["timeout_sec"] == 30
     # recorder 被调过(duration_sec + save_dir)
     recorder.record_and_transcribe.assert_called_once()
@@ -806,9 +802,10 @@ def test_e2e_2g_plugin_timeout_marks_unavailable_and_downgrades(cfg, tmp_path):
     # plugin_status 标 unavailable,reason = "popup_timeout"
     assert plugin_status.is_unavailable()
     assert plugin_status.reason == "popup_timeout"
-    # FR-2.21:超时分支通知用户。MacOSNotifier.ask_open_browser 内部会调 self.warning;
+    # FR-2.21:超时分支通知用户。NotifierLike.ask_open_browser 内部会调 self.warning;
     # PopupFlowNotifier stub 这里只验证 strategy 行为,MacOSNotifier 的 warning 行为
     # 在 tests/test_macos_notify.py:test_ask_open_browser_timeout_triggers_warning_notification 单独验证。
+    # 2026-09-10 轻量化:cross-platform NotifierLike 抽象,Windows 走 NullNotifier。
 
 
 def test_e2e_2h_session_single_popup_no_repeat_for_subsequent_videos(cfg, tmp_path):
@@ -839,10 +836,8 @@ def test_e2e_2h_session_single_popup_no_repeat_for_subsequent_videos(cfg, tmp_pa
         registry=PopupFlowRegistry(adapter1),
         driver=None, recorder=None,
         notifier=notifier, plugin_status=plugin_status,
-        remind_timeout_sec=cfg.browser_plugin.remind_timeout_sec,
         # F2-7:4 deps(测试用 MagicMock)
         audio_factory=MagicMock(),
-        tab_recorder=MagicMock(),
         transcriber=MagicMock(),
         screenshot_controller=MagicMock(),
     )
@@ -862,10 +857,8 @@ def test_e2e_2h_session_single_popup_no_repeat_for_subsequent_videos(cfg, tmp_pa
         registry=PopupFlowRegistry(adapter2),
         driver=None, recorder=None,
         notifier=notifier, plugin_status=plugin_status,
-        remind_timeout_sec=cfg.browser_plugin.remind_timeout_sec,
         # F2-7:4 deps(测试用 MagicMock)
         audio_factory=MagicMock(),
-        tab_recorder=MagicMock(),
         transcriber=MagicMock(),
         screenshot_controller=MagicMock(),
     )

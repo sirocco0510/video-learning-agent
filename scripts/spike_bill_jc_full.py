@@ -23,8 +23,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 import sys
 from pathlib import Path
+
+from vla.config import VLAConfig
+from vla.subtitle.internal_site_spider import InternalSiteSpider
+
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -77,6 +82,10 @@ def run(
     root_label: str | None = typer.Option(
         None, "--root-label", help="list 模式:限定根目录 label(如 '技术分享')",
     ),
+    catalog_id: str | None = typer.Option(
+        None, "--catalog-id",
+        help="list 模式:直接指定 catalogId 跳过 tree(从 bill-jc URL 拿)",
+    ),
     limit: int = typer.Option(
         10, "--limit", help="list 模式:最多返回几条 VideoTask",
     ),
@@ -111,7 +120,7 @@ def run(
     )
 
     if list_only:
-        _run_list_mode(spider, root_label, limit)
+        _run_list_mode(spider, root_label, catalog_id, limit)
         return
 
     if kng_id is None:
@@ -126,13 +135,24 @@ def run(
 def _run_list_mode(
     spider: "InternalSiteSpider",
     root_label: str | None,
+    catalog_id: str | None,
     limit: int,
 ) -> None:
-    """模式 1:爬目录树 + 视频列表,打印 kng_id / title / url。"""
+    """模式 1:爬目录树 + 视频列表,打印 kng_id / title / url。
+
+    优先级:catalog_id > root_label > 全树。
+    catalog_id 是从 bill-jc 页面 URL 直接拿,跳过 tree API 更快。
+    """
     logger = logging.getLogger("spike.list")
-    logger.info("[LIST] root_label=%r limit=%d", root_label, limit)
+    logger.info(
+        "[LIST] root_label=%r catalog_id=%r limit=%d", root_label, catalog_id, limit
+    )
     try:
-        tasks = asyncio.run(spider.list_tasks(root_label=root_label, limit=limit))
+        tasks = asyncio.run(
+            spider.list_tasks(
+                root_label=root_label, catalog_id=catalog_id, limit=limit
+            )
+        )
     except ValueError as e:
         logger.error("[FAIL] %s", e)
         raise typer.Exit(1)
@@ -164,7 +184,6 @@ async def _run_endtoend(
     # "QualityChecker 没有 LLM 客户端…" RuntimeError 在 happy path 上)。
     from vla.llm.client import LLMClient
     from vla.subtitle.strategy import SubtitleStrategy
-    from vla.subtitle.tab_audio_recorder import TabAudioRecorder
     from vla.subtitle.browser_driver import BrowserDriver
     from vla.audio.source_factory import AudioSourceFactory
     from vla.subtitle.platform_adapter import PlatformAdapterRegistry
@@ -173,41 +192,41 @@ async def _run_endtoend(
     from vla.subtitle.internal_site_adapter import InternalSiteAdapter
     from vla.transcribe.streaming import StreamingTranscriber
     from vla.state.plugin_status import PluginStatus
-    from vla.ui.macos_notify import MacOSNotifier
+    from vla.ui.notifier import create_notifier
     from vla.log.transcription_log import TranscriptionLog
     from vla.subtitle.audio_scan import find_today_dir
     from vla.quality.checker import QualityChecker
     from vla.quality.refiner import SubtitleRefiner
 
-    save_dir = Path(cfg.storage.tmp_dir)
+    save_dir = Path(cfg.storage.tmp_dir).resolve()
     save_dir.mkdir(parents=True, exist_ok=True)
-    notifier = MacOSNotifier()
+    # 2026-09-10 轻量化:跨平台 notifier — macOS 走 MacOSNotifier,
+    # Windows/Linux 走 NullNotifier。Windows 上 ask_open_browser 直接
+    # 返 "skip",策略 ② 弹窗不阻塞。
+    notifier = create_notifier()
     plugin_status = PluginStatus()
     log = TranscriptionLog(cfg.logging.log_dir)
     transcriber = StreamingTranscriber(cfg)
 
-    # driver 可选(若 Chrome debug 未启 → None,不影响 fetch_asset 路径 ②)
+    # driver=None 跳过 BrowserDriver 后台 thread:bill-jc 路径走 InternalSiteSpider
+    # + extract_browser_audio,两者都直接 connect_over_cdp(临时连接,不长期持有
+    # Playwright)。BrowserDriver 后台 thread 也会连 cdp,跟 extract_browser_audio
+    # 抢同一个 Chrome 实例的 Playwright lock 导致新 page 创建慢/超时。
+    # 策略 ② 仍需要 driver=None 才能走通 — bill-jc 走策略 ①-a spider 路径,无影响。
     driver = None
-    try:
-        driver = BrowserDriver(cfg)
-        driver.connect()
-        logger.info("✓ Chrome CDP 已连接")
-    except Exception as e:
-        logger.warning("⚠ Chrome CDP 连接失败(driver=None,继续):%s", e)
-        driver = None
+    logger.info("✓ driver=None(bill-jc 路径走 spider + extract_browser_audio,无后台 thread)")
 
     audio_factory = AudioSourceFactory(save_dir=save_dir / "audio_raw")
-    # Important 3:getattr 不支持 dotted path — 用字面量"tab audio"。
-    # 真实生产用 plugin_path 匹配(f26_pipeline.py:242),spike 不依赖扩展。
-    tab_recorder = TabAudioRecorder(
-        match_keyword="tab audio",
-        save_dir=save_dir / "audio_raw",
-    )
+    # 2026-09-10:TabAudioRecorder 已删,strategy 不再持有扩展依赖。
 
     # Critical 1 wiring:InternalSiteAdapter 必须以"实例注册 + spider 注入"形式
     # 装配,这样 strategy.get_subtitle 策略 ①-a 才能命中 bill-jc URL。
     # 类注册(spider=None) → fetch_via_spider 内部 _spider is None → None,
     # 策略 ①-a miss → 后续路径不会触发。
+    #
+    # Round 3 修复:本 spike 是 bill-jc 专用,不门控 internal_site.enabled —
+    # 生产 config 默认 enabled=false,gate 会让 spike 静默降级到 path ③。
+    # _build_registry 的 gate 保留(生产路径)。
     registry = PlatformAdapterRegistry()
     if cfg.platforms.bilibili.enabled:
         official = BilibiliOfficialSubtitle()
@@ -216,14 +235,12 @@ async def _run_endtoend(
             audio_factory=audio_factory,
             transcriber=transcriber,
         ))
-    if cfg.platforms.internal_site.enabled:
-        registry.register_instance(InternalSiteAdapter(
-            audio_factory=audio_factory,
-            tab_recorder=tab_recorder,
-            transcriber=transcriber,
-            spider=spider,  # Phase 9.6:spider 注入,fetch_via_spider 才真走路径
-        ))
-        logger.info("✓ InternalSiteAdapter 已注册(instance, spider 已注入)")
+    registry.register_instance(InternalSiteAdapter(
+        audio_factory=audio_factory,
+        transcriber=transcriber,
+        spider=spider,  # Phase 9.6:spider 注入,fetch_via_spider 才真走路径
+    ))
+    logger.info("✓ InternalSiteAdapter 已注册(instance, spider 已注入,无 gate)")
 
     strategy = SubtitleStrategy(
         registry=registry,
@@ -231,10 +248,7 @@ async def _run_endtoend(
         recorder=None,
         notifier=notifier,
         plugin_status=plugin_status,
-        remind_timeout_sec=cfg.browser_plugin.remind_timeout_sec,
-        plugin_name=cfg.browser_plugin.name,
         audio_factory=audio_factory,
-        tab_recorder=tab_recorder,
         transcriber=transcriber,
         save_dir=save_dir,
         cfg=cfg,
@@ -271,10 +285,10 @@ async def _run_endtoend(
         id=kng_id,
         title=f"bill-jc-{kng_id}",
         url=f"https://b-learning.bill-jc.com/learn/{kng_id}",
-        # TODO(Phase 9.6):brief 强制 3600,quality 会按 3600s 估 char_per_second。
-        # 真实场景应从 spider.list_tasks 拿 expected_duration;spike 阶段
-        # 不阻塞主链路验收,先以 placeholder 跑通。
-        expected_duration=3600,
+        # spike 端:从 wav ffprobe 拿真实 duration,避免 Phase 9.6 spider
+        # placeholder 3600 让 QualityChecker 误判语速过低。生产 CLI 走
+        # `cli.py:346` 传真实 duration;spider list_tasks 仍占位待后续 PR。
+        expected_duration=3600,  # 下面 fetch_asset 后会被覆盖
     )
 
     logger.info("[FETCH] kng_id=%s resolution=%s", kng_id, spider.resolution)
@@ -283,12 +297,27 @@ async def _run_endtoend(
         logger.error("[FAIL] fetch_asset 返回 None — 检查 Chrome debug + cookie")
         raise typer.Exit(1)
 
+    # 用 ffprobe 拿 wav 真实时长覆盖 placeholder 3600,避免 QualityChecker 误判
     if asset.audio_path is not None and asset.audio_path.exists():
         wav_size_mb = asset.audio_path.stat().st_size / 1e6
         logger.info(
             "[OK] Asset source=%s wav=%s size=%.1fMB",
             asset.source, asset.audio_path, wav_size_mb,
         )
+        # ffprobe → duration_sec
+        import json as _json
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "json", str(asset.audio_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if probe.returncode == 0:
+            try:
+                dur = float(_json.loads(probe.stdout)["format"]["duration"])
+                task.expected_duration = int(dur)
+                logger.info("[OK] wav duration=%ds → task.expected_duration 覆盖 placeholder", int(dur))
+            except (KeyError, ValueError, _json.JSONDecodeError) as e:
+                logger.warning("⚠ ffprobe parse failed: %s,保留 placeholder 3600", e)
     else:
         logger.info(
             "[OK] Asset source=%s text=%d chars(字幕直接命中,无需抽音)",

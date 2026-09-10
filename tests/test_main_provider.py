@@ -72,10 +72,6 @@ def _full_cfg(refine_enabled: bool) -> VLAConfig:
             "refine_max_chars": 6000,
             "refine_max_output_tokens": 2000,
         },
-        "browser_plugin": {
-            "name": "VideoTrans", "enabled": True, "remind_timeout_sec": 30,
-            "plugin_paths": [],
-        },
         "summary": {
             "model": "x", "target_words_min": 500, "target_words_max": 800,
             "notes_file": "./notes/v.md", "cross_video_dedup": True,

@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/Users/mima1234/.claude/plugins/cache/claude-plugins-official/superpowers/6.3.0/skills/subagent-driven-development/scripts/review-package /Users/mima1234/sirocco的知识库/01_Projects/video-learning-agent/docs/superpowers/plans/2026-09-09-asset-pipeline-refactor.md 75458af HEAD)",
+      "Bash(/Users/mima1234/.claude/plugins/cache/claude-plugins-official/superpowers/6.3.0/skills/subagent-driven-development/scripts/task-brief /Users/mima1234/sirocco的知识库/01_Projects/video-learning-agent/docs/superpowers/plans/2026-09-09-asset-pipeline-refactor.md 7)",
+      "Bash(/Users/mima1234/.claude/plugins/cache/claude-plugins-official/superpowers/6.3.0/skills/subagent-driven-development/scripts/review-package /Users/mima1234/sirocco的知识库/01_Projects/video-learning-agent/docs/superpowers/plans/2026-09-09-asset-pipeline-refactor.md 1f3c28a HEAD)",
+      "Bash(/Users/mima1234/.claude/plugins/cache/claude-plugins-official/superpowers/6.3.0/skills/subagent-driven-development/scripts/task-brief docs/superpowers/plans/2026-09-09-bill-jc-spider-impl.md 1)",
+      "Bash(/Users/mima1234/.claude/plugins/cache/claude-plugins-official/superpowers/6.3.0/skills/subagent-driven-development/scripts/review-package docs/superpowers/plans/2026-09-09-bill-jc-spider-impl.md 70112fe 294027c)",
+      "Bash(cp /Users/mima1234/sirocco的知识库/01_Projects/video-learning-agent/src/vla/subtitle/internal_site_spider.py /tmp/spider_backup.py)",
+      "Bash(/Users/mima1234/.claude/plugins/cache/claude-plugins-official/superpowers/6.3.0/skills/subagent-driven-development/scripts/review-package docs/superpowers/plans/2026-09-09-bill-jc-spider-impl.md 294027c bac05b3)"
+    ],
+    "additionalDirectories": [
+      "/tmp"
+    ]
+  }
+}

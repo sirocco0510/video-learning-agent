@@ -218,6 +218,40 @@ def test_ask_open_browser_returns_skip_when_user_clicks_skip(monkeypatch):
     assert result == "skip"
 
 
+def test_ask_open_browser_parses_single_line_comma_format(monkeypatch):
+    """2026-09 实测:osascript 单行输出 `button returned:X, gave up:Y`(非多行)。
+    parser 必须兼容两种格式(多行 \\n 分隔 vs 单行 , 分隔)。
+    """
+    import vla.ui.macos_notify as mod
+
+    def fake_run(cmd, **kw):
+        class R:
+            returncode = 0
+            stderr = ""
+            stdout = "button returned:已开启, gave up:false"
+        return R()
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    n = MacOSNotifier(enabled=True)
+    assert n.ask_open_browser("https://x", "VideoTrans") == "enabled"
+
+
+def test_ask_open_browser_single_line_timeout(monkeypatch):
+    """单行 `gave up:true` → 静默返回 timeout(2026-09 实测格式)。"""
+    import vla.ui.macos_notify as mod
+
+    def fake_run(cmd, **kw):
+        class R:
+            returncode = 0
+            stderr = ""
+            stdout = "button returned:, gave up:true"
+        return R()
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    n = MacOSNotifier(enabled=True)
+    assert n.ask_open_browser("https://x", "VideoTrans") == "timeout"
+
+
 def test_ask_open_browser_returns_timeout_when_gave_up(monkeypatch):
     """osascript gave up:true → 返回 "timeout"。"""
     import vla.ui.macos_notify as mod
@@ -252,7 +286,7 @@ def test_ask_open_browser_timeout_does_not_send_warning_notification(monkeypatch
     warning_called: list[tuple[str, str]] = []
     n.warning = lambda title, message: warning_called.append((title, message))  # type: ignore[method-assign]
 
-    result = n.ask_open_browser("https://x", "Screen Recorder", timeout_sec=30)
+    result = n.ask_open_browser("https://x", "Free Tab Audio Recorder", timeout_sec=30)
 
     assert result == "timeout"
     # 关键断言:warning 不被调用(避免和'录屏启动'/'录屏到时'信息噪音)

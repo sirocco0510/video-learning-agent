@@ -134,24 +134,32 @@ class TestPrepareForScreenshot:
     async def test_prepare_for_screenshot_calls_full_sequence(
         self, capture_macos: ScreenCapture
     ):
-        """bring_to_front → focus → moveTo/resizeTo → sleep(0.3), in order."""
-        page = AsyncMock()
+        """bring_to_front → focus → moveTo/resizeTo → sleep(0.3), in order.
+
+        v3.2.1.2 (F2-6 spike fix):page 操作都在 to_thread 里跑,所以 page 用
+        sync MagicMock,而不是 AsyncMock。`assert_called_*` 而不是 `assert_awaited_*`。
+        """
+        page = MagicMock()
         await capture_macos.prepare_for_screenshot(page)
 
-        page.bring_to_front.assert_awaited_once()
+        page.bring_to_front.assert_called_once()
         # Two evaluate calls: focus + moveTo/resizeTo
-        assert page.evaluate.await_count == 2
-        first_eval = page.evaluate.await_args_list[0]
+        assert page.evaluate.call_count == 2
+        first_eval = page.evaluate.call_args_list[0]
         assert first_eval.args[0] == "window.focus()"
-        second_eval = page.evaluate.await_args_list[1]
+        second_eval = page.evaluate.call_args_list[1]
         assert "window.moveTo(0, 0)" in second_eval.args[0]
         assert "window.resizeTo(screen.width, screen.height)" in second_eval.args[0]
 
     async def test_prepare_for_screenshot_swallows_errors(
         self, capture_macos: ScreenCapture
     ):
-        """Any page.evaluate failure → logged warning, no exception raised."""
-        page = AsyncMock()
+        """Any page.evaluate failure → logged warning, no exception raised.
+
+        v3.2.1.2:page 用 sync MagicMock(走 to_thread);side_effect 抛 RuntimeError,
+        to_thread 把异常传到 await,外层 try/except 接住并 log warning。
+        """
+        page = MagicMock()
         page.bring_to_front.side_effect = RuntimeError("page closed")
         # Must NOT raise
         await capture_macos.prepare_for_screenshot(page)

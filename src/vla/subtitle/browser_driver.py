@@ -3,7 +3,7 @@
 职责:
 - 通过 `connect_over_cdp` 接管用户已打开的 Chrome(无需重复登录)
 - `new_background_page()` 创建后台标签页(不抢焦点)
-  - 自动清理旧的扩展 popup(只留最新的一个)— 用户多次按 Cmd+Shift+R 不会堆积
+  - 自动清理旧的扩展 popup(只留最新的一个)
 - `fetch_subtitle_via_browser()` 跑 4 种 JS 探测(track → initial_state → player → DOM)
 - `_fetch_subtitle_text()` 用 `context.request` 跨 origin 下载字幕文本
   (绕过 CORS,使用浏览器已登录的 cookie)

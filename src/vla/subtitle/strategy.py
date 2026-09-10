@@ -39,7 +39,6 @@ if TYPE_CHECKING:
     from vla.audio.source_factory import AudioSourceFactory
     from vla.capture.screenshot_phase_controller import ScreenshotPhaseController
     from vla.config import VLAConfig
-    from vla.subtitle.tab_audio_recorder import TabAudioRecorder
     from vla.transcribe.streaming import AudioTranscriber
 
 
@@ -188,13 +187,10 @@ class SubtitleStrategy:
         recorder: Any,
         notifier: Any,
         plugin_status: Any,
-        remind_timeout_sec: int,
         *,
         audio_factory: "AudioSourceFactory",
-        tab_recorder: "TabAudioRecorder",  # F2-10:probe-only, 无生产调用,保留兼容测试 fixture
         transcriber: "AudioTranscriber",
         screenshot_controller: "ScreenshotPhaseController | None" = None,
-        plugin_name: str = "VideoTrans",
         log: logging.Logger | None = None,
         save_dir: Path | None = None,
         cfg: "VLAConfig | None" = None,
@@ -205,30 +201,28 @@ class SubtitleStrategy:
             driver: BrowserDriver(可选)
             recorder: 旧 Screen Recorder 桩(测试 fixture 注入 MagicMock;F2-8 后
                 无生产实例,代码路径保留以兼容既有测试 + 弹窗 enabled 流程)
-            notifier: MacOSNotifier(必填 — FR-2.5/2.6 弹窗)
+            notifier: NotifierLike(必填 — FR-2.5/2.6 弹窗;跨平台 NullNotifier/MacOSNotifier)
             plugin_status: PluginStatus(必填 — FR-2.9/2.10 session 单例)
-            remind_timeout_sec: 弹窗超时(秒),默认 30
             audio_factory: F2-7 必填 — 传给 adapter.fetch_via_recording path ①
-            tab_recorder: F2-7 必填(F2-10 后 probe-only)— 保留签名兼容既有测试
             transcriber: F2-7 必填 — 传给 adapter.fetch_via_recording
             screenshot_controller: F2-7 可选 — FR-2.28 PHASE A/B/C/D 触发器
-            plugin_name: 弹窗里展示的插件名
             log: logger
             save_dir: 录制目录
             cfg: F2-10 必填 — VLAConfig(cfg.audio.downloads_dir 用于扫今天 YYYY-MM-DD/)
+
+        2026-09-10 轻量化:tab_recorder / remind_timeout_sec / plugin_name 已删除。
+        Tab Audio Recorder 浏览器扩展依赖已移除,弹窗询问统一走 notifier.ask_open_browser
+        (macOS 走 MacOSNotifier 真实弹窗,Windows/Linux 走 NullNotifier 返回 "skip")。
         """
         self.registry = registry
         self.driver = driver
         self.recorder = recorder
         self.notifier = notifier
         self.plugin_status = plugin_status
-        self.remind_timeout_sec = remind_timeout_sec
-        # F2-7:4 deps 必填,get_subtitle 转发给 adapter.fetch_via_recording
+        # F2-7:deps 必填,get_subtitle 转发给 adapter.fetch_via_recording
         self.audio_factory = audio_factory
-        self.tab_recorder = tab_recorder
         self.transcriber = transcriber
         self.screenshot_controller = screenshot_controller
-        self.plugin_name = plugin_name
         self.log = log or logging.getLogger(__name__)
         self._save_dir = save_dir
         # F2-10:扫今天 YYYY-MM-DD/ 用 — 暂 None 容忍(老测试 + 兜底)
@@ -402,12 +396,12 @@ class SubtitleStrategy:
                 self.log.warning("暂停页面视频失败(best-effort):%s", e)
 
         self.log.info(
-            "策略 ② 第一次未拿到字幕,触发弹窗询问用户开启 %s", self.plugin_name,
+            "策略 ② 第一次未拿到字幕,触发弹窗询问用户开启字幕/录制方案",
         )
         response = self.notifier.ask_open_browser(
             url=url,
-            plugin_name=self.plugin_name,
-            timeout_sec=self.remind_timeout_sec,
+            plugin_name="字幕",  # 2026-09-10:TabAudioRecorder 已删,弹窗文案简化
+            timeout_sec=30,
         )
 
         # 4. 处理响应

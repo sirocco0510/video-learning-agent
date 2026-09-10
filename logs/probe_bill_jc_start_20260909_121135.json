@@ -1,0 +1,508 @@
+{
+  "video_urls_before_click": [],
+  "video_urls_after_click": [
+    "https://video.bill-jc.com/conversion/group1/v1/orgsv2/7c80b070-28ac-4c1a-b54b-35b327b870eb-tools20220805/kng/videos/202606/e8caac95d7e54808bc41a1501a1341ba/e8caac95d7e54808bc41a1501a1341ba_720p1.ts",
+    "https://video.bill-jc.com/conversion/group1/v1/orgsv2/7c80b070-28ac-4c1a-b54b-35b327b870eb-tools20220805/kng/videos/202606/e8caac95d7e54808bc41a1501a1341ba/e8caac95d7e54808bc41a1501a1341ba_720p0.ts",
+    "https://video.bill-jc.com/conversion/group1/v1/orgsv2/7c80b070-28ac-4c1a-b54b-35b327b870eb-tools20220805/kng/videos/202606/e8caac95d7e54808bc41a1501a1341ba/e8caac95d7e54808bc41a1501a1341ba_720p2.ts",
+    "https://video.bill-jc.com/conversion/group1/v1/orgsv2/7c80b070-28ac-4c1a-b54b-35b327b870eb-tools20220805/kng/videos/202606/e8caac95d7e54808bc41a1501a1341ba/e8caac95d7e54808bc41a1501a1341ba_720p.m3u8"
+  ],
+  "new_apis_after_click": [
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://images.yxt.com/dynamic/packages/yxt-pc/latest/lib/theme-chalk/icon.css",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://images.yxt.com/dynamic/packages/yxt-pc/latest/lib/theme-chalk/index.css",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://images.yxt.com/dynamic/packages/yxt-stylekit-pc/latest/lib/index.css",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://images.yxt.com/dynamic/packages/yxt-biz-pc/latest/lib/theme-chalk/index.css",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://images.yxt.com/dynamic/packages/yxt-amui/latest/lib/index.css",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://images.yxt.com/dynamic/packages/yxt-pc/latest/lib/index.js",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://images.yxt.com/npm/lottie-web-5.8.1/build/player/lottie.min.js",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://images.yxt.com/stc/js/IM/websdk3.3.2.js",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://images.yxt.com/dynamic/packages/IM/latest/lib/IM.umd.min.js",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://images.yxt.com/dynamic/packages/yxt-am-core/latest/index.umd.min.js",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://images.yxt.com/dynamic/packages/yxt-am-config/latest/lib/index.umd.min.js",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://images.yxt.com/dynamic/packages/yxt-am-re/latest/lib/index.umd.min.js",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://images.yxt.com/dynamic/packages/yxt-stylekit-pc/latest/lib/index.umd.min.js",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://images.yxt.com/dynamic/packages/yxt-amui/latest/lib/index.umd.min.js",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://s1.yxt.com/npm/lottie-web-5.8.1/build/player/lottie.min.js",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://s1.yxt.com/stc/js/IM/websdk3.3.2.js",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "POST",
+      "url": "https://ttrace-sys.yunxuetang.cn/errorreport/feErrorUpReport?yxt-header=app%3Dkngpc%26seq%3D1788927085396%26tm%3D1788927085%26ud%3D5a048314-abbd-40db-9378-9c1536aa581c%26ver%3D7.5.000-deploy%26type%3Djsfsperf%26sver%3D0.8.20%26sign%3D9bf8a190ef82c5049df7b199c599c45b",
+      "resource_type": "ping",
+      "post_data_preview": "%5B%7B%22w_url%22%3A%22https%3A%2F%2Fb-learning.bill-jc.com%2Fkng%2F%22%2C%22w_query%22%3A%22%22%2C%22w_ref%22%3A%22%2Fvideo%2Fplay%3FkngId%3D0268b79b-c752-4b30-abc6-23bc55ff2f26%26projectId%3D%26btid%3D%26gwnlUrl%3D%22%2C%22w_title%22%3A%22Lecture06-Agent%E6%99%BA%E8%83%BD%E4%BD%93%E7%B3%BB%E7%BB%9"
+    },
+    {
+      "phase": "after_click",
+      "method": "POST",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/study/submit/preinit",
+      "resource_type": "xhr",
+      "post_data_preview": "{\"kngId\":\"0268b79b-c752-4b30-abc6-23bc55ff2f26\",\"courseId\":\"\",\"studyParam\":{\"originOrgId\":\"\",\"previewType\":0},\"targetCode\":\"kng\",\"targetId\":\"\",\"targetParam\":{\"taskId\":\"\",\"projectId\":\"\",\"flipId\":\"\",\"batchId\":\"\"},\"customFunctionCode\":\"\"}"
+    },
+    {
+      "phase": "after_click",
+      "method": "POST",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/study/kngPlay",
+      "resource_type": "xhr",
+      "post_data_preview": "{\"kngId\":\"0268b79b-c752-4b30-abc6-23bc55ff2f26\",\"courseId\":\"\",\"fullname\":\"\",\"lang\":\"\",\"studyParam\":{\"originOrgId\":\"\",\"previewType\":0},\"targetCode\":\"kng\",\"targetId\":\"\",\"targetParam\":{\"taskId\":\"\",\"projectId\":\"\",\"flipId\":\"\",\"batchId\":\"\"},\"customFunctionCode\":\"\"}"
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://s1.yxt.com/static/packages/yxt-pc/2.7.75/lib/theme-chalk/icon.css",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://s1.yxt.com/static/packages/yxt-amui/0.1.109/lib/index.css",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://s1.yxt.com/static/packages/yxt-biz-pc/2.0.21/lib/theme-chalk/index.css",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://s1.yxt.com/static/packages/yxt-stylekit-pc/1.0.118/lib/index.css",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://s1.yxt.com/static/packages/yxt-pc/2.7.75/lib/theme-chalk/index.css",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://s1.yxt.com/static/packages/yxt-pc/2.7.75/lib/index.js",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://s1.yxt.com/static/packages/yxt-am-core/1.0.54/index.umd.min.js",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://s1.yxt.com/static/packages/yxt-am-config/1.0.7/lib/index.umd.min.js",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://s1.yxt.com/static/packages/IM/1.0.80/lib/IM.umd.min.js",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://s1.yxt.com/static/packages/yxt-stylekit-pc/1.0.118/lib/index.umd.min.js",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://s1.yxt.com/static/packages/yxt-amui/0.1.109/lib/index.umd.min.js",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://s1.yxt.com/static/packages/yxt-am-re/1.1.34/lib/index.umd.min.js",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://api-phx-ali.yunxuetang.cn/kng/beginnerguide/state?guideType=6",
+      "resource_type": "xhr",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://stc.yxt.com/ufd/55a3e0/pc/svg/icon_delete.svg",
+      "resource_type": "xhr",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "POST",
+      "url": "https://ttrace-sys.yunxuetang.cn/errorreport/feErrorUpReport?yxt-header=app%3Dkngpc%26seq%3D1788927085537%26tm%3D1788927085%26ud%3D5a048314-abbd-40db-9378-9c1536aa581c%26ver%3D7.5.000-deploy%26type%3Djssdkidx%26sver%3D0.8.20%26sign%3D9bf8a190ef82c5049df7b199c599c45b",
+      "resource_type": "ping",
+      "post_data_preview": "%5B%7B%22w_url%22%3A%22https%3A%2F%2Fb-learning.bill-jc.com%2Fkng%2F%22%2C%22w_query%22%3A%22%22%2C%22w_ref%22%3A%22%2Fvideo%2Fplay%3FkngId%3D0268b79b-c752-4b30-abc6-23bc55ff2f26%26projectId%3D%26btid%3D%26gwnlUrl%3D%22%2C%22w_title%22%3A%22Lecture06-Agent%E6%99%BA%E8%83%BD%E4%BD%93%E7%B3%BB%E7%BB%9"
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://api-phx.yunxuetang.cn/file/local/baseConfigByIdNew?orgid=7c80b070-28ac-4c1a-b54b-35b327b870eb",
+      "resource_type": "xhr",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://api-phx.yunxuetang.cn/file/fileInfo/detail?id=ab008139-5167-4b6e-9b06-585c72cea675",
+      "resource_type": "xhr",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://stc.yxt.com/ufd/55a3e0/kng/pc/other/3.8.3/mix/videojs/video.min.js",
+      "resource_type": "script",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "blob:https://b-learning.bill-jc.com/e7845a1e-2280-477a-a301-e0504d55ede1",
+      "resource_type": "script",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://stc.yxt.com/ufd/55a3e0/kng/pc/other/3.8.3/mix/videojs/videojs-contrib-hls.min.js",
+      "resource_type": "script",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://stc.yxt.com/ufd/55a3e0/kng/pc/other/3.8.3/mix/videojs/videojs-contrib-quality-levels.min.js",
+      "resource_type": "script",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://stc.yxt.com/ufd/55a3e0/kng/pc/other/3.8.3/mix/cyberplayer.js",
+      "resource_type": "script",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://hm.baidu.com/hm.js?20ba3a41aeedac500c94bdef787f57e6",
+      "resource_type": "script",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "blob:https://b-learning.bill-jc.com/efd2b685-66e4-40ac-b990-84d6fab1a50b",
+      "resource_type": "script",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://video.bill-jc.com/conversion/group1/v1/orgsv2/7c80b070-28ac-4c1a-b54b-35b327b870eb-tools20220805/kng/videos/202606/e8caac95d7e54808bc41a1501a1341ba/e8caac95d7e54808bc41a1501a1341ba_720p.m3u8",
+      "resource_type": "xhr",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://drm.media.baidubce.com/v1/playerAuth?ak=b57e71d512c64ac39543b585ea3f32b1&player=web-html5-3.5.6&platform=Chrome-152.0.0.0&callback=jwplayer_1788927085769_757242787",
+      "resource_type": "script",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "POST",
+      "url": "https://api-phx-ali.yunxuetang.cn/studylog/logs",
+      "resource_type": "xhr",
+      "post_data_preview": "{\"logTypeCode\":\"003\",\"uuId\":\"dc81b860-96d7-4bc9-9181-77196c174e71\",\"pageUrl\":\"https://b-learning.bill-jc.com/kng/#/video/play?kngId=0268b79b-c752-4b30-abc6-23bc55ff2f26&projectId=&btid=&gwnlUrl=\",\"requestHeaderJson\":{\"source\":501},\"ext5\":\"2026/9/9 12:11:25\",\"courseId\":\"\",\"kngId\":\"0268b79b-c752-4b30-"
+    },
+    {
+      "phase": "after_click",
+      "method": "POST",
+      "url": "https://api-phx-ali.yunxuetang.cn/studylog/logs",
+      "resource_type": "xhr",
+      "post_data_preview": "{\"logTypeCode\":\"003\",\"uuId\":\"dc81b860-96d7-4bc9-9181-77196c174e71\",\"pageUrl\":\"https://b-learning.bill-jc.com/kng/#/video/play?kngId=0268b79b-c752-4b30-abc6-23bc55ff2f26&projectId=&btid=&gwnlUrl=\",\"requestHeaderJson\":{\"source\":501},\"ext5\":\"2026/9/9 12:11:25\",\"courseId\":\"\",\"kngId\":\"0268b79b-c752-4b30-"
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "blob:https://b-learning.bill-jc.com/35043a5f-903c-483e-888a-40a4659d05b2",
+      "resource_type": "script",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://video.bill-jc.com/conversion/group1/v1/orgsv2/7c80b070-28ac-4c1a-b54b-35b327b870eb-tools20220805/kng/videos/202606/e8caac95d7e54808bc41a1501a1341ba/e8caac95d7e54808bc41a1501a1341ba_720p.m3u8",
+      "resource_type": "xhr",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "blob:https://b-learning.bill-jc.com/7c8aad2d-152c-4975-9e95-49e452c8d52e",
+      "resource_type": "script",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://api-file-phx.yunxuetang.cn/v2/auth/local/valid?fileId=ab008139-5167-4b6e-9b06-585c72cea675&jobId=5488952c0a9e4f12b9728cbd40e76c90",
+      "resource_type": "xhr",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://video.bill-jc.com/conversion/group1/v1/orgsv2/7c80b070-28ac-4c1a-b54b-35b327b870eb-tools20220805/kng/videos/202606/e8caac95d7e54808bc41a1501a1341ba/e8caac95d7e54808bc41a1501a1341ba_720p0.ts",
+      "resource_type": "xhr",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "POST",
+      "url": "https://ttrace-sys.yunxuetang.cn/errorreport/feErrorUpReport?yxt-header=app%3Dkngpc%26seq%3D1788927085787%26tm%3D1788927085%26ud%3D5a048314-abbd-40db-9378-9c1536aa581c%26ver%3D7.5.000-deploy%26type%3Dresloadfail%26sver%3D0.8.20%26sign%3D9bf8a190ef82c5049df7b199c599c45b",
+      "resource_type": "ping",
+      "post_data_preview": "%5B%7B%22w_url%22%3A%22https%3A%2F%2Fb-learning.bill-jc.com%2Fkng%2F%22%2C%22w_query%22%3A%22%22%2C%22w_ref%22%3A%22%2Fvideo%2Fplay%3FkngId%3D0268b79b-c752-4b30-abc6-23bc55ff2f26%26projectId%3D%26btid%3D%26gwnlUrl%3D%22%2C%22w_title%22%3A%22Lecture06-Agent%E6%99%BA%E8%83%BD%E4%BD%93%E7%B3%BB%E7%BB%9"
+    },
+    {
+      "phase": "after_click",
+      "method": "POST",
+      "url": "https://ttrace-sys.yunxuetang.cn/errorreport/feErrorUpReport?yxt-header=app%3Dkngpc%26seq%3D1788927086285%26tm%3D1788927086%26ud%3D5a048314-abbd-40db-9378-9c1536aa581c%26ver%3D7.5.000-deploy%26type%3Djssdkidx%26sver%3D0.8.20%26sign%3D9bf8a190ef82c5049df7b199c599c45b",
+      "resource_type": "ping",
+      "post_data_preview": "%5B%7B%22w_url%22%3A%22https%3A%2F%2Fb-learning.bill-jc.com%2Fkng%2F%22%2C%22w_query%22%3A%22%22%2C%22w_ref%22%3A%22%2Fvideo%2Fplay%3FkngId%3D0268b79b-c752-4b30-abc6-23bc55ff2f26%26projectId%3D%26btid%3D%26gwnlUrl%3D%22%2C%22w_title%22%3A%22Lecture06-Agent%E6%99%BA%E8%83%BD%E4%BD%93%E7%B3%BB%E7%BB%9"
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://video.bill-jc.com/conversion/group1/v1/orgsv2/7c80b070-28ac-4c1a-b54b-35b327b870eb-tools20220805/kng/videos/202606/e8caac95d7e54808bc41a1501a1341ba/e8caac95d7e54808bc41a1501a1341ba_720p1.ts",
+      "resource_type": "xhr",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://drm.media.baidubce.com:8888/v1/sdk-player/media/web/available?videoUrl=https://video.bill-jc.com/conversion/group1/v1/orgsv2/7c80b070-28ac-4c1a-b54b-35b327b870eb-tools20220805/kng/videos/202606/e8caac95d7e54808bc41a1501a1341ba/e8caac95d7e54808bc41a1501a1341ba_720p.m3u8&type=play&duration=600&time=2026-09-09%2012:11:26.450&sessionTime=1788927085735&env=%7B%22flashVersion%22%3A0%2C%22cyberPlayerVersion%22%3A%223.5.6%22%2C%22ak%22%3A%22b57e71d512c64ac39543b585ea3f32b1%22%2C%22provider%22%3A%22videojs%22%2C%22config%22%3A%22%22%7D&sendTime=2026-09-09%2012:11:26",
+      "resource_type": "script",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://drm.media.baidubce.com:8888/v1/sdk-player/user/web/play?videoUrl=https://video.bill-jc.com/conversion/group1/v1/orgsv2/7c80b070-28ac-4c1a-b54b-35b327b870eb-tools20220805/kng/videos/202606/e8caac95d7e54808bc41a1501a1341ba/e8caac95d7e54808bc41a1501a1341ba_720p.m3u8&videoHeight=undefined&videoWidth=undefined&playerHeight=100%25&playerWidth=100%25&duration=&size=&startPosition=0&service=vod&time=2026-09-09%2012:11:26.450&sessionTime=1788927085735&env=%7B%22flashVersion%22%3A0%2C%22cyberPlayerVersion%22%3A%223.5.6%22%2C%22ak%22%3A%22b57e71d512c64ac39543b585ea3f32b1%22%2C%22provider%22%3A%22videojs%22%2C%22config%22%3A%22%22%7D&sendTime=2026-09-09%2012:11:26",
+      "resource_type": "script",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://drm.media.baidubce.com:8888/v1/sdk-player/user/web/count?session=1788927085735&url=https://video.bill-jc.com/conversion/group1/v1/orgsv2/7c80b070-28ac-4c1a-b54b-35b327b870eb-tools20220805/kng/videos/202606/e8caac95d7e54808bc41a1501a1341ba/e8caac95d7e54808bc41a1501a1341ba_720p.m3u8&sendTime=2026-09-09%2012:11:26",
+      "resource_type": "script",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "POST",
+      "url": "https://api-phx-ali.yunxuetang.cn/studylog/logs",
+      "resource_type": "xhr",
+      "post_data_preview": "{\"logTypeCode\":\"003\",\"uuId\":\"dc81b860-96d7-4bc9-9181-77196c174e71\",\"pageUrl\":\"https://b-learning.bill-jc.com/kng/#/video/play?kngId=0268b79b-c752-4b30-abc6-23bc55ff2f26&projectId=&btid=&gwnlUrl=\",\"requestHeaderJson\":{\"source\":501},\"ext5\":\"2026/9/9 12:11:26\",\"courseId\":\"\",\"kngId\":\"0268b79b-c752-4b30-"
+    },
+    {
+      "phase": "after_click",
+      "method": "POST",
+      "url": "https://api-phx-ali.yunxuetang.cn/studylog/logs",
+      "resource_type": "xhr",
+      "post_data_preview": "{\"logTypeCode\":\"003\",\"uuId\":\"dc81b860-96d7-4bc9-9181-77196c174e71\",\"pageUrl\":\"https://b-learning.bill-jc.com/kng/#/video/play?kngId=0268b79b-c752-4b30-abc6-23bc55ff2f26&projectId=&btid=&gwnlUrl=\",\"requestHeaderJson\":{\"source\":501},\"ext5\":\"2026/9/9 12:11:26\",\"courseId\":\"\",\"kngId\":\"0268b79b-c752-4b30-"
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://streamobd.yunxuetang.cn/g/favicon_default.ico",
+      "resource_type": "other",
+      "post_data_preview": ""
+    },
+    {
+      "phase": "after_click",
+      "method": "GET",
+      "url": "https://video.bill-jc.com/conversion/group1/v1/orgsv2/7c80b070-28ac-4c1a-b54b-35b327b870eb-tools20220805/kng/videos/202606/e8caac95d7e54808bc41a1501a1341ba/e8caac95d7e54808bc41a1501a1341ba_720p2.ts",
+      "resource_type": "xhr",
+      "post_data_preview": ""
+    }
+  ],
+  "all_api_count": 258,
+  "button_candidates": [
+    {
+      "tag": "BUTTON",
+      "text": "取消",
+      "class": "yxt-button yxt-button--default"
+    },
+    {
+      "tag": "BUTTON",
+      "text": "提交",
+      "class": "yxt-button yxt-button--primary"
+    },
+    {
+      "tag": "BUTTON",
+      "text": "加入自学计划",
+      "class": "yxtf-button yxtf-button--primary"
+    },
+    {
+      "tag": "BUTTON",
+      "text": "取消",
+      "class": "yxtf-button yxtf-button--default"
+    },
+    {
+      "tag": "BUTTON",
+      "text": "确定",
+      "class": "yxtf-button yxtf-button--primary"
+    },
+    {
+      "tag": "BUTTON",
+      "text": "开始学习",
+      "class": "yxtf-button yxtf-button--primary yxtf-button--larger"
+    },
+    {
+      "tag": "BUTTON",
+      "text": "取消",
+      "class": "yxtf-button yxtf-button--default is-plain"
+    },
+    {
+      "tag": "BUTTON",
+      "text": "确认打赏",
+      "class": "yxtf-button yxtf-button--primary is-disabled"
+    },
+    {
+      "tag": "A",
+      "text": "网站首页",
+      "class": "hover-primary-6"
+    },
+    {
+      "tag": "A",
+      "text": "用户中心",
+      "class": "hover-primary-6"
+    },
+    {
+      "tag": "A",
+      "text": "建议反馈",
+      "class": "hover-primary-6"
+    },
+    {
+      "tag": "A",
+      "text": "苏ICP备14034064号-6",
+      "class": "hover-primary-6"
+    }
+  ]
+}

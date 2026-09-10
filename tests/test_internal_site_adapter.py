@@ -14,10 +14,12 @@ from vla.subtitle.internal_site_adapter import InternalSiteAdapter
 
 
 def _stub_deps():
-    """F2-7:InternalSiteAdapter 必填 4 deps(测试无关其内容,MagicMock 即可)。"""
+    """F2-7 → F2-10 简化:InternalSiteAdapter 必填 3 deps(测试无关其内容,MagicMock 即可)。
+
+    2026-09-10 轻量化:tab_recorder 已从 deps 删除(原 F2-7 4 deps 缩为 3 deps)。
+    """
     return dict(
         audio_factory=MagicMock(),
-        tab_recorder=MagicMock(),
         transcriber=MagicMock(),
         screenshot_controller=MagicMock(),
     )
@@ -163,10 +165,10 @@ class TestPhase96SpiderHook:
         transcriber / screenshot_controller),Registry 的 `get_for_url` 走
         `cls()` 无参构造时会抛 TypeError。Phase 9.6 把所有 deps 改成 None-default
         后,class-registration 在 internal_spider=None 的生产路径不再炸。
+        2026-09-10 轻量化:tab_recorder 已从 deps 删除,3 deps 缩为 3 deps(原 4 → 3)。
         """
         adapter = InternalSiteAdapter()
         assert adapter._audio_factory is None  # type: ignore[attr-defined]
-        assert adapter._tab_recorder is None  # type: ignore[attr-defined]
         assert adapter._transcriber is None  # type: ignore[attr-defined]
         assert adapter._screenshot_controller is None  # type: ignore[attr-defined]
         assert adapter._spider is None  # type: ignore[attr-defined]

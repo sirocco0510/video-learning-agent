@@ -130,10 +130,8 @@ def strategy(adapter, driver, recorder, notifier, plugin_status, log) -> Subtitl
         recorder=recorder,
         notifier=notifier,
         plugin_status=plugin_status,
-        remind_timeout_sec=30,
         log=log,
         audio_factory=MagicMock(),       # F2-7 必填
-        tab_recorder=MagicMock(),        # F2-7 必填
         transcriber=MagicMock(),         # F2-7 必填
         screenshot_controller=MagicMock(),
     )
@@ -256,11 +254,9 @@ class TestFallbackAdapter:
             recorder=recorder,
             notifier=notifier,
             plugin_status=plugin_status,
-            remind_timeout_sec=30,
-            log=log,
+                log=log,
             audio_factory=MagicMock(),       # F2-7 必填
-            tab_recorder=MagicMock(),        # F2-7 必填
-            transcriber=MagicMock(),         # F2-7 必填
+                transcriber=MagicMock(),         # F2-7 必填
             screenshot_controller=MagicMock(),
         )
 
@@ -499,10 +495,8 @@ class TestScanTodayDirPath:
             recorder=None,
             notifier=notifier,
             plugin_status=plugin_status,
-            remind_timeout_sec=30,
-            log=log,
+                log=log,
             audio_factory=MagicMock(),
-            tab_recorder=tab_rec,
             transcriber=trans,
             screenshot_controller=MagicMock(),
             cfg=cfg,
@@ -594,11 +588,9 @@ class TestPhase96SpiderDispatch:
             recorder=None,
             notifier=notifier,
             plugin_status=plugin_status,
-            remind_timeout_sec=30,
-            log=log,
+                log=log,
             audio_factory=MagicMock(),
-            tab_recorder=MagicMock(),
-            transcriber=MagicMock(),
+                transcriber=MagicMock(),
             screenshot_controller=MagicMock(),
         )
 
@@ -648,11 +640,9 @@ class TestPhase96SpiderDispatch:
             recorder=None,
             notifier=notifier,
             plugin_status=plugin_status,
-            remind_timeout_sec=30,
-            log=log,
+                log=log,
             audio_factory=MagicMock(),
-            tab_recorder=MagicMock(),
-            transcriber=MagicMock(),
+                transcriber=MagicMock(),
             screenshot_controller=MagicMock(),
         )
         result = await strategy.get_subtitle("https://b-learning.bill-jc.com/learn/x")

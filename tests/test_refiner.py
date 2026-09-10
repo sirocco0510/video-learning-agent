@@ -47,11 +47,6 @@ def cfg(tmp_path: Path) -> VLAConfig:
             "min_score_to_pass": 70, "min_char_per_second": 1.0, "max_char_per_second": 15.0,
             "refine_enabled": True, "refine_model": None, "refine_max_chars": 6000,
         },
-        "browser_plugin": {
-            "name": "VideoTrans", "enabled": True, "remind_timeout_sec": 30,
-            "plugin_paths": [], "record_hotkey": "Alt+Shift+R",
-            "record_download_timeout_sec": 5, "record_pre_grace_sec": 0, "record_post_buffer_sec": 0,
-        },
         "summary": {"model": "x", "target_words_min": 500, "target_words_max": 800, "notes_file": "./notes/v.md", "cross_video_dedup": True, "trigger_mode": "quota", "notes_section_header": "## x"},
         "quota": {"summary_threshold_sec": 21600, "on_exhausted": "stop_session"},
         "history": {"file": "./logs/h.jsonl"},

@@ -377,14 +377,38 @@ def _display_dialog_with_timeout(
     result = _run_osascript(script, capture=True)
     if result is None:
         return "timeout"
-    # 解析:`button returned:X\ngave up:false` 或 `button returned:X\ngave up:true`
+    # 解析 macOS osascript 输出格式(2026-09 实测两种):
+    #   - 单行:`button returned:X, gave up:true|false`(`display dialog` 直接执行)
+    #   - 多行:`button returned:X\ngave up:true|false`(部分 macOS 走 stdin)
+    # 检测方法:看 `button returned:` 和 `gave up:` 之间是否有 `\n` → 多行。
     gave_up = False
     button: str | None = None
-    for line in result.splitlines():
-        if line.startswith("button returned:"):
-            button = line.split(":", 1)[1].strip()
-        elif line.startswith("gave up:"):
-            gave_up = line.split(":", 1)[1].strip().lower() == "true"
+    br_pos = result.find("button returned:")
+    gu_pos = result.find("gave up:")
+    if br_pos >= 0 and gu_pos > br_pos:
+        between = result[br_pos:gu_pos]
+        if "\n" in between:
+            # 多行格式:`button returned:X\ngave up:Y`
+            for line in result.splitlines():
+                if line.startswith("button returned:"):
+                    button = line.split(":", 1)[1].strip()
+                elif line.startswith("gave up:"):
+                    gave_up = line.split(":", 1)[1].strip().lower() == "true"
+        else:
+            # 单行格式:`...button returned:X, gave up:Y...`
+            try:
+                tail = result[br_pos:]
+                button = tail.split("button returned:", 1)[1].split(",", 1)[0].strip()
+                gave_up_raw = tail.split("gave up:", 1)[1].split(",", 1)[0].strip()
+                gave_up = gave_up_raw.lower() == "true"
+            except Exception as e:
+                logger.warning("解析单行 osascript 输出失败: %s", e)
+    else:
+        for line in result.splitlines():
+            if line.startswith("button returned:"):
+                button = line.split(":", 1)[1].strip()
+            elif line.startswith("gave up:"):
+                gave_up = line.split(":", 1)[1].strip().lower() == "true"
     if gave_up:
         logger.info("⏱️ dialog 超时未响应(%ds):%s", timeout_sec, title)
         return "timeout"

@@ -135,6 +135,7 @@ uv run vla process \
 uv run vla batch --config ./videos.yaml
 ```
 
+
 ### `videos.yaml` 写法(FR-10.5)
 
 ```yaml
