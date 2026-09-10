@@ -62,7 +62,11 @@ def extract_audio(input_path: Path, output_path: Path) -> None:
         raise
 
 
-def extract_m3u8_audio(m3u8_url: str, output_path: Path) -> None:
+def extract_m3u8_audio(
+    m3u8_url: str,
+    output_path: Path,
+    max_sec: int | None = None,
+) -> None:
     """ffmpeg 流式抽 m3u8 音轨 → wav, 不缓存视频。
 
     与 extract_audio 的差异: -vn 跳过视频轨, m3u8 直接走 HLS 流式输入。
@@ -71,6 +75,9 @@ def extract_m3u8_audio(m3u8_url: str, output_path: Path) -> None:
     Args:
         m3u8_url: HLS manifest URL(可达, 含签名 token)
         output_path: 目标 wav 路径(需 .wav 后缀)
+        max_sec: 只抽前 N 秒, 超出丢弃(FR-2.30.1)。None / 0 → 全量。
+            `-t` 放在 `-i` **之后** 是输出侧选项: ffmpeg 产出够 N 秒就停止
+            读取输入, 所以既截音频也省带宽(不再拉后续 HLS 切片)。
 
     Raises:
         RuntimeError: ffmpeg 返回非 0(网络/格式错)
@@ -82,8 +89,10 @@ def extract_m3u8_audio(m3u8_url: str, output_path: Path) -> None:
         "ffmpeg", "-y", "-loglevel", "error",
         "-vn",  # 跳过视频轨(磁盘友好: 不缓存 mp4)
         "-i", m3u8_url,
-        "-ac", "1", "-ar", "16000", "-f", "wav", str(output_path),
     ]
+    if max_sec:
+        cmd += ["-t", str(max_sec)]
+    cmd += ["-ac", "1", "-ar", "16000", "-f", "wav", str(output_path)]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
@@ -99,9 +108,11 @@ def extract_m3u8_audio(m3u8_url: str, output_path: Path) -> None:
         raise
 
 
-# Default max duration for browser-based audio capture (avoids indefinite hangs when
-# video.duration is NaN / Infinity on DRM-protected HLS streams).
-_BROWSER_CAPTURE_MAX_DURATION_SEC = 3600
+# Default max duration for browser-based audio capture. 双重作用:
+#   ① 防挂死 —— video.duration 在 DRM 保护的 HLS 流上可能是 NaN / Infinity
+#   ② FR-2.30.1 产品上限 —— 默认只留前 30 分钟(2026-09-10,3600 → 1800)。
+# 调用方通常显式传 `audio.max_extract_sec`;此处默认值只在漏传时兜底。
+_BROWSER_CAPTURE_MAX_DURATION_SEC = 1800
 
 # Default playback rate for browser-based audio capture. 4x means a 3h video
 # captures in ~45 min wall-clock. MediaRecorder gets audio at original sample

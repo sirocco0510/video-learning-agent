@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from vla.config import LLMClientConfig, VLAConfig
-from vla.llm.client import LLMClient
+from vla.llm.client import LLMClient, LLMEmptyResponseError
 
 
 # ---------------- Fixtures ----------------
@@ -118,6 +118,139 @@ class TestComplete:
 
 
 # ---------------- VLAConfig 集成 ----------------
+
+
+class TestReasoningEffort:
+    """reasoning_effort 透传(2026-09-10)。
+
+    背景:deepseek-flash 是 reasoning model,默认推理极啰嗦 —— 实测一个 2507 字
+    的 refiner 任务烧掉 16232 reasoning tokens,把 max_tokens=4000 吃光 → content
+    返回空。修法是把 reasoning_effort="none" 透传给 API(实测 reasoning 归零)。
+    """
+
+    def _client(self, mock_openai_cls, content="ok"):
+        mock_instance = MagicMock()
+        mock_instance.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content=content), finish_reason="stop")]
+        )
+        mock_openai_cls.return_value = mock_instance
+        return mock_instance
+
+    def test_passes_reasoning_effort_from_config(self):
+        """LLMClientConfig.reasoning_effort="none" → 透传给 API。"""
+        cfg = LLMClientConfig(
+            provider="deepseek", api_key_env="OPENAI_API_KEY",
+            base_url_env="OPENAI_BASE_URL", reasoning_effort="none",
+        )
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-x", "OPENAI_BASE_URL": "https://x/v1"}):
+            with patch("vla.llm.client.openai.OpenAI") as mock_openai_cls:
+                mock_instance = self._client(mock_openai_cls)
+                LLMClient(cfg, model="deepseek-flash").complete("ping")
+
+                kwargs = mock_instance.chat.completions.create.call_args.kwargs
+                assert kwargs["reasoning_effort"] == "none"
+
+    def test_omits_reasoning_effort_when_none(self, llm_cfg):
+        """未配置(default None)→ 不传该参数(走端点默认,兼容非 reasoning 模型)。"""
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-x", "OPENAI_BASE_URL": "https://x/v1"}):
+            with patch("vla.llm.client.openai.OpenAI") as mock_openai_cls:
+                mock_instance = self._client(mock_openai_cls)
+                LLMClient(llm_cfg, model="gpt-4o-mini").complete("ping")
+
+                kwargs = mock_instance.chat.completions.create.call_args.kwargs
+                assert "reasoning_effort" not in kwargs
+
+    def test_per_call_overrides_config(self):
+        """per-call 参数优先于 config。"""
+        cfg = LLMClientConfig(
+            provider="deepseek", api_key_env="OPENAI_API_KEY",
+            base_url_env="OPENAI_BASE_URL", reasoning_effort="none",
+        )
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-x", "OPENAI_BASE_URL": "https://x/v1"}):
+            with patch("vla.llm.client.openai.OpenAI") as mock_openai_cls:
+                mock_instance = self._client(mock_openai_cls)
+                LLMClient(cfg, model="deepseek-flash").complete(
+                    "ping", reasoning_effort="high"
+                )
+
+                kwargs = mock_instance.chat.completions.create.call_args.kwargs
+                assert kwargs["reasoning_effort"] == "high"
+
+
+class TestEmptyResponseIsNotSilent:
+    """空 content 必须显式报错(2026-09-10)。
+
+    旧行为 `return resp.choices[0].message.content or ""` 把"被 max_tokens 截断"
+    和"模型真的返回空"混为一谈 —— deepseek-flash 的 Refiner 因此静默回退原文,
+    真因(finish_reason=length)完全不可见。
+    """
+
+    def _client_with(self, mock_openai_cls, content, finish_reason):
+        mock_instance = MagicMock()
+        mock_instance.chat.completions.create.return_value = MagicMock(
+            choices=[
+                MagicMock(
+                    message=MagicMock(content=content),
+                    finish_reason=finish_reason,
+                )
+            ]
+        )
+        mock_openai_cls.return_value = mock_instance
+        return mock_instance
+
+    def test_raises_on_empty_content(self, llm_cfg):
+        """content=None → 抛 LLMEmptyResponseError(不再静默返回 "")。"""
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-x", "OPENAI_BASE_URL": "https://x/v1"}):
+            with patch("vla.llm.client.openai.OpenAI") as mock_openai_cls:
+                self._client_with(mock_openai_cls, None, "length")
+                client = LLMClient(llm_cfg, model="deepseek-flash")
+
+                with pytest.raises(LLMEmptyResponseError):
+                    client.complete("ping", max_tokens=4000)
+
+    def test_error_message_names_finish_reason_and_model(self, llm_cfg):
+        """报错信息要能直接看出根因:模型名 + finish_reason=length + 截断提示。"""
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-x", "OPENAI_BASE_URL": "https://x/v1"}):
+            with patch("vla.llm.client.openai.OpenAI") as mock_openai_cls:
+                self._client_with(mock_openai_cls, "", "length")
+                client = LLMClient(llm_cfg, model="deepseek-flash")
+
+                with pytest.raises(LLMEmptyResponseError) as ei:
+                    client.complete("ping", max_tokens=4000)
+
+                msg = str(ei.value)
+                assert "deepseek-flash" in msg
+                assert "length" in msg
+                assert "max_tokens" in msg
+
+    def test_whitespace_only_content_also_raises(self, llm_cfg):
+        """纯空白 content 等同空(content.strip() 判定)。"""
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-x", "OPENAI_BASE_URL": "https://x/v1"}):
+            with patch("vla.llm.client.openai.OpenAI") as mock_openai_cls:
+                self._client_with(mock_openai_cls, "   \n  ", "stop")
+                client = LLMClient(llm_cfg, model="x")
+
+                with pytest.raises(LLMEmptyResponseError):
+                    client.complete("ping")
+
+    def test_nonempty_content_returns_even_when_truncated(self, llm_cfg):
+        """有内容但被截断(length)→ 仍返回内容,不抛(调用方的容错解析负责补 JSON)。"""
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-x", "OPENAI_BASE_URL": "https://x/v1"}):
+            with patch("vla.llm.client.openai.OpenAI") as mock_openai_cls:
+                self._client_with(mock_openai_cls, '{"cleaned_text": "被截断', "length")
+                client = LLMClient(llm_cfg, model="x")
+
+                result = client.complete("ping", max_tokens=4000)
+                assert result == '{"cleaned_text": "被截断'
+
+    def test_normal_response_unaffected(self, llm_cfg):
+        """正常响应照常返回。"""
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-x", "OPENAI_BASE_URL": "https://x/v1"}):
+            with patch("vla.llm.client.openai.OpenAI") as mock_openai_cls:
+                self._client_with(mock_openai_cls, "hello", "stop")
+                client = LLMClient(llm_cfg, model="x")
+
+                assert client.complete("ping") == "hello"
 
 
 class TestVLAConfigIntegration:

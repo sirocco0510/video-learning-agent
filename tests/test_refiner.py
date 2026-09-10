@@ -131,9 +131,13 @@ class TestRefine:
         assert "请按系统指令输出 JSON" in prompt
 
     def test_llm_max_tokens_scales_with_input(self, refiner, mock_llm):
-        """输出 token 上限 = max(refine_max_output_tokens, len(input) + 1000)。
+        """输出 token 上限 = max(refine_max_output_tokens, len(input) * 2 + 1000)。
 
-        短输入用配置下限;长输入按比例放大(reasoning model 还要算 think 块)。
+        2026-09-10 修正:`len(text) + 1000` 这个旧启发式是按 MiniMax 的内联
+        `<think>` 标定的,**不够**。实测 deepseek-flash 处理 2507 字输入需要
+        **3268** completion tokens(≈1.3 token/字 —— 输出是 JSON 转义后的文本
+        还带 corrections,比输入长),旧公式只给 3507,余量仅 7%,输入再长一点
+        就截断。改用 ×2 留出余量。
         """
         mock_llm.complete.return_value = '{"cleaned_text": "x", "corrections": [], "notes": ""}'
 
@@ -142,11 +146,25 @@ class TestRefine:
         kwargs = mock_llm.complete.call_args.kwargs
         assert kwargs["max_tokens"] == 4000  # 配置 refine_max_output_tokens 默认 4000
 
-        # 长文本:max(4000, len(text)+1000)
+        # 长文本:max(4000, len(text)*2 + 1000)
         long_text = "中" * 5000
         refiner.refine(long_text)
         kwargs = mock_llm.complete.call_args.kwargs
-        assert kwargs["max_tokens"] == 6000  # max(4000, 5000 + 1000) = 6000
+        assert kwargs["max_tokens"] == 11000  # max(4000, 5000*2 + 1000) = 11000
+
+    def test_llm_max_tokens_covers_observed_deepseek_need(self, refiner, mock_llm):
+        """回归护栏:2507 字输入(实测需 3268 tokens)必须给足额度。
+
+        这是导致 2026-09-10 Refiner 返回空 content 的真实输入规模 ——
+        旧公式给 3507(仅 7% 余量),新公式给 6014。
+        """
+        mock_llm.complete.return_value = '{"cleaned_text": "x", "corrections": [], "notes": ""}'
+
+        refiner.refine("中" * 2507)
+
+        kwargs = mock_llm.complete.call_args.kwargs
+        assert kwargs["max_tokens"] > 3268, "必须覆盖实测的 3268 completion tokens"
+        assert kwargs["max_tokens"] == 6014  # max(4000, 2507*2 + 1000)
 
     def test_llm_temperature_low(self, refiner, mock_llm):
         """temperature=0.2(低随机,稳定输出)。"""
@@ -315,18 +333,100 @@ class TestFailureFallback:
 
 
 class TestMaxCharsGuard:
-    def test_text_exceeds_max_chars_skips_llm(self, cfg, mock_llm):
-        """超过 refine_max_chars → 不调 LLM,直接返回原文本 + 提示。"""
+    """FR-2.15c 2026-09-10 修正:超限由"跳过 LLM"改为"截断精修前段 + 尾部接回"。"""
+
+    def test_text_exceeds_max_chars_still_calls_llm(self, cfg, mock_llm):
+        """超过 refine_max_chars → **仍然**调 LLM(旧行为是跳过)。
+
+        30 分钟语音 ≈ 8700 字,正好落在 6000 之上 —— 跳过会让长视频永远
+        拿不到精修。"""
         cfg.quality_check.refine_max_chars = 100
+        mock_llm.complete.return_value = '{"cleaned_text": "精修过", "corrections": [], "notes": ""}'
         r = SubtitleRefiner(cfg, llm=mock_llm)
-        long_text = "一" * 200
 
-        result = r.refine(long_text, title="t")
+        result = r.refine("一" * 200, title="t")
 
-        assert result.cleaned_text == long_text
-        assert result.corrections == []
-        assert "长度超限" in result.notes
-        mock_llm.complete.assert_not_called()
+        mock_llm.complete.assert_called_once()
+        assert result.cleaned_text.startswith("精修过")
+
+    def test_truncation_preserves_tail_verbatim(self, cfg, mock_llm):
+        """尾部必须原样接回 —— 一字不丢。
+
+        cleaned_text 会被 process_asset 当成 canonical 转写落盘,丢尾等于让
+        内容从正式产物里静默消失。"""
+        cfg.quality_check.refine_max_chars = 100
+        mock_llm.complete.return_value = '{"cleaned_text": "HEAD", "corrections": [], "notes": ""}'
+        r = SubtitleRefiner(cfg, llm=mock_llm)
+        text = "头" * 100 + "尾" * 50
+
+        result = r.refine(text, title="t")
+
+        # 头被替换为精修结果,尾逐字保留
+        assert result.cleaned_text == "HEAD" + "尾" * 50
+        assert result.cleaned_text.endswith("尾" * 50)
+        assert len(result.cleaned_text) == 4 + 50
+
+    def test_truncation_keeps_length_above_max_chars(self, cfg, mock_llm):
+        """接回尾部后长度 > refine_max_chars —— 这是 VideoSummarizer 的触发条件。
+
+        若截到正好等于 max_chars,`len(text) > max_chars` 为假 →
+        FR-2.15d 长视频摘要静默失效。这里用返回值守住这个不变量。"""
+        cfg.quality_check.refine_max_chars = 100
+        mock_llm.complete.return_value = '{"cleaned_text": "OK", "corrections": [], "notes": ""}'
+        r = SubtitleRefiner(cfg, llm=mock_llm)
+
+        result = r.refine("一" * 300, title="t")
+
+        assert len(result.cleaned_text) > cfg.quality_check.refine_max_chars
+
+    def test_truncation_only_head_sent_to_llm(self, cfg, mock_llm):
+        """送进 prompt 的必须只是 head —— 尾部不该进 LLM 消耗 token。"""
+        cfg.quality_check.refine_max_chars = 100
+        mock_llm.complete.return_value = '{"cleaned_text": "OK", "corrections": [], "notes": ""}'
+        r = SubtitleRefiner(cfg, llm=mock_llm)
+        text = "A" * 100 + "B" * 50
+
+        r.refine(text, title="t")
+
+        prompt = mock_llm.complete.call_args[0][0]
+        assert "A" * 100 in prompt
+        assert "B" * 50 not in prompt
+
+    def test_truncation_recorded_in_notes(self, cfg, mock_llm):
+        """notes 要标注截断 —— 审计时能看出尾部没精修过。"""
+        cfg.quality_check.refine_max_chars = 100
+        mock_llm.complete.return_value = '{"cleaned_text": "OK", "corrections": [], "notes": "模型备注"}'
+        r = SubtitleRefiner(cfg, llm=mock_llm)
+
+        result = r.refine("一" * 200, title="t")
+
+        assert "100" in result.notes          # 精修了多少字
+        assert "100" in result.notes or "尾部" in result.notes
+        assert "尾部" in result.notes
+        assert "模型备注" in result.notes      # 模型自己的 notes 不能被吞掉
+
+    def test_no_truncation_leaves_notes_clean(self, cfg, mock_llm):
+        """没超限 → notes 不该被塞进截断标记。"""
+        cfg.quality_check.refine_max_chars = 6000
+        mock_llm.complete.return_value = '{"cleaned_text": "OK", "corrections": [], "notes": "正常"}'
+        r = SubtitleRefiner(cfg, llm=mock_llm)
+
+        result = r.refine("短文本", title="t")
+
+        assert result.cleaned_text == "OK"
+        assert "尾部" not in result.notes
+
+    def test_truncation_fallback_path_returns_full_original(self, cfg, mock_llm):
+        """截断 + LLM 失败 → 必须回退**全文**,不能回退被截断的 head。"""
+        cfg.quality_check.refine_max_chars = 100
+        mock_llm.complete.side_effect = RuntimeError("API 挂了")
+        r = SubtitleRefiner(cfg, llm=mock_llm)
+        text = "一" * 200
+
+        result = r.refine(text, title="t")
+
+        assert result.cleaned_text == text
+        assert len(result.cleaned_text) == 200
 
     def test_text_within_limit_calls_llm(self, cfg, mock_llm):
         cfg.quality_check.refine_max_chars = 100

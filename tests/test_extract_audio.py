@@ -91,6 +91,67 @@ def test_extract_m3u8_audio_success(tmp_path, monkeypatch):
     assert str(out) in captured_cmd
 
 
+def test_extract_m3u8_audio_max_sec_adds_output_t(tmp_path, monkeypatch):
+    """FR-2.30.1:max_sec 给定 → 输出侧 `-t <max_sec>`,且必须在 `-i` 之后。
+
+    位置很关键:`-t` 放 `-i` 之前是**输入侧**选项(含义不同)。输出侧才能做到
+    "产出够 N 秒就停止读取输入",从而顺带省掉后续 HLS 切片的带宽。
+    """
+    out = tmp_path / "audio.wav"
+    fake_proc = MagicMock(returncode=0, stderr="")
+    captured_cmd: list = []
+
+    def fake_run(cmd, **kwargs):
+        captured_cmd.extend(cmd)
+        out.write_bytes(b"RIFF")
+        return fake_proc
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    extract_m3u8_audio("https://video.bill-jc.com/foo.m3u8", out, max_sec=1800)
+
+    assert "-t" in captured_cmd
+    assert captured_cmd[captured_cmd.index("-t") + 1] == "1800"
+    # 输出侧:`-t` 必须排在 `-i <url>` 之后
+    assert captured_cmd.index("-t") > captured_cmd.index("-i")
+
+
+def test_extract_m3u8_audio_without_max_sec_omits_t(tmp_path, monkeypatch):
+    """FR-2.30.1:不传 max_sec → 不加 `-t`,保持全量抽取(旧行为不变)。"""
+    out = tmp_path / "audio.wav"
+    fake_proc = MagicMock(returncode=0, stderr="")
+    captured_cmd: list = []
+
+    def fake_run(cmd, **kwargs):
+        captured_cmd.extend(cmd)
+        out.write_bytes(b"RIFF")
+        return fake_proc
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    extract_m3u8_audio("https://video.bill-jc.com/foo.m3u8", out)
+
+    assert "-t" not in captured_cmd
+
+
+def test_extract_m3u8_audio_max_sec_none_omits_t(tmp_path, monkeypatch):
+    """显式传 max_sec=None(配置里设 null)→ 同样不加 `-t`。"""
+    out = tmp_path / "audio.wav"
+    fake_proc = MagicMock(returncode=0, stderr="")
+    captured_cmd: list = []
+
+    def fake_run(cmd, **kwargs):
+        captured_cmd.extend(cmd)
+        out.write_bytes(b"RIFF")
+        return fake_proc
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    extract_m3u8_audio("https://video.bill-jc.com/foo.m3u8", out, max_sec=None)
+
+    assert "-t" not in captured_cmd
+
+
 def test_extract_m3u8_audio_fails_on_ffmpeg_nonzero(tmp_path, monkeypatch):
     """ffmpeg 返回非 0 → RuntimeError, 半截 wav 清掉。"""
     out = tmp_path / "audio.wav"
@@ -319,7 +380,8 @@ async def test_extract_browser_audio_passes_playback_rate_to_js(tmp_path, monkey
     capture_args = fake_page.evaluate.call_args_list[1]
     capture_payload = capture_args[0][1]  # (_BROWSER_CAPTURE_JS, payload)
     assert capture_payload["playbackRate"] == 4.0
-    assert capture_payload["maxDurationSec"] == 3600
+    # FR-2.30.1:默认上限由 3600 降为 1800(只抽前 30 分钟)
+    assert capture_payload["maxDurationSec"] == 1800
 
     # 自定义值:reset_mock 后重新设置 side_effect(reset 也清掉 side_effect)
     # 注意:helper 里 fake_page.evaluate 的 side_effect[1] 是 helper-local 的 b64 payload,
@@ -342,6 +404,8 @@ async def test_extract_browser_audio_passes_playback_rate_to_js(tmp_path, monkey
         )
     custom_payload = fake_page.evaluate.call_args_list[1][0][1]
     assert custom_payload["playbackRate"] == 2.0
+    # FR-2.30.1:显式传的 max_duration_sec 覆盖默认值
+    assert custom_payload["maxDurationSec"] == 7200
 
 
 @pytest.mark.asyncio

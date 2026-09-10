@@ -142,18 +142,24 @@ class SubtitleRefiner:
         original_text = text
         max_chars = self.config.quality_check.refine_max_chars
 
-        # 长度超限:跳过 LLM,直接返回
+        # 长度超限:截断后精修前段,尾部原文接回(FR-2.15c 2026-09-10 修正)。
+        #
+        # 旧行为是"超限直接跳过 LLM" —— 但 30 分钟语音 ≈ 8700 字,正好落在
+        # 6000 之上,长视频因此永远拿不到精修。改为:只把 head 送 LLM。
+        #
+        # **尾部必须接回,不能丢** —— 两个原因:
+        #   ① process_asset 用 cleaned_text 覆盖 canonical 转写
+        #      (save_transcribed),丢尾会让尾部内容从正式产物静默消失;
+        #   ② VideoSummarizer 的触发条件是 len(text) > refine_max_chars,
+        #      截到正好等于该值会让 `>` 为假 → FR-2.15d 长视频摘要静默失效。
+        tail = ""
         if len(text) > max_chars:
+            tail = text[max_chars:]
+            text = text[:max_chars]
             logger.warning(
-                "📏 transcript 字符数 %d > refine_max_chars %d,跳过 LLM 清理",
-                len(text), max_chars,
-            )
-            return RefinementResult(
-                original_text=original_text,
-                cleaned_text=original_text,
-                corrections=[],
-                notes=f"长度超限({len(text)} > {max_chars}),跳过 LLM 清理",
-                model=self.model,
+                "📏 transcript 字符数 %d > refine_max_chars %d,截断后精修前段"
+                "(尾部 %d 字保留原文)",
+                len(original_text), max_chars, len(tail),
             )
 
         user_prompt = _USER_PROMPT_TEMPLATE.format(
@@ -165,11 +171,19 @@ class SubtitleRefiner:
         full_prompt = f"{_SYSTEM_PROMPT}\n\n{user_prompt}"
 
         try:
-            # 输出 token 上限:用户配置的 refine_max_output_tokens,
-            # 但要保证 ≥ 输入 chars(LLM 至少能"还原"输入长度)。
-            # reasoning model(M2 / R1)还会输出 <think> 块,实际更费。
+            # 输出 token 上限:用户配置的 refine_max_output_tokens,并按输入长度放大。
+            #
+            # 2026-09-10 修正:旧公式 `len(text) + 1000` 是按 MiniMax 的内联
+            # `<think>` 标定的,**不够**。实测 deepseek-flash 处理 2507 字输入
+            # 需要 3268 completion tokens(≈1.3 token/字 —— 输出是 JSON 转义后
+            # 的文本 + corrections,比输入更长),旧公式只给 3507,余量仅 7%,
+            # 输入再长一点就被 max_tokens 截断 → content 空 → 静默回退原文。
+            # 改成 ×2 留余量。
+            #
+            # 另一半防线在 LLMClientConfig.reasoning_effort:默认 "none" 关掉
+            # 推理(deepseek-flash 默认会为一句话的任务烧 16000+ reasoning tokens)。
             cfg_max = self.config.quality_check.refine_max_output_tokens
-            output_max_tokens = max(cfg_max, len(text) + 1000)
+            output_max_tokens = max(cfg_max, len(text) * 2 + 1000)
             response = self._llm.complete(
                 full_prompt,
                 max_tokens=output_max_tokens,
@@ -224,9 +238,16 @@ class SubtitleRefiner:
 
         notes = str(data.get("notes", ""))
 
+        # 尾部原文接回 —— 精修只覆盖前 max_chars 字,其余原样保留。
+        if tail:
+            cleaned_text = cleaned_text + tail
+            prefix = f"前 {max_chars} 字已精修,尾部 {len(tail)} 字保留原文"
+            notes = f"{prefix};{notes}" if notes else prefix
+
         logger.info(
-            "✨ LLM 清理完成: %d → %d 字符, %d 条修正",
+            "✨ LLM 清理完成: %d → %d 字符, %d 条修正%s",
             len(original_text), len(cleaned_text), len(corrections),
+            f"(尾部 {len(tail)} 字未精修)" if tail else "",
         )
         return RefinementResult(
             original_text=original_text,
