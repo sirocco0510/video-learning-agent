@@ -1623,6 +1623,10 @@ vla doctor
 | CC 字幕 | B站官方字幕,UP 主上传 |
 | VideoTrans | 开源浏览器插件,本地 Whisper 转写 |
 | faster-whisper | CTranslate2 加速版 Whisper,本地运行 |
-| 策略 B | 本项目录屏方案:录浏览器窗口 + 系统音频 |
+| 策略 B | ~~本项目录屏方案:录浏览器窗口 + 系统音频~~ **已废弃**(2026-09-03 重构 v3,不再录屏) |
 | 启发式预筛 | 不调 LLM,基于字/秒判断字幕可信度 |
 | 质量门控 | 删除视频源前必经的检查环节 |
+| probe_status | Tab Audio Recorder 扩展状态三态探测:enabled / disabled / not_installed(FR-2.24a) |
+| `_resolve_ext_id()` | 动态从 `chrome.management.getAll()` 解析 Tab Audio Recorder 扩展 ID,匹配 `match_keyword`(默认 `"tab audio"`),**不硬编码**(FR-2.24) |
+| `prepare_for_screenshot()` | 截图前抢焦点 + 窗口归位(FR-2.28.2a),确保系统截图截到视频而非前台 APP |
+| Level 1 / Level 4 清理 | Level 1 = 本地 `clean_transcript()`(必启用);Level 4 = 云端 LLM `SubtitleRefiner.refine()`(可选,FR-2.15c + FR-3.8/3.9) |
