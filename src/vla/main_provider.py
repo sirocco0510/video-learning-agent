@@ -124,22 +124,21 @@ class RealTextProvider:
                 return None
             wav_path = self._save_dir / "audio_raw" / f"{task.id}.wav"
             wav_path.parent.mkdir(parents=True, exist_ok=True)
+            # Phase 9.6.4+ (2026-09-10):bill-jc 长视频默认走浏览器 4x MediaRecorder
+            # 抽音(已验证,3h 视频 → 45min),复用 Chrome 已加载的视频不重复下 m3u8
+            # 切片; ffmpeg 慢路径(2h 视频 ~2h 抽音,受服务端限速)作为兜底。
             try:
-                # ffmpeg 是 sync 阻塞调用;DRM 视频会重试 19 次 ~30s。
-                # 包 to_thread 不阻塞 event loop,browser capture fallback 时
-                # Playwright async handle 仍能响应。
-                await asyncio.to_thread(extract_m3u8_audio, video_url, wav_path)
+                await extract_browser_audio(video_url, wav_path)
             except Exception as e1:
-                # Phase 9.6.4 (2026-09-10):yunxuetang BCE DRM-encrypted m3u8 兜底 —
-                # ffmpeg 直抽被服务端 key token 拒, 改走浏览器内 MediaRecorder 录音。
                 logger.warning(
-                    "extract_m3u8_audio failed (%s), fallback browser capture", e1,
+                    "extract_browser_audio failed (%s), fallback ffmpeg m3u8", e1,
                 )
                 try:
-                    await extract_browser_audio(video_url, wav_path)
+                    # ffmpeg 是 sync 阻塞调用;包 to_thread 不阻塞 event loop。
+                    await asyncio.to_thread(extract_m3u8_audio, video_url, wav_path)
                 except Exception as e2:
                     logger.warning(
-                        "extract_browser_audio fallback also failed: %s", e2,
+                        "extract_m3u8_audio fallback also failed: %s", e2,
                     )
                     return None
             return Asset(text=None, source="whisper_internal_download", audio_path=wav_path, deletable=True)
