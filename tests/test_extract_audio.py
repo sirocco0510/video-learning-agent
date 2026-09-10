@@ -291,8 +291,9 @@ async def test_extract_browser_audio_returns_runtimeerror_when_capture_stream_em
 async def test_extract_browser_audio_passes_playback_rate_to_js(tmp_path, monkeypatch):
     """验证 playback_rate=4 默认值 + 自定义值都正确传给 page.evaluate。
 
-    3h 视频 @ 4x → 45min wall-clock。MediaRecorder 拿原始采样率音频,
-    faster-whisper 转写对采样率不敏感、对播放速率不敏感。
+    3h 视频 @ 4x → 45min wall-clock。MediaRecorder 拿原始采样率音频 —— 采样率不受
+    影响,但时间轴被压缩 4 倍,whisper 对**时间轴**敏感(所以才有 atempo 后处理,
+    见 test_extract_browser_audio_applies_atempo_stretch_to_ffmpeg)。
     """
     out_wav = tmp_path / "browser.wav"
     fake_browser, fake_page = _make_fake_browser()
@@ -547,3 +548,89 @@ async def test_extract_browser_audio_click_js_matches_multiple_learning_states(
     )
     # wav 应被写入
     assert out_wav.exists()
+
+
+# -----------------------------------------------------------------------------
+# atempo 后处理(Phase 9.6.6+)— 4x 抓的音拉伸回 2x,消同音字幻觉
+# -----------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_extract_browser_audio_applies_atempo_stretch_to_ffmpeg(
+    tmp_path, monkeypatch,
+):
+    """Phase 9.6.6+ (2026-09-10):browser 4x 抓的 webm 必须经 `-af atempo=0.5` 拉伸
+    2 倍再落 wav。
+
+    Why:4x 抓的音让 whisper 看到"时间轴压缩 4 倍"的语流,快速连读场景产生同音字
+    幻觉 + 数字串乱码,质量门控 fail。793df1f8 实测 4min23s 编程教程:wav 263s→526s,
+    字符 522→2899(5.5x),"资格资格资格" 66 行 → 0 行,识别出真实 if-else 教学内容。
+
+    验证:ffmpeg 命令行必须带 atempo=0.5(4x 抓 → 净 2x 速度)。
+    """
+    out_wav = tmp_path / "browser.wav"
+    fake_browser, _ = _make_fake_browser()
+
+    ap = MagicMock()
+    ap.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+    ap.return_value.__aenter__.return_value.chromium = MagicMock()
+    ap.return_value.__aenter__.return_value.chromium.connect_over_cdp = AsyncMock(return_value=fake_browser)
+    ap.return_value.__aexit__ = AsyncMock(return_value=None)
+
+    captured_ffmpeg_cmds: list = []
+
+    def fake_ffmpeg_run(cmd, **kwargs):
+        captured_ffmpeg_cmds.append(cmd)
+        Path(cmd[cmd.index("-f") + 2]).write_bytes(b"RIFF")
+        return MagicMock(returncode=0, stderr="")
+
+    monkeypatch.setattr("vla.transcribe.extract.subprocess.run", fake_ffmpeg_run)
+
+    with patch("vla.transcribe.extract.async_playwright", ap):
+        await extract_browser_audio("https://b-learning.bill-jc.com/learn/x", out_wav)
+
+    assert len(captured_ffmpeg_cmds) == 1
+    cmd = captured_ffmpeg_cmds[0]
+    assert "-af" in cmd, f"ffmpeg 必须带 atempo 滤镜,got: {cmd}"
+    filter_arg = cmd[cmd.index("-af") + 1]
+    assert filter_arg == "atempo=0.5", (
+        f"4x 抓的音必须拉伸回 2 倍(atempo=0.5),got: {filter_arg!r}"
+    )
+    # 滤镜必须在输入之后(ffmpeg 语法要求 -af 作用于已声明的输入)
+    assert cmd.index("-af") > cmd.index("-i")
+    assert out_wav.exists()
+
+
+@pytest.mark.asyncio
+async def test_extract_browser_audio_atempo_is_overridable(tmp_path, monkeypatch):
+    """atempo 可显式覆盖:atempo=1.0 = 不拉伸(4x 直出,退回旧行为)。
+
+    atempo 单级合法区间是 [0.5, 100](ffmpeg 硬限制),0.5 正好是下边界 ——
+    想要比 2 倍更慢必须链式(如 ``atempo=0.5,atempo=0.5`` = 4 倍拉伸),本函数
+    只暴露单级因子。
+    """
+    out_wav = tmp_path / "browser.wav"
+    fake_browser, _ = _make_fake_browser()
+
+    ap = MagicMock()
+    ap.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+    ap.return_value.__aenter__.return_value.chromium = MagicMock()
+    ap.return_value.__aenter__.return_value.chromium.connect_over_cdp = AsyncMock(return_value=fake_browser)
+    ap.return_value.__aexit__ = AsyncMock(return_value=None)
+
+    captured_ffmpeg_cmds: list = []
+
+    def fake_ffmpeg_run(cmd, **kwargs):
+        captured_ffmpeg_cmds.append(cmd)
+        Path(cmd[cmd.index("-f") + 2]).write_bytes(b"RIFF")
+        return MagicMock(returncode=0, stderr="")
+
+    monkeypatch.setattr("vla.transcribe.extract.subprocess.run", fake_ffmpeg_run)
+
+    with patch("vla.transcribe.extract.async_playwright", ap):
+        await extract_browser_audio(
+            "https://b-learning.bill-jc.com/learn/x", out_wav, atempo=1.0,
+        )
+
+    cmd = captured_ffmpeg_cmds[0]
+    assert cmd[cmd.index("-af") + 1] == "atempo=1.0"

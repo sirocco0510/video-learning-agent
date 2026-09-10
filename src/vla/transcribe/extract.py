@@ -8,6 +8,11 @@
 Phase 9.6.4(2026-09-10):新增 extract_browser_audio — 浏览器内 MediaRecorder 抽音,
 用于 yunxuetang (b-learning.bill-jc.com) BCE DRM-encrypted m3u8 兜底(ffmpeg 直抽
 被服务端 token 绑定 session 拒)。
+
+Phase 9.6.6(2026-09-10):extract_browser_audio 的 webm→wav 转换加 ffmpeg
+``-af atempo`` 后处理 — 4x 抓的音时间轴被压缩 4 倍,直送 whisper 会在快速连读场景
+产生同音字幻觉("资格资格资格" 刷 66 行)+ 数字串乱码;atempo=0.5 拉伸 2 倍后消失。
+详见 _BROWSER_CAPTURE_ATEMPO。
 """
 
 from __future__ import annotations
@@ -100,9 +105,23 @@ _BROWSER_CAPTURE_MAX_DURATION_SEC = 3600
 
 # Default playback rate for browser-based audio capture. 4x means a 3h video
 # captures in ~45 min wall-clock. MediaRecorder gets audio at original sample
-# rate (browser internal resample), so faster-whisper transcription is rate-
-# agnostic. Chromium supports playbackRate up to ~16x.
+# rate (browser internal resample) — the *sample rate* is unchanged, but the
+# *timeline* is compressed 4x, which whisper is NOT agnostic to (see
+# _BROWSER_CAPTURE_ATEMPO). Chromium supports playbackRate up to ~16x.
 _BROWSER_CAPTURE_PLAYBACK_RATE = 4.0
+
+# Phase 9.6.6+ (2026-09-10):4x 抓的音让 whisper 看到"时间轴压缩 4 倍"的语流 ——
+# 采样率没变,但音素密度是真实语速的 4 倍。快速连读场景(编程教程 / 公司简介 /
+# 商业宣传片)因此产生同音字幻觉("资格资格资格" 连刷 66 行)和数字串乱码,质量
+# 门控 fail。atempo 把时域拉伸 1/atempo 倍,把语流密度降回来。
+#
+# 0.5 = 拉伸 2 倍,即 4x 抓的音变成净 2x 速度(而非完全还原 1x)。
+# 793df1f8 实测(4min23s 编程 if-else 教程):wav 263s → 526s,字符 522 → 2899
+# (5.5x),"资格资格资格" 66 行 → 0 行,转出真实教学内容。
+#
+# 注:ffmpeg atempo 单级合法区间 [0.5, 100],0.5 正好是下边界 —— 要拉伸超过 2 倍
+# 必须链式(如 "atempo=0.5,atempo=0.5" = 4 倍),本模块只暴露单级因子。
+_BROWSER_CAPTURE_ATEMPO = 0.5
 
 # JS that runs inside the navigated page: force-play the <video>, captureStream() its
 # audio track, MediaRecorder → webm/opus chunks → base64 to Python. Awaits either
@@ -123,8 +142,11 @@ async ({maxDurationSec, playbackRate}) => {
     // but a fresh tab navigated by Playwright usually allows muted autoplay.
     video.muted = false;
     // Speed up playback so capture wall-clock is compressed (3h video @ 4x → 45min).
-    // MediaRecorder gets audio at original sample rate (browser internal resample);
-    // faster-whisper transcription is rate-agnostic.
+    // MediaRecorder gets audio at original sample rate (browser internal resample), so
+    // the *sample rate* is preserved — but the *timeline* is compressed by this factor,
+    // which faster-whisper is NOT agnostic to. The Python side undoes the compression
+    // with ffmpeg atempo (see _BROWSER_CAPTURE_ATEMPO); without it, fast continuous
+    // speech produces homophone hallucinations.
     video.playbackRate = playbackRate;
     try { await video.play(); } catch(e) { /* autoplay restricted; will still record if stream is live */ }
 
@@ -175,6 +197,7 @@ async def extract_browser_audio(
     cdp_url: str = "http://localhost:9222",
     max_duration_sec: int = _BROWSER_CAPTURE_MAX_DURATION_SEC,
     playback_rate: float = _BROWSER_CAPTURE_PLAYBACK_RATE,
+    atempo: float = _BROWSER_CAPTURE_ATEMPO,
 ) -> Path:
     """浏览器内 MediaRecorder 抽音 → webm → ffmpeg → wav。
 
@@ -188,7 +211,8 @@ async def extract_browser_audio(
          tab 默认 route 不是视频学习页,button.yxtf-button--primary 永远不渲染)
       4. goto video_url → 等 button → 点"开始学习" → 等 <video> ready →
          playbackRate 加速 → MediaRecorder 录 webm/opus
-      5. base64 传回 Python → 临时 webm → ffmpeg -vn -ac 1 -ar 16000 转 wav
+      5. base64 传回 Python → 临时 webm → ffmpeg -vn -ac 1 -ar 16000
+         **-af atempo={atempo}** 转 wav(tempo 拉伸把 4x 压缩的语流密度降回来)
       6. unlink webm(磁盘友好), close page
 
     Args:
@@ -198,6 +222,9 @@ async def extract_browser_audio(
         max_duration_sec: 视频时长上限(秒,video-time;非 wall-clock);超过兜底停录
         playback_rate: HTMLMediaElement.playbackRate,默认 4x(3h 视频 → 45min
             捕获;MediaRecorder 拿原始采样率音频,浏览器内部 resample)
+        atempo: ffmpeg atempo 因子,默认 0.5(时域拉伸 2 倍)。4x 抓的音因此变成
+            净 2x 速度 —— 不拉伸(1.0)会让 whisper 在快速连读场景产生同音字幻觉。
+            合法区间 [0.5, 100];0.5 是下边界,更慢需链式。
 
     Returns:
         output_path
@@ -300,7 +327,13 @@ async def extract_browser_audio(
                 cmd = [
                     "ffmpeg", "-y", "-loglevel", "error",
                     "-i", str(webm_path),
-                    "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", str(output_path),
+                    "-vn", "-ac", "1", "-ar", "16000",
+                    # Phase 9.6.6+ (2026-09-10):4x 抓的音时间轴被压缩 4 倍,atempo
+                    # 拉伸 1/atempo 倍把语流密度降回 whisper 友好区间(默认 0.5
+                    # = 净 2x)。不拉伸会在快速连读场景产生同音字幻觉,详见
+                    # _BROWSER_CAPTURE_ATEMPO 注释。
+                    "-af", f"atempo={atempo}",
+                    "-f", "wav", str(output_path),
                 ]
                 proc = subprocess.run(cmd, capture_output=True, text=True)
                 if proc.returncode != 0:
