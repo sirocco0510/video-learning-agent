@@ -112,6 +112,13 @@ async ({maxDurationSec, playbackRate}) => {
     const video = document.querySelector("video");
     if (!video) throw new Error("No <video> element");
 
+    // Phase 9.6.4+ (2026-09-10):学完状态(capture JS 第一次被调用时,video 可能已 ended)
+    // 重置 currentTime 到 0,否则 addEventListener("ended") 永远不触发(事件已发过),
+    // capture JS 会一直等 setTimeout(15min)。seekTo(0) 强制从头播放。
+    if (video.ended || (video.duration && video.currentTime >= video.duration - 1)) {
+        try { video.currentTime = 0; } catch(e) { /* seek 失败也继续 */ }
+    }
+
     // Ensure autoplay (may need muted first); some browsers require user gesture,
     // but a fresh tab navigated by Playwright usually allows muted autoplay.
     video.muted = false;
@@ -221,32 +228,51 @@ async def extract_browser_audio(
             await page.goto(video_url, wait_until="domcontentloaded")
 
             try:
-                # bill-jc SPA 默认显示课程详情页,<video> 只在用户点 "开始学习"
-                # 后才挂载(bind 在 yxtf-button yxtf-button--primary)。
-                # 不点的话 querySelector('video') 永远 None。
-                # state="attached": 只要 DOM 里有,不要求 visible(可能被课程详情
-                # overlay 挡住,但我们 click() 直接调 trigger,绕过 overlay)。
-                await page.wait_for_selector(
-                    "button.yxtf-button--primary", timeout=30_000, state="attached",
-                )
-                await page.evaluate(
-                    """
-                    () => {
-                        for (const b of document.querySelectorAll('button')) {
-                            if (b.innerText && b.innerText.trim() === '开始学习') {
-                                b.click();
-                                return true;
+                # Phase 9.6.4+ (2026-09-10):bill-jc SPA 根据学习进度显示不同 button:
+                #   - 没学过 → "开始学习"
+                #   - 学过一部分 → "继续学习"
+                #   - 学完想重看 → "重新学习"
+                #   - 已学完 → 没有 button,video 元素已在 DOM(readyState=4)
+                # 学完状态(77c57083 spike 发现)如果没有 fast-path 检测,SPA 不渲染
+                # 任何"开始学习"类 button → 等 30s timeout → fallback ffmpeg,失去 4x。
+                #
+                # 流程:
+                #   ① 先快速 wait_for_selector("video", timeout=5s)— 学完场景命中
+                #   ② 否则 wait button → click(支持 3 种 text) → wait video ready
+                try:
+                    await page.wait_for_selector("video", timeout=5_000, state="attached")
+                    logger.info(
+                        "[BROWSER] video element already present (学完场景),"
+                        " skip button click — go directly to capture"
+                    )
+                except Exception:
+                    # video 不在,需要点 button 进 player
+                    await page.wait_for_selector(
+                        "button.yxtf-button--primary", timeout=30_000, state="attached",
+                    )
+                    await page.evaluate(
+                        """
+                        () => {
+                            const targets = ['开始学习', '继续学习', '重新学习'];
+                            for (const b of document.querySelectorAll('button')) {
+                                const txt = b.innerText ? b.innerText.trim() : '';
+                                if (targets.includes(txt)) {
+                                    b.click();
+                                    return txt;  // 返哪个 text 被点,便于排查
+                                }
                             }
+                            return null;
                         }
-                        return false;
-                    }
-                    """
-                )
-                await page.wait_for_selector("video", timeout=30_000, state="attached")
-                await page.wait_for_function(
-                    "document.querySelector('video') && document.querySelector('video').readyState >= 2",
-                    timeout=30_000,
-                )
+                        """
+                    )
+                    await page.wait_for_selector(
+                        "video", timeout=30_000, state="attached",
+                    )
+                    await page.wait_for_function(
+                        "document.querySelector('video') && "
+                        "document.querySelector('video').readyState >= 2",
+                        timeout=30_000,
+                    )
             except Exception as e:
                 raise RuntimeError(
                     f"browser audio capture failed: <video> element not ready: {e}"
