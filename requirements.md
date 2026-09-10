@@ -263,6 +263,241 @@ agent)。所以既往用 spike 跑过的 bill-jc 视频**不在** history 里,FR
 逐页递增,空页终止)。这同时验证了 FR-11.3(页大小==步长,无跳号)与
 FR-11.5(只认空页)。
 
+#### 2026-09-10 批量真跑暴露的三处缺陷 — kngId 解析 / 弹窗误触发 / 签名不匹配
+
+**背景**:上一条 `vla learn` 交付后真机批量首跑(`--limit 10`,目录 277 条),
+**42 条视频全挂**,每条都打 `策略 ③ 失败(计入 transcribe_fail)`。三个缺陷串成一条链。
+
+| # | 位置 | 缺陷 | 性质 |
+|---|---|---|---|
+| 1 | `internal_site_adapter._BILL_JC_LEARN_RE` | 按 `/learn/<kng_id>` **path** 解析 kng_id,而真 URL 的 kngId 在**查询参数**里 → 静默 miss | 根因 |
+| 2 | `strategy._try_browser` | adapter miss 后无条件弹 A 级窗问"是否开启字幕插件" | 缺陷 1 的后果 |
+| 3 | `InternalSiteAdapter.fetch_via_recording` | override 收窄了基类 signature,缺 `audio_factory` / `transcriber` → TypeError | 缺陷 1 的后果,被记录成"转写失败" |
+
+**缺陷 1(根因)**:`list_tasks`(`internal_site_spider.py:266`)生成的 URL 是
+SPA 详情页 `…/kng/#/video/play?kngId=<uuid>&projectId=&btid=&gwnlUrl=`,
+`kngId` 在查询参数里。而 adapter 的正则 `re.compile(r"/learn/([^/?#]+)")` 只认
+path 形式 —— `/learn/<kng_id>` 是 **2026-09-09 设计文档里的凭空假设,真机不存在**
+(2026-09-10 用户裁定)。miss 走 `logger.debug`,默认日志级别下**完全不可见**。
+修:改按查询参数 `[?&]kngId=([^&#\s]+)` 解析,`&` 锚定保证 kngId 不必是首个参数。
+
+**为什么测试没拦住**:`tests/test_internal_site_adapter.py` 全部用 `/learn/kng-001`
+这类 URL,其中一条还写着 *"URL 不含 `/learn/<id>` → 返回 None(spider 不该被打扰)"*
+—— **SPA 形式被测试明确判成 miss**。测试与实现的假设一致地错,所以 739 个测试全绿。
+另:spike 直接调 spider,不经 strategy / adapter,所以"spike 端到端跑通"从未覆盖这条路。
+
+**缺陷 2(弹窗)**:策略 ② 的 A 级窗问的是"是否已开启字幕插件" —— 内部站没有插件可开,
+用户无法给出有意义的回答。真跑时每条视频弹一次(30s 超时)。修:基类加类属性
+`plugin_popup_enabled: bool = True`,`InternalSiteAdapter` 置 **False**,
+`strategy._try_browser` 在字幕探测**之后**、弹窗**之前**检查该闸门。探测照跑
+(未来内部站若有 DOM 字幕仍能命中),只是不再弹窗。
+
+**缺陷 3(签名)**:`strategy.get_subtitle` 策略 ③ 固定传
+`audio_factory=` / `transcriber=`(基类 `PlatformAdapter.fetch_via_recording` 是
+keyword-only 契约),而 `InternalSiteAdapter` 的 override 只写
+`(self, driver, url, duration_sec)`。后果不只是抛错 —— 它被 `except` 记成
+**`策略 ③ 失败(计入 transcribe_fail)`**,把"自己签名不匹配"错记成"视频转写失败",
+污染失败统计与 FR-6.6 计数。修:override 补齐 keyword-only 参数。
+
+**未修但已知的行为**:配额只在视频**通过**时累加(FR-9.4),所以整批全失败时
+`quota.add()` 永不触发 → `run_course_batch` 的 `should_continue()` 恒为 True →
+**会一路翻完整个目录**。本次即如此(60s 内翻了 4 页多)。是否加"连续失败 N 条即停"
+的熔断,留给后续裁定。
+
+**本次运行的副作用**:`logs/transcribe_fail.csv` 被写入 **43 行**垃圾记录
+(`stage=fetch_asset`,`error=all paths exhausted`,全部为 `b-learning.bill-jc.com`
+域名,时间戳落在 2026-09-10 22:05–22:16 的失败窗口内),不是真实转写失败。
+**用户 2026-09-10 裁定:已清理**(逐行解析后剔除这 43 行;保留 29 行 bilibili
+yt-dlp 真实失败 + 1 行 bill-jc `transcribe` 失败,共 30 行)。注意该文件含
+带内嵌换行的 quoted 字段(ffmpeg stderr),`wc -l` 数的是**行**不是**行数** ——
+清理必须走 `csv` 模块,按行过滤会切断合法记录。清理后 FR-6.6 的
+`FailureAlert` 计数基数同步下降(原被垃圾行虚增)。
+
+**验证**:全量 `18 failed / 744 passed`。18 项(16 `test_e2e` + 2 `test_quality_checker`)
+为**既有失败**(与 72b269a 基线逐项一致),新增 0 个失败;`744 = 739 + 5`。
+新增测试 5 条:SPA URL 解析 / kngId 非首参 / 无 kngId 返 None /
+`fetch_via_recording` 接受基类 kwargs / `plugin_popup_enabled=False` 时不弹窗。
+另修正 2 条**因错误原因通过**的既有测试(`_without_spider` 与 `_handles_spider_exception`
+原先用无 kngId 的 URL,会在到达被测分支前就返回 None)。
+
+#### 2026-09-10 质量链路两处「没注入 LLM 就崩」— QualityChecker / SubtitleRefiner 统一惰性构造
+
+**背景**:上一条修完三处缺陷后重跑批量,链路首次推进到质量门控,随即崩在
+`QualityChecker.check()`。**不是 fail 一条视频,是把整个 `vla learn` 批量带走**。
+
+**根因**:`build_text_provider` 的 T13 兜底只做了一半 ——
+
+```python
+if checker is None:
+    checker = QualityChecker(cfg)   # 建了对象,但没注入 LLM
+```
+
+该兜底的注释自称修的是"`cli._build_real_provider` 不传 checker 时
+`self.checker.check(...)` 处 AttributeError 的生产路径 bug" —— 结果是
+`AttributeError` 换成了 `RuntimeError`,**路径依然不通**。异常从
+`QualityChecker.check` 一路上抛(`main_provider.py:258` → `main.py:287` →
+`main.py:210` → `learn.py:169` → `cli.py:589`),批量整体终止。
+
+**同一缺陷已修过一次,只修了一半**:2026-09-10 给 `VideoSummarizer` 加
+`_resolve_llm` 时,本文档已把「构造期零依赖(同 `QualityChecker` / `SubtitleRefiner`)
++ 类内**惰性构造** LLM」写成定稿形态,并留下「**装配路径不该决定摘要产不产出**」
+的教训 —— 但 `QualityChecker` / `SubtitleRefiner` 当时并未一起改,SSOT 描述的
+契约与代码不符。本次补齐。
+
+| # | 位置 | 缺陷 | 后果 |
+|---|---|---|---|
+| 1 | `quality/checker.py:130` | 未注入 LLM 抛 `RuntimeError` | **整个批量终止**(异常上抛,非 fail 单条) |
+| 2 | `quality/refiner.py:144` | 同上 | `vla process --real-provider` 必崩(`refine_enabled: true` 时 `build_text_provider` 自动建裸 refiner) |
+
+**修法**:两者都补 `_resolve_llm()`(与 `VideoSummarizer` 同一契约)——
+`set_llm()` 显式注入优先,没注入则首次调用时按 cfg 惰性构造并缓存。
+`QualityChecker` 取 `cfg.quality_check.model`(与 spike 一致),
+`SubtitleRefiner` 取 `cfg.llm.refine_model`。
+
+**为什么兜底而不是「没注入就报错」**:装配方(`build_text_provider` / cli / spike)
+只保证 `Xxx(cfg)`,不保证 `set_llm`。组件自给自足,「忘注入」才不再等于「功能消失」。
+**但构造失败仍照常上抛** —— 惰性构造放在各自主流程的 `try` **之外**,凭据真缺失时
+报错可见,不重蹈 FR-2.15d 那次「异常被宽 `except` 吞成静默不产出」。
+
+**契约变更(测试)**:`tests/test_refiner.py::TestRefine::test_missing_llm_raises`
+原断言「未注入 → `RuntimeError`」,**本次删除**并改为惰性构造契约(3 条新测试)。
+`QualityChecker` 侧原先**没有**测试锁住该行为,故只增不改(4 条新测试)。
+
+**验证**:全量 `18 failed / 750 passed`。18 项(16 `test_e2e` + 2 `test_quality_checker`)
+为**既有失败** —— 已用 `git stash` 把工作树退回 HEAD 复跑证实逐项一致,本次新增
+0 个失败;`750 = 744 + 7 新增 − 1 删除`。
+
+#### 2026-09-10 落盘路径统一 — 音频归 `tmp/`、转写归 `logs/transcribed/<date>/`
+
+**背景**:批量真跑时发现三处写入方各用一套路径约定,产物散成三棵树:
+
+| 写入方 | 旧路径 | 问题 |
+|---|---|---|
+| `audio/source_factory.py` `DEFAULT_SAVE_DIR` | `./logs/audio_raw` | 与生产装配路径(`main_provider` 传 `save_dir/"audio_raw"` → `tmp/audio_raw`)**不一致**;用默认值构造时 wav 落进 `logs/`,而 `logs/` 是被读盘扫描的目录,不该混入二进制 |
+| `transcribe/streaming.py:165` | `<log_dir>/transcripts/`(**扁平**) | 与正式产物分家 —— 原始/精修产物一棵树,`<id>_<title>.txt` 另一棵 |
+| `log/transcription_log.py` | `<log_dir>/transcribed/<date>/transcripts|summaries` | 本次定为基准 |
+
+**定稿约定**:
+- **音频**一律 `<cwd>/tmp/audio_raw/`(CWD 相对,**不**重新锚定到仓库根 —— 与既有 `tmp/` 语义一致)
+- **转写**一律 `<cwd>/logs/transcribed/<YYYY-MM-DD>/{transcripts,summaries}/`
+
+**修法**:日期分组逻辑收敛为 `log/transcription_log.py` 的**唯一来源**
+`dated_root_for()` / `transcripts_dir_for()` / `summaries_dir_for()`,
+`TranscriptionLog.__init__` 与 `streaming.py` 都改为引用(不再各算各的日期;
+`__init__` 内 transcripts/summaries 由**同一个 `when`** 派生,顺带消除跨零点分家)。
+`DEFAULT_SAVE_DIR` 改 `Path("./tmp/audio_raw")`。
+
+**连带缺陷(本次一并修)** —— 中间产物并进 `transcripts/` 后,`LLMSummarizer._load_items`
+对该目录是无条件 `glob("*.txt")`,会**把一条视频当成三条重复内容**喂进 6h 总结
+(标题/正文重复堆叠)。故同时加 `_DERIVED_SUFFIXES = (".transcript.txt", ".refined.txt")`
+过滤,在三条 glob 分支合流后统一排除。
+
+**遗留**:`logs/transcripts/`(旧扁平目录)在途进程仍会写,存量文件**不擅自删除**
+(含 `test.transcript.txt` 与一次真跑的 `8790fab3-*`),待人工处置。
+`scripts/spike_bill_jc_full.py` 的 `tmp/transcripts/` **保持现状**(spike 自带约定,本次不动)。
+
+**验证**:全量 `18 failed / 752 passed`。18 项与前一条完全一致(既有失败);
+`752 = 750 + 2 新增`。RED→GREEN 逐项证实:先见 `ImportError: cannot import name
+'transcripts_dir_for'`(streaming),再把 `source_factory.py` / `llm_summarizer.py`
+两文件 `git stash` 复跑 → `2 failed`(`assert PosixPath('logs/audio_raw') ==
+PosixPath('tmp/audio_raw')` + 中间产物被计入),`stash pop` 后转 GREEN。
+
+#### 2026-09-10 质量通过即丢弃转写中间产物(磁盘友好)
+
+**背景**:上一条把 `.transcript.txt` / `.refined.txt` 并进了 `logs/transcribed/<date>/
+transcripts/`。它们与正式产物 `<id>_<title>.txt` 内容重叠,通过质量后纯冗余。
+
+**裁定(用户 2026-09-10)**:**质量通过 → 丢弃;质量未通过 → 两个都留**。
+
+留的理由不是习惯,是证据不可替代:`.refined.txt` 可能带 Refiner 降级的
+`# notes: <原因>`(`streaming.py:227`),而 `failed_texts/<id>.txt` 只有最终文本 ——
+失败时留原始/精修产物,才答得上「是转写烂还是 Refiner 烂」(如 `8790fab3` 那次
+score=55 的失败,LLM 的指控全是「公司名/术语转写错」,正需要原始产物对照)。
+
+**实现**:
+- `TranscriptionLog.discard_transcribe_intermediates(stem)` —— 只删精确的
+  `<stem>.transcript.txt` / `<stem>.refined.txt`,**幂等**(文件不存在返回 `[]`,不抛)
+- 路径用 `transcripts_dir_for(self.log_dir)` **当场算**,不用 `self.transcribed_dir`
+  (`__init__` 快照)—— 批量跨零点时快照指向昨天,而 transcriber 是转写那刻现算的,
+  不一致就删不中
+- 调用点:`main_provider.process_asset` **Step 6**,位置在 Step 5 `save_transcribed`
+  **成功之后**。时序是刻意的:若写盘失败,中间产物就是唯一幸存的副本,不能先删
+- 失败分支在 Step 3 已 `return None`,天然走不到;`audio_path is None`(api/browser
+  路径,没转写)则跳过
+- 清理失败只 warning,不影响主流程(字幕已通过质量并落盘)
+
+**连带更正**:`summary/video_summarizer.py:23` 原写「长视频同时保留 refined.txt(全文
+本)+ .summary.txt」,与本次策略相抵。已证实**无任何读取方从盘上读它**(摘要吃的是
+内存里的 text),故改准确 —— 否则修完 FR-2.15d 后有人会误以为摘要依赖该文件存在。
+
+**不动**:`llm_summarizer._DERIVED_SUFFIXES` 过滤**仍然必要** —— 失败时文件还在,
+存量文件也在。
+
+**验证**:`tests/test_transcription_log.py` + `tests/test_process_asset.py` = `34 passed`。
+新增 6 条测试中 **5 条 RED→GREEN**,第 6 条
+(`test_process_asset_quality_fail_keeps_intermediates`)**本来就是绿的** ——
+它锁的是「失败时别删」这条现状契约,是防回归栅栏,不是红→绿测试(如实记录,不充数)。
+
+#### 2026-09-10 FR-2.15d 摘要槽位被 6h 批量 summarizer 顶掉 —— 静默不产出
+
+**症状**(真机 `vla learn` 批量,5 条视频):一条摘要都没产出,日志里只有
+`'LLMSummarizer' object has no attribute 'summarize_one'` 的一行 warning。
+
+**根因**:两个**同名不同物**的 summarizer:
+
+| 类 | 归属 FR | 方法 | 装配点 |
+|---|---|---|---|
+| `LLMSummarizer` | FR-5 / FR-9(6h 批量总结) | `summarize_batch` / `write_to_notes` | `VideoLearningAgent(summarizer=…)` |
+| `VideoSummarizer` | FR-2.15d(单视频 200-300 字) | `summarize_one` / `write_summary` | `build_text_provider(…)` |
+
+`cli._build_learn_provider` 把 `comps["summarizer"]`(**前者**)注进了**后者**的槽位。
+注入优先于兜底 ⇒ `RealTextProvider.video_summarizer` 拿着没有 `summarize_one` 的对象
+⇒ `AttributeError` 被 `process_asset` Step 4.5 的宽 `except Exception`
+(`main_provider.py:304`)吞成一行 warning ⇒ **整批一条摘要都没有,而退出码是 0**。
+
+**修法(用户裁定 A+B)**:
+
+| # | 改动 | 目的 |
+|---|---|---|
+| A | 删 `cli._build_learn_provider` 里的 `summarizer=comps["summarizer"]` | 停掉误注入,摘要槽位回归 `build_text_provider` 兜底 |
+| B | `build_text_provider` / `RealTextProvider.__init__` 形参 + 属性 `summarizer` → **`video_summarizer`** | 让这类误传**当场 `TypeError: unexpected keyword argument`**,而不是被宽 except 吞成 warning |
+
+**不动**:`VideoLearningAgent.summarizer`(`main.py:121/321/329`)**保持原名** ——
+那个槽位合法持有 `LLMSummarizer`,改名会破坏 6h 批量总结。
+
+**兜底契约**(与 T13 的 checker / refiner 一致):不传 `video_summarizer` ⇒
+自动构造 `VideoSummarizer(cfg)`;**构造期零凭据**,LLM 在首次 `summarize_one` 时
+按 `cfg.llm_client` 惰性构造(见 `summary/video_summarizer.py:_resolve_llm`)。
+
+**验证**:`tests/test_main_provider.py` 新增 4 条,**4 条 RED→GREEN**
+(改前 `4 failed, 8 deselected`;改后 `12 passed`)。全量套件在本工作区
+`18 failed / 762 passed`,把全部未提交改动 stash 掉后在 HEAD 上是
+`18 failed / 739 passed` —— **同 18 条失败**,均为既存问题
+(16 × `test_e2e.py` sync/async 混用 + 2 × `test_quality_checker.py` 文案断言),
+本次改动**零新增失败**。
+
+**真配置装配复验**(2026-09-10,不删的一次性脚本):用真实 `config/vla.yaml` +
+`.env` 调 `cli._build_learn_provider(cfg, spider=…, comps={"summarizer": LLMSummarizer})`
+—— 即复现真机的误注入输入 —— 断言结果:
+
+```
+comps['summarizer']        = LLMSummarizer | has summarize_one? False
+provider.video_summarizer  = VideoSummarizer
+  has summarize_one?         True
+  has summarize_batch?       False   ← 6h 批量对象未越位
+  LLM 构造期已建?            False   ← 零凭据构造
+```
+
+全程**不发起 LLM 请求**(`LLMClient` 构造离线,只存凭据),不消耗 quota。
+这条证明的是**装配**:若要证明"摘要真的落盘",仍需一次完整真机转写。
+
+其中 `test_learn_provider_does_not_inject_batch_summarizer` 是**根因测试**:
+monkeypatch `build_text_provider` 截住 `_build_learn_provider` 传的关键字实参,
+断言 `"summarizer" not in captured`。首轮写法(comps 里不放 `"summarizer"` 键)
+虽然也红,但红在测试自身的 `KeyError`,不是断言 —— 属**假红**,已改成
+喂一个 `LLMSummarizer` 形状的 stand-in(有 `summarize_batch`,无 `summarize_one`),
+让红灯落在真正的断言上。
+
 ### FR-1 视频源管理
 
 | ID     | 描述                                                      | 优先级 |
@@ -310,7 +545,7 @@ FR-11.5(只认空页)。
 | FR-2.15  | **Free Tab Audio Recorder 触发 + 编辑器 URL**(2026-09-07 v3.2 改全名,2026-09-03 重构 v2):扩展 ID **不固定**,运行时 `TabAudioRecorder._resolve_ext_id()`(FR-2.24)从 `chrome.management.getAll()` 遍历 chrome-extension 列表,匹配规则:`name.toLowerCase().includes("free tab audio recorder")` OR `description.toLowerCase().includes("free tab audio recorder")`(2026-09-07 v3.2 改为全名匹配,旧 `"tab audio"` 子串仍兼容);匹配不到 → 抛 `ExtensionNotFoundError`,`SubtitleStrategy` 捕获后写 `quality_skip.csv`。配置在 `config/vla.yaml` 的 `extension.tab_audio_recorder.match_keyword`(默认 `"free tab audio recorder"`,可改),用户也可在 `vla doctor` 命令里指定其他关键词(防止扩展改名)。**触发方式**:在动态解析到的 background page 上跑 evaluate JS 启动录制(`FR-2.24 触发器` 实现),**不依赖 hotkey**(Free Tab Audio Recorder 无 `chrome.commands`、macOS TCC 拦截 `Input.dispatchKeyEvent`、CDP 键盘事件对扩展 chrome.commands 无效)。**音频 ID 获取**:扩展内部启动录制后,通过 background page evaluate 读 `window.__last_audio_id` 或解析 `<ext_url>/editor.html?id=<audio_id>` URL(扩展跳转到此页面作为录制完成标志),用正则 `id=(\d+)` 提取 audio_id。**录制时长**:`duration_sec` 由调用方传入,后台 service worker 自己计时 stop;Agent 端用 `asyncio.sleep(duration_sec + post_buffer_sec=30)` 轮询 editor.html 是否就绪。**关键设计**:audio_id 是本地文件命名 + 转写队列 key(FR-2.26/2.27),全程不依赖视频画面 | P0  |
 | FR-2.16  | **策略 ③ 音频输入**(2026-09-03 重构 v3,方案 A):二级降级路径详见 FR-2.14;路径 ① yt-dlp 输出 `.wav`、路径 ② Tab Audio Recorder 输出 `.webm`(opus 编码),两者均直接送 `faster-whisper` 转写(无需 ffmpeg 重抽);**Whisper 永不接收视频信号,永不经过麦克风 ADC**(2026-09-03 砍掉 Puppeteer 流式路径后的新不变量);`AudioTranscriber` Protocol 是注入点,Phase 4 接 `WhisperTranscriber`,FR-2.27 worker 池并发处理 | P0  |
 | FR-2.17  | **BilibiliAdapter**:实现 FR-2.1/2.2/2.4,`match` 域名匹配 `bilibili.com` / `b23.tv`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | P0  |
-| FR-2.18  | **InternalSiteAdapter**(占位):接口留 stub,等公司下发账号后实现 `match` 域名 + fetch 方法;当前抛 `NotImplementedError`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | P1  |
+| FR-2.18  | **InternalSiteAdapter**(2026-09-09 Phase 9.6 实装,原文"占位 stub / 抛 `NotImplementedError`"已过时):`match` 命中 `b-learning.bill-jc.com` 等内部域;`fetch_via_spider` 从 URL 的 **`kngId` 查询参数**取 id → `InternalSiteSpider.fetch_m3u8` → `(None, {"video_url": m3u8, "via": "internal_spider"})`,交 `fetch_asset` 路径 ② 抽音;`fetch_api_subtitle` / `fetch_browser_subtitle` 如期返 `None`;`plugin_popup_enabled = False`(见 FR-11.12) | P0  |
 | FR-2.19  | **通用 fallback adapter**:未知 URL 域名时(非 B 站、非 internal site),跳过策略 ①,直接走 ② Tab Audio Recorder(FR-2.14/2.21);yt-dlp 对未知站点大概率 simulate 失败,直接进入降级链                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | P1  |
 | FR-2.20  | **降级路径**:任一策略失败都降级到下一级,不跳过当前视频;仅 ③ 失败才算"字幕提取失败"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | P0  |
 | FR-2.21  | **策略 ③ 自动探测 + 通知兜底(方案 C,2026-09-07 v3.2 改名,2026-09-03 重构 v2)**:路径 ① yt-dlp miss 后,**不再弹 A 级阻塞 dialog**(方案 C)。新流程:`TabAudioRecorder.probe_status(browser) -> Literal["enabled", "disabled", "not_installed"]`(FR-2.24a)→ 三态分支处理:**`enabled`** → 直接调 `TabAudioRecorder.start_recording(driver, url, duration_sec)` 拿 audio_id(FR-2.24),无需用户响应;**`disabled`**(扩展装了但被关,2026-09-07 v3.2 改全名) → `MacOSNotifier.info("需要启用 Free Tab Audio Recorder", "Free Tab Audio Recorder 已安装但未启用 → 请在 chrome://extensions/ 启用 → 下次运行自动生效")` B 级通知 + 写 `quality_skip.csv`(不阻塞,继续下一个视频);**`not_installed`**(扩展未找到) → `MacOSNotifier.warning("Free Tab Audio Recorder 未安装", "请从 Chrome Web Store 搜索 'Free Tab Audio Recorder' 安装并启用")` B 级通知 + 写 `quality_skip.csv`。**无状态设计(每次即时探测)**:与旧版 `PluginStatus` 单例不同,每次调用都重新探测(扩展状态可在 Chrome 设置里随时改);探测耗时 ~100ms(一次 `chrome.management.getAll()` 调用),可接受。**降级语义**:Tab Audio Recorder 路径本身失败时(扩展无响应 / audio_id 拿不到 / 文件超时未落地)→ 写 `quality_skip.csv` + log warning,**不记 transcribe_fail**(whisper 还没启动)。**Session 行为**:不阻塞 session,优雅降级,用户后续可在 Chrome 启用扩展后下次自动生效                                                                                                                                                  | P0  |
@@ -685,6 +920,10 @@ accumulated_duration_sec = 0
 | FR-11.8  | 探测失败(ffprobe 缺失/超时/解析失败)时**保留占位值,不覆盖为 0** —— 覆盖会让 cps = chars/0 踩爆上限误判幻觉 | P0  |
 | FR-11.9  | **单条转写链路零改动**:`fetch_asset` / `process_asset` / `VideoLearningAgent.run` 语义不变,回填靠包装器    | P0  |
 | FR-11.10 | `--dry-run` 只翻页列任务,不装配 transcriber / refiner / LLM(零凭据零副作用)                          | P1  |
+| FR-11.11 | **bill-jc 视频 URL 只有 SPA 一种形式,kngId 是查询参数**(2026-09-10 新增):`…/kng/#/video/play?kngId=<uuid>&projectId=&btid=&gwnlUrl=`;`/learn/<kng_id>` 这种 **path 形式不存在**(2026-09-09 设计文档的凭空假设)。`InternalSiteAdapter.fetch_via_spider` 按 `[?&]kngId=([^&#\s]+)` 解析,`&` 锚定保证 kngId 不必是首个查询参数。**单视频与批量共用同一条解析** | P0  |
+| FR-11.12 | **不依赖浏览器插件的平台不弹 A 级窗**(2026-09-10 新增):`PlatformAdapter.plugin_popup_enabled` 类属性(默认 `True`),`InternalSiteAdapter` 置 **`False`**;`strategy._try_browser` 在字幕探测之后、弹窗之前检查。**理由**:弹窗问的是"是否已开启字幕插件",内部站没有插件可开,用户无法给出有意义的回答 —— 只会白等 30s 再降级。**探测不受影响**(未来内部站若有 DOM 字幕仍能命中) | P0  |
+| FR-11.13 | **`fetch_via_recording` override 必须兼容基类 keyword-only 契约**:`strategy.get_subtitle` 策略 ③ 固定传 `audio_factory=` / `transcriber=`;子类收窄 signature 会 TypeError,且会被 `except` 记成 `transcribe_fail`(**把"签名不匹配"错记成"视频转写失败"**) | P0  |
+| FR-11.14 | **已知未修**:整批全失败时 `quota.add()` 永不触发 → `should_continue()` 恒 True → 一路翻完整个目录。是否加"连续失败 N 条熔断"待裁定 | P2  |
 
 **翻页代数定稿(2026-09-10)**:
 

@@ -20,7 +20,10 @@ LLM 注入契约(2026-09-10):
 为什么不在 Refiner 里做:
 - Refiner 是"清理"(preserve original length),与"压缩"语义不同
 - Refiner 输入是 transcript,摘要输入是 cleaned_text(更干净,压缩效果更好)
-- 长视频同时保留 refined.txt(全文本)+ .summary.txt(摘要),职责清晰
+- 本类吃的是**内存里的文本**(`process_asset` Step 4 精修后的 text),**不读盘**;
+  所以质量通过后 `main_provider` 丢弃 `.transcript.txt` / `.refined.txt` 不影响
+  摘要 —— 别让"保留 refined.txt"再被当成摘要的前置依赖(2026-09-10 更正:
+  那句是旧意图陈述,与"质量通过即丢弃中间产物"的新策略相抵)
 
 配额归类:
 - 项目 SSOT:"云端 LLM 限定两件事: ① 字幕质量检查 ② 6h 批量总结"

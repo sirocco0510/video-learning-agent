@@ -35,7 +35,7 @@ import re
 from pathlib import Path
 
 from vla.config import VLAConfig
-from vla.llm.client import LLMClientLike
+from vla.llm.client import LLMClient, LLMClientLike
 from vla.models import Correction, RefinementResult
 
 
@@ -108,6 +108,28 @@ class SubtitleRefiner:
         """延迟注入 LLM 客户端(同 QualityChecker 模式)。"""
         self._llm = llm
 
+    def _resolve_llm(self) -> LLMClientLike:
+        """取 LLM 客户端;没注入就按 config **惰性构造**一个。
+
+        为什么不在 __init__ 里构造(2026-09-10):
+        构造期就要凭据 → `build_text_provider(cfg)` 在没加载 .env 的环境(CI /
+        单测)直接炸 `OpenAIError: Missing credentials`,而装配路径本身与
+        凭据无关(`SubtitleRefiner(cfg)` 构造期零依赖)。
+
+        为什么要兜底而不是"没注入就报错"(2026-09-10 契约变更):
+        `build_text_provider` 在 `refine_enabled=true` 且未注入时自动建
+        `SubtitleRefiner(cfg)`(**不带 LLM**)→ `vla process --real-provider` 必崩。
+        装配方只保证 `Xxx(cfg)`,不保证 `set_llm`;自给自足才能让"忘注入"
+        不再等于"功能消失"。与 `VideoSummarizer._resolve_llm` / `QualityChecker`
+        同一契约:构造期零依赖 + 类内惰性构造。
+
+        注意:本方法在 `refine()` 的 `try` **之外**调用 —— 凭据真缺失时照常上抛
+        (不重蹈 FR-2.15d 那次"异常被宽 except 吞成静默不产出")。
+        """
+        if self._llm is None:
+            self._llm = LLMClient(self.config.llm_client, model=self.model)
+        return self._llm
+
     @property
     def enabled(self) -> bool:
         """config.quality_check.refine_enabled — 调用方决定是否调用 refine()。"""
@@ -138,13 +160,14 @@ class SubtitleRefiner:
         3. 解析 JSON → RefinementResult
         4. 任何环节失败 → 返回原 text + notes="失败回退"
 
+        LLM 客户端:显式 `set_llm()` 注入优先;没注入则按 cfg 惰性构造
+        (见 `_resolve_llm`)。凭据缺失时构造抛错照常上抛。
+
         Raises:
-            RuntimeError: 未注入 LLM 客户端(refine_enabled=True 时必须)
+            Exception: LLM 客户端惰性构造失败(如凭据缺失)。调用失败本身
+                **不抛错** —— 走 fallback 返回原文(见下)。
         """
-        if self._llm is None:
-            raise RuntimeError(
-                "SubtitleRefiner 没有 LLM 客户端,请先 set_llm() 或构造时注入"
-            )
+        llm = self._resolve_llm()
 
         original_text = text
         max_chars = self.config.quality_check.refine_max_chars
@@ -191,7 +214,7 @@ class SubtitleRefiner:
             # 推理(deepseek-flash 默认会为一句话的任务烧 16000+ reasoning tokens)。
             cfg_max = self.config.quality_check.refine_max_output_tokens
             output_max_tokens = max(cfg_max, len(text) * 2 + 1000)
-            response = self._llm.complete(
+            response = llm.complete(
                 full_prompt,
                 max_tokens=output_max_tokens,
                 temperature=0.2,

@@ -187,3 +187,77 @@ async def test_process_asset_refine_fails_uses_original(tmp_path):
     p.checker.check = MagicMock(return_value=_qr_pass(90))
     result = await p.process_asset(asset, _task())
     assert result.text == "original"  # refine 失败 → 用原文
+
+
+# ---------- 质量通过 → 丢弃转写中间产物(2026-09-10) ----------
+#
+# 这两条用**真** TranscriptionLog(不是 MagicMock),所以断言落在真实文件上,
+# 而不是 mock 的调用参数 —— 规格是「文件没了 / 文件还在」,不是「调了个函数」。
+# api 路径(audio_path=None)的守卫由上面的 test_process_asset_text_only_no_transcribe
+# 覆盖:`None.stem` 会当场炸,漏写守卫那条测试必红。
+
+
+def _real_log(tmp_path: Path):
+    from vla.log.transcription_log import TranscriptionLog
+    return TranscriptionLog(tmp_path / "logs")
+
+
+def _seed_intermediates(tmp_path: Path, stem: str = "a"):
+    """在 transcriber 会写入的同一目录预置两个中间产物。"""
+    from vla.log.transcription_log import transcripts_dir_for
+    d = transcripts_dir_for(tmp_path / "logs")
+    d.mkdir(parents=True, exist_ok=True)
+    raw = d / f"{stem}.transcript.txt"
+    refined = d / f"{stem}.refined.txt"
+    raw.write_text("whisper 原始", encoding="utf-8")
+    refined.write_text("Level 4 产物", encoding="utf-8")
+    return raw, refined
+
+
+@pytest.mark.asyncio
+async def test_process_asset_pass_discards_intermediates(tmp_path):
+    """质量通过 → `.transcript.txt` / `.refined.txt` 都丢弃,正式产物保留。
+
+    磁盘友好:通过后正式产物已含最终文本,中间产物纯冗余。
+    """
+    raw, refined = _seed_intermediates(tmp_path)
+    wav = tmp_path / "a.wav"
+    wav.write_bytes(b"\x00")
+    p = _make_provider()
+    p.log = _real_log(tmp_path)
+    asset = Asset(text=None, source="whisper_download", audio_path=wav, deletable=True)
+    p.transcriber.transcribe = MagicMock(return_value="通过的字幕文本")
+    p.checker.check = MagicMock(return_value=_qr_pass(90))
+
+    result = await p.process_asset(asset, _task())
+
+    assert result is not None
+    assert not raw.exists(), "质量通过后原始产物应被丢弃"
+    assert not refined.exists(), "质量通过后精修产物应被丢弃"
+    # 正式产物必须还在(否则就是丢字幕)
+    canonical = list((tmp_path / "logs" / "transcribed").rglob("transcripts/BV1xx_*.txt"))
+    assert len(canonical) == 1
+    assert "通过的字幕文本" in canonical[0].read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_process_asset_quality_fail_keeps_intermediates(tmp_path):
+    """质量**未通过** → 两个中间产物全留作诊断证据(用户 2026-09-10 裁定)。
+
+    `.refined.txt` 可能带 Refiner 降级的 `# notes: <原因>`,failed_texts/ 里没有
+    这个信息 —— 失败时留原始/精修产物,才答得上「是转写烂还是 Refiner 烂」。
+    """
+    raw, refined = _seed_intermediates(tmp_path)
+    wav = tmp_path / "a.wav"
+    wav.write_bytes(b"\x00")
+    p = _make_provider()
+    p.log = _real_log(tmp_path)
+    asset = Asset(text=None, source="whisper_download", audio_path=wav, deletable=True)
+    p.transcriber.transcribe = MagicMock(return_value="烂字幕")
+    p.checker.check = MagicMock(return_value=_qr_fail(30, "低质"))
+
+    result = await p.process_asset(asset, _task())
+
+    assert result is None
+    assert raw.exists(), "质量失败时原始产物必须保留"
+    assert refined.exists(), "质量失败时精修产物必须保留"

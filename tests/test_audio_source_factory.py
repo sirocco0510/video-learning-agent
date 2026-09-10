@@ -14,10 +14,22 @@ from unittest.mock import patch
 import pytest
 
 from vla.audio.source_factory import (
+    DEFAULT_SAVE_DIR,
     AudioExtractionResult,
     AudioSourceFactory,
     probe_duration,
 )
+
+
+class TestDefaultSaveDir:
+    def test_default_save_dir_is_tmp_audio_raw(self) -> None:
+        """默认落盘必须是 `tmp/audio_raw`(2026-09-10 统一)。
+
+        旧默认是 `./logs/audio_raw` —— 与生产装配路径不一致(`main_provider` 传
+        `save_dir / "audio_raw"` → `tmp/audio_raw`)。一旦有人用默认值构造,
+        wav 就会落到第二棵树下,「wav 统一落 tmp/audio_raw」不再成立。
+        """
+        assert DEFAULT_SAVE_DIR == Path("./tmp/audio_raw")
 
 
 class TestIsDownloadable:

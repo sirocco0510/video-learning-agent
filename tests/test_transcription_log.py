@@ -12,11 +12,12 @@
 
 import csv
 import re
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
-from vla.log.transcription_log import TranscriptionLog
+from vla.log.transcription_log import TranscriptionLog, transcripts_dir_for
 from vla.models import QualityResult
 
 
@@ -259,6 +260,70 @@ class TestSaveTranscribed:
         assert len(text_files) == 1
         # 文件 stem 应该在合理范围(<80 字符)
         assert len(text_files[0].stem) < 80
+
+
+# ---------------- discard_transcribe_intermediates (2026-09-10) ----------------
+
+
+class TestDiscardTranscribeIntermediates:
+    """质量通过后丢弃转写中间产物(磁盘友好:用户 2026-09-10 裁定)。
+
+    `.transcript.txt`(Whisper 原始)/ `.refined.txt`(Level 4 产物)只在
+    **质量未通过**时留作诊断证据;通过后正式产物已含最终文本,二者纯冗余。
+    """
+
+    def test_deletes_both_intermediates(self, transcriber_log, log_dir):
+        """两个后缀都存在 → 都被删,返回被删路径。"""
+        d = transcripts_dir_for(log_dir)
+        raw = d / "abc.transcript.txt"
+        refined = d / "abc.refined.txt"
+        raw.write_text("原始", encoding="utf-8")
+        refined.write_text("精修", encoding="utf-8")
+
+        removed = transcriber_log.discard_transcribe_intermediates("abc")
+
+        assert not raw.exists()
+        assert not refined.exists()
+        assert {p.name for p in removed} == {"abc.transcript.txt", "abc.refined.txt"}
+
+    def test_keeps_canonical_transcript_and_summary(self, transcriber_log, log_dir):
+        """**不碰**同目录的正式产物 `<id>_<title>.txt` 与 summaries/。
+
+        这是「删对了」的核心断言 —— 删错一个就是永久丢字幕。
+        """
+        d = transcripts_dir_for(log_dir)
+        canonical = d / "abc_Python 教程.txt"
+        canonical.write_text("正式产物,必须保留", encoding="utf-8")
+        (d / "abc.transcript.txt").write_text("原始", encoding="utf-8")
+        summaries = log_dir / "transcribed" / datetime.now().strftime("%Y-%m-%d") / "summaries"
+        summaries.mkdir(parents=True, exist_ok=True)
+        summary = summaries / "abc_Python 教程.summary.txt"
+        summary.write_text("摘要,必须保留", encoding="utf-8")
+
+        transcriber_log.discard_transcribe_intermediates("abc")
+
+        assert canonical.exists(), "正式产物被误删 = 永久丢字幕"
+        assert summary.exists(), "摘要被误删"
+
+    def test_missing_files_is_noop(self, transcriber_log, log_dir):
+        """文件不存在 → 静默返回空列表(幂等,不抛)。
+
+        正常场景:api 路径没转写;或上一轮已删过。清理动作不该让主流程炸。
+        """
+        assert transcriber_log.discard_transcribe_intermediates("never-existed") == []
+
+    def test_only_matches_exact_stem(self, transcriber_log, log_dir):
+        """只删 `<stem>.<后缀>`,不误伤同前缀的其他视频。"""
+        d = transcripts_dir_for(log_dir)
+        other = d / "abc-other.transcript.txt"
+        other.write_text("别人的", encoding="utf-8")
+        mine = d / "abc.transcript.txt"
+        mine.write_text("我的", encoding="utf-8")
+
+        transcriber_log.discard_transcribe_intermediates("abc")
+
+        assert not mine.exists()
+        assert other.exists(), "同前缀的别的视频不该被连坐"
 
 
 # ---------------- save_failed_text (FR-7.3,显式调用) ----------------

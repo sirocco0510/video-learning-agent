@@ -437,7 +437,7 @@ async def test_extract_browser_audio_resets_spa_before_video_goto(
 
     with patch("vla.transcribe.extract.async_playwright", ap):
         await extract_browser_audio(
-            "https://b-learning.bill-jc.com/learn/abc-123?kngId=abc-123",
+            "https://b-learning.bill-jc.com/kng/#/video/play?kngId=abc-123",
             out_wav,
         )
 
@@ -452,7 +452,7 @@ async def test_extract_browser_audio_resets_spa_before_video_goto(
     )
     # 第二次 goto 必须是传入的视频 URL
     second_goto_url = fake_page.goto.call_args_list[1][0][0]
-    assert second_goto_url == "https://b-learning.bill-jc.com/learn/abc-123?kngId=abc-123"
+    assert second_goto_url == "https://b-learning.bill-jc.com/kng/#/video/play?kngId=abc-123"
 
 
 def _make_fake_browser_already_loaded():
@@ -511,7 +511,7 @@ async def test_extract_browser_audio_skips_button_click_when_video_already_loade
 
     with patch("vla.transcribe.extract.async_playwright", ap):
         await extract_browser_audio(
-            "https://b-learning.bill-jc.com/learn/abc-123?kngId=abc-123",
+            "https://b-learning.bill-jc.com/kng/#/video/play?kngId=abc-123",
             out_wav,
         )
 
@@ -602,7 +602,7 @@ async def test_extract_browser_audio_click_js_matches_multiple_learning_states(
     monkeypatch.setattr("vla.transcribe.extract.subprocess.run", fake_ffmpeg_run)
 
     with patch("vla.transcribe.extract.async_playwright", ap):
-        await extract_browser_audio("https://b-learning.bill-jc.com/learn/x", out_wav)
+        await extract_browser_audio("https://b-learning.bill-jc.com/kng/#/video/play?kngId=x", out_wav)
 
     # 关键断言:click JS 必须包含 "继续学习" 字符串(修复后)
     click_js = click_js_calls[0]
@@ -651,7 +651,7 @@ async def test_extract_browser_audio_applies_atempo_stretch_to_ffmpeg(
     monkeypatch.setattr("vla.transcribe.extract.subprocess.run", fake_ffmpeg_run)
 
     with patch("vla.transcribe.extract.async_playwright", ap):
-        await extract_browser_audio("https://b-learning.bill-jc.com/learn/x", out_wav)
+        await extract_browser_audio("https://b-learning.bill-jc.com/kng/#/video/play?kngId=x", out_wav)
 
     assert len(captured_ffmpeg_cmds) == 1
     cmd = captured_ffmpeg_cmds[0]
@@ -693,7 +693,7 @@ async def test_extract_browser_audio_atempo_is_overridable(tmp_path, monkeypatch
 
     with patch("vla.transcribe.extract.async_playwright", ap):
         await extract_browser_audio(
-            "https://b-learning.bill-jc.com/learn/x", out_wav, atempo=1.0,
+            "https://b-learning.bill-jc.com/kng/#/video/play?kngId=x", out_wav, atempo=1.0,
         )
 
     cmd = captured_ffmpeg_cmds[0]

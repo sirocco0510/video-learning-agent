@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -107,11 +108,67 @@ class TestProperties:
 
 
 class TestRefine:
-    def test_missing_llm_raises(self, cfg):
-        """refine_enabled=True 但没注入 LLM → RuntimeError。"""
+    def test_lazy_constructs_llm_when_not_injected(self, cfg, monkeypatch):
+        """refine_enabled=True 且没注入 LLM → **惰性构造**,不再抛 RuntimeError。
+
+        2026-09-10 契约变更:原 `test_missing_llm_raises` 断言"没注入 → RuntimeError",
+        现与 `QualityChecker` / `VideoSummarizer` 统一为"构造期零依赖 + 类内惰性构造"。
+
+        为什么:`build_text_provider` 在 `refine_enabled=true` 且未注入时会自动建
+        `SubtitleRefiner(cfg)`(**不带 LLM**)—— `vla process --real-provider` 因此
+        必崩。装配方只保证 `Xxx(cfg)`,不保证 `set_llm`,组件必须自给自足。
+        """
+        built: list[tuple[Any, str]] = []
+        llm = MagicMock()
+        llm.complete.return_value = '{"cleaned_text": "清理后的文本", "corrections": [], "notes": ""}'
+
+        def fake_llm_client(client_cfg: Any, model: str = "") -> MagicMock:
+            built.append((client_cfg, model))
+            return llm
+
+        monkeypatch.setattr("vla.quality.refiner.LLMClient", fake_llm_client)
         r = SubtitleRefiner(cfg, llm=None)
-        with pytest.raises(RuntimeError, match="LLM 客户端"):
-            r.refine("一些字幕文本", title="视频标题")
+
+        result = r.refine("一些字幕文本", title="视频标题")
+
+        assert result.cleaned_text == "清理后的文本"
+        assert len(built) == 1, "应恰好惰性构造一次 LLMClient"
+        assert built[0][0] is cfg.llm_client, "应传 cfg.llm_client"
+        assert built[0][1] == r.model, "model 应与 self.model 一致"
+
+    def test_lazy_construction_happens_once(self, cfg, monkeypatch):
+        """惰性构造只做一次 —— 第二次 refine 复用已建的客户端。"""
+        calls = {"n": 0}
+        llm = MagicMock()
+        llm.complete.return_value = '{"cleaned_text": "清理后的文本", "corrections": [], "notes": ""}'
+
+        def fake_llm_client(client_cfg: Any, model: str = "") -> MagicMock:
+            calls["n"] += 1
+            return llm
+
+        monkeypatch.setattr("vla.quality.refiner.LLMClient", fake_llm_client)
+        r = SubtitleRefiner(cfg, llm=None)
+
+        r.refine("第一段文本", title="t")
+        r.refine("第二段文本", title="t")
+
+        assert calls["n"] == 1
+        assert llm.complete.call_count == 2, "两次调用都该打到同一个客户端"
+
+    def test_injected_llm_wins_over_lazy(self, cfg, monkeypatch):
+        """显式注入优先 —— 注入了就不该再惰性构造。"""
+
+        def boom(client_cfg: Any, model: str = "") -> Any:
+            raise AssertionError("注入了 LLM 却仍去构造新的")
+
+        monkeypatch.setattr("vla.quality.refiner.LLMClient", boom)
+        llm = MagicMock()
+        llm.complete.return_value = '{"cleaned_text": "注入的文本", "corrections": [], "notes": ""}'
+        r = SubtitleRefiner(cfg, llm=llm)
+
+        result = r.refine("一些字幕文本", title="t")
+
+        assert result.cleaned_text == "注入的文本"
 
     def test_calls_llm_with_system_and_user_prompt(self, refiner, mock_llm):
         """完整 prompt 包含 system + user 两部分。"""

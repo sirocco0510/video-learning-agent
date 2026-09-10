@@ -18,7 +18,11 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SAVE_DIR = Path("./logs/audio_raw")
+# 2026-09-10 统一:wav 一律落 tmp/audio_raw(与生产装配路径一致 ——
+# `main_provider` 用 `save_dir / "audio_raw"`)。旧默认 `./logs/audio_raw`
+# 会让"谁用了默认值"把 wav 落到 logs 树里,和"转写产物落 logs、音频落 tmp"
+# 的约定相反,且 logs/ 是被读盘扫描的目录,不该混入二进制。
+DEFAULT_SAVE_DIR = Path("./tmp/audio_raw")
 DEFAULT_AUDIO_FORMAT = "wav"
 DEFAULT_FFMPEG_POSTARGS = "-ac 1 -ar 16000"  # 单声道 + 16kHz(Whisper 期望采样率)
 DEFAULT_SIMULATE_TIMEOUT_SEC = 30
@@ -72,7 +76,7 @@ class AudioSourceFactory:
     """yt-dlp 抽音频工厂(SSOT: spec §3.2)。
 
     用法:
-        factory = AudioSourceFactory(save_dir=Path("./logs/audio_raw"))
+        factory = AudioSourceFactory(save_dir=Path("./tmp/audio_raw"))
         if factory.is_downloadable(url):
             result = factory.extract(url, stem=bvid)
             transcriber.transcribe(result.audio_path)

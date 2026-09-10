@@ -14,7 +14,12 @@ tmp/
 logs/*.csv
 logs/*.jsonl
 logs/failed_texts/
+# 2026-09-10 起 logs/transcripts/ 为遗留(旧扁平树);新产物落 logs/transcribed/
 logs/transcripts/
+# 转写产物树 —— 含公司内部课程字幕,绝不进仓
+logs/transcribed/
+# 清理 CSV 前的手工备份(如 logs/transcribe_fail.csv.bak-<ts>)
+logs/*.bak-*
 notes/
 .env
 .DS_Store

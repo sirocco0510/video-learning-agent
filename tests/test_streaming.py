@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from vla.config import VLAConfig
+from vla.log.transcription_log import transcripts_dir_for
 from vla.transcribe.streaming import AudioTranscriber, StreamingTranscriber
 
 
@@ -379,10 +380,14 @@ class TestTranscriptAndCleanedWrite:
 
         transcriber.transcribe(audio_file)
 
-        transcript_path = tmp_path / "logs" / "transcripts" / f"{audio_file.stem}.transcript.txt"
+        transcript_path = (
+            transcripts_dir_for(tmp_path / "logs") / f"{audio_file.stem}.transcript.txt"
+        )
         assert transcript_path.exists()
         assert "你好" in transcript_path.read_text(encoding="utf-8")
         assert "世界" in transcript_path.read_text(encoding="utf-8")
+        # 不得再写扁平的 logs/transcripts(2026-09-10 统一到日期树)
+        assert not (tmp_path / "logs" / "transcripts").exists()
 
     def test_transcribe_with_postprocess_does_not_write_cleaned_txt(
         self, tmp_path, mock_model
@@ -418,7 +423,7 @@ class TestTranscriptAndCleanedWrite:
 
         returned = transcriber.transcribe(audio_file)
 
-        transcripts_dir = tmp_path / "logs" / "transcripts"
+        transcripts_dir = transcripts_dir_for(tmp_path / "logs")
         assert (transcripts_dir / "test.transcript.txt").exists()
         assert not (transcripts_dir / "test.cleaned.txt").exists()
         # 清理确实跑了,只是结果留在内存里:mock 两行「你好」「世界」都短于
@@ -480,7 +485,7 @@ class TestRefinerIntegration:
         transcriber = StreamingTranscriber(cfg, model=mock_model)
         result = transcriber.transcribe(audio_file)
 
-        transcripts_dir = tmp_path / "logs" / "transcripts"
+        transcripts_dir = transcripts_dir_for(tmp_path / "logs")
         assert not (transcripts_dir / "BV1disabled.refined.txt").exists()
         # 返回的是 cleaned_text(非 refined)
         assert isinstance(result, str)
@@ -513,7 +518,7 @@ class TestRefinerIntegration:
         transcriber = StreamingTranscriber(cfg, model=mock_model, refiner=mock_refiner)
         result = transcriber.transcribe(audio_file)
 
-        transcripts_dir = tmp_path / "logs" / "transcripts"
+        transcripts_dir = transcripts_dir_for(tmp_path / "logs")
         # refined.txt 写了
         refined_path = transcripts_dir / "BV1refine.refined.txt"
         assert refined_path.exists()
@@ -553,7 +558,7 @@ class TestRefinerIntegration:
         # 不抛
         result = transcriber.transcribe(audio_file)
 
-        transcripts_dir = tmp_path / "logs" / "transcripts"
+        transcripts_dir = transcripts_dir_for(tmp_path / "logs")
         # refined.txt 仍写(fallback 也落盘供审计)
         assert (transcripts_dir / "BV1fail.refined.txt").exists()
         # 返回的是 cleaned_text(fallback 后)
@@ -576,7 +581,7 @@ class TestRefinerIntegration:
         # 不抛
         result = transcriber.transcribe(audio_file)
 
-        transcripts_dir = tmp_path / "logs" / "transcripts"
+        transcripts_dir = transcripts_dir_for(tmp_path / "logs")
         # refined.txt 不写(没注入 refiner,跳过整段)
         assert not (transcripts_dir / "BV1norfnr.refined.txt").exists()
         # 返回 cleaned 文本

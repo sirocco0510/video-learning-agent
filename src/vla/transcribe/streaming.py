@@ -28,6 +28,7 @@ from typing import Protocol, runtime_checkable
 from faster_whisper import WhisperModel
 
 from vla.config import VLAConfig
+from vla.log.transcription_log import transcripts_dir_for
 from vla.transcribe.postprocess import (
     DEFAULT_MIN_LINE_CHARS,
     DEFAULT_MIN_OVERLAP_CHARS,
@@ -125,7 +126,7 @@ class StreamingTranscriber:
         流程(FR-3.1/3.2/3.8/3.9):
         1. 契约校验:audio_path 后缀必须 .wav,否则 ValueError(spec §4.6)
         2. faster-whisper 转写(beam_size=5, vad_filter=True)
-        3. 写 <stem>.transcript.txt(Whisper 原始,FR-3.8)→ log_dir/transcripts/
+        3. 写 <stem>.transcript.txt(Whisper 原始,FR-3.8)→ log_dir/transcribed/<date>/transcripts/
         4. 本地后处理(若 enabled)→ cleaned_text **只留内存,不落盘**(2026-09-10)
         5. 云端 LLM 整理(若 refine_enabled 且 refiner 注入)→ 写 <stem>.refined.txt(FR-3.9)
         6. 当作 fallback 链返回:refined > cleaned(内存)> transcript
@@ -161,8 +162,11 @@ class StreamingTranscriber:
             len(raw_text),
         )
 
-        # FR-3.8: 写 transcript.txt(原始,总写)→ log_dir/transcripts/
-        transcripts_dir = self.config.logging.log_dir / "transcripts"
+        # FR-3.8: 写 transcript.txt(原始,总写)→ 与正式产物同一棵日期树
+        # (2026-09-10:`logs/transcribed/<date>/transcripts/` —— 旧实现写扁平的
+        #  `logs/transcripts/`,导致原始/精修产物与 `<id>_<title>.txt` 分家;
+        #  日期分组逻辑的唯一来源见 `vla.log.transcription_log.transcripts_dir_for`)
+        transcripts_dir = transcripts_dir_for(self.config.logging.log_dir)
         transcripts_dir.mkdir(parents=True, exist_ok=True)
         stem = audio_path.stem
         transcript_path = transcripts_dir / f"{stem}.transcript.txt"

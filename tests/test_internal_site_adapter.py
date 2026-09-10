@@ -31,9 +31,9 @@ class TestMatch:
         [
             "https://internal.example.com/v/123",
             "https://video.corp.local/play/abc",
-            # Phase 9.6:bill-jc 内部学习平台
-            "https://b-learning.bill-jc.com/learn/kng-001",
-            "https://b-learning.bill-jc.com/learn/kng-002?foo=bar",
+            # Phase 9.6:bill-jc 内部学习平台(真实形式 = SPA + kngId 查询参数)
+            "https://b-learning.bill-jc.com/kng/#/video/play?kngId=kng-001",
+            "https://b-learning.bill-jc.com/kng/#/list?catalogId=x&cid=y",
             # B站不算内部
         ],
     )
@@ -48,7 +48,7 @@ class TestMatch:
             "https://www.youtube.com/watch?v=xxx",
             # Phase 9.6:bill-jc 父域不在 _INTERNAL_DOMAINS 时不进 match
             # (当前实现用 substring 匹配,所以 bill-jc 任何子串都命中 —
-            #  主要保护是后面 /learn/<id> 解析 + cookie 域过滤。)
+            #  主要保护是后面 kngId 解析 + cookie 域过滤。)
             "https://api.example.com/v/123",
             "https://google.com/",
         ],
@@ -70,6 +70,36 @@ class TestFetchStubs:
     def test_fetch_via_recording_returns_none(self):
         adapter = InternalSiteAdapter(**_stub_deps())
         assert adapter.fetch_via_recording(driver=None, url="https://internal.example.com/v/1", duration_sec=30) is None
+
+    def test_fetch_via_recording_accepts_base_contract_kwargs(self):
+        """override 必须兼容 PlatformAdapter.fetch_via_recording 的 keyword-only
+        契约 —— `strategy.get_subtitle` 策略 ③ 固定传 audio_factory + transcriber。
+
+        2026-09-10 回归:旧 override 只写 (driver, url, duration_sec),真机上
+        任何走到策略 ③ 的 bill-jc URL 都会 TypeError,被 log 成
+        `策略 ③ 失败(计入 transcribe_fail)` —— 明明是自己签名不匹配,却记成了
+        视频转写失败。基类 signature 是契约,子类不能收窄。
+        """
+        adapter = InternalSiteAdapter(**_stub_deps())
+
+        assert adapter.fetch_via_recording(
+            driver=None,
+            url="https://b-learning.bill-jc.com/kng/#/video/play?kngId=kng-1",
+            duration_sec=30,
+            audio_factory=MagicMock(),
+            transcriber=MagicMock(),
+        ) is None
+
+
+class TestPluginPopupGate:
+    """FR-2.21:内部站没有浏览器插件可开,策略 ② 的 A 级弹窗必须堵掉。"""
+
+    def test_plugin_popup_disabled(self):
+        """InternalSiteAdapter 关掉弹窗闸门(基类默认 True)。"""
+        from vla.subtitle.platform_adapter import PlatformAdapter
+
+        assert PlatformAdapter.plugin_popup_enabled is True
+        assert InternalSiteAdapter.plugin_popup_enabled is False
 
 
 class TestRegistryIntegration:
@@ -111,19 +141,64 @@ class TestPhase96SpiderHook:
         monkeypatch.setattr(adapter, "_run_spider_fetch", fake_run)
 
         text, meta = adapter.fetch_via_spider(
-            "https://b-learning.bill-jc.com/learn/kng-001"
+            "https://b-learning.bill-jc.com/kng/#/video/play?kngId=kng-001"
         )
 
         assert text is None
         assert meta == {"video_url": fake_m3u8, "via": "internal_spider"}
 
-    def test_fetch_via_spider_returns_none_without_learn_path(self):
-        """URL 不含 /learn/<id> → 返回 None(spider 不该被打扰)。"""
+    def test_fetch_via_spider_parses_real_spa_url(self, monkeypatch):
+        """真机形式(2026-09-10 实跑):list_tasks 发的是 SPA 详情页 URL,
+        kngId 在**查询参数**里,不在 path 里。
+
+        这条是 2026-09-10 批量跑全挂的回归测试 —— 旧实现只认
+        /learn/<id> path 形式,对真 URL 静默 miss(debug 级日志,看不见),
+        整条 B站降级梯子(② 弹窗 + ③ TypeError)被误触发。
+        """
+        adapter = InternalSiteAdapter(**_stub_deps(), spider=MagicMock())
+        seen: list[str] = []
+
+        def fake_run(_spider, kng_id):
+            seen.append(kng_id)
+            return "https://video.bill-jc.com/x.m3u8"
+
+        monkeypatch.setattr(adapter, "_run_spider_fetch", fake_run)
+
+        # 与 internal_site_spider.py:266 生成的 URL 逐字一致
+        result = adapter.fetch_via_spider(
+            "https://b-learning.bill-jc.com/kng/#/video/play"
+            "?kngId=7b0ae970-c3e8-4816-a0bc-9acc08687b44&projectId=&btid=&gwnlUrl="
+        )
+
+        assert seen == ["7b0ae970-c3e8-4816-a0bc-9acc08687b44"]
+        assert result == (
+            None,
+            {"video_url": "https://video.bill-jc.com/x.m3u8", "via": "internal_spider"},
+        )
+
+    def test_fetch_via_spider_parses_kng_id_not_first_param(self, monkeypatch):
+        """kngId 不必是第一个查询参数(kngUrl 里也可能带 kngId 字样)。"""
+        adapter = InternalSiteAdapter(**_stub_deps(), spider=MagicMock())
+        seen: list[str] = []
+
+        monkeypatch.setattr(
+            adapter, "_run_spider_fetch", lambda _s, k: (seen.append(k), "m3u8")[1]
+        )
+
+        adapter.fetch_via_spider(
+            "https://b-learning.bill-jc.com/kng/#/video/play?projectId=&kngId=abc-9&btid="
+        )
+
+        assert seen == ["abc-9"]
+
+    def test_fetch_via_spider_returns_none_without_kng_id(self):
+        """URL 不含 kngId → 返回 None(spider 不该被打扰)。"""
         adapter = InternalSiteAdapter(**_stub_deps(), spider=MagicMock())
 
         assert adapter.fetch_via_spider("https://b-learning.bill-jc.com/") is None
+        # 目录页也有 catalogId/cid,但那是批量入口的凭据,不是单个视频
         assert adapter.fetch_via_spider(
-            "https://b-learning.bill-jc.com/catalog/123"
+            "https://b-learning.bill-jc.com/kng/#/list?catalogId=x&cid=y"
         ) is None
 
     def test_fetch_via_spider_returns_none_without_spider(self):
@@ -131,7 +206,7 @@ class TestPhase96SpiderHook:
         adapter = InternalSiteAdapter(**_stub_deps())
         assert adapter._spider is None  # type: ignore[attr-defined]
         assert adapter.fetch_via_spider(
-            "https://b-learning.bill-jc.com/learn/kng-001"
+            "https://b-learning.bill-jc.com/kng/#/video/play?kngId=kng-001"
         ) is None
 
     def test_fetch_via_spider_handles_spider_exception(self, monkeypatch):
@@ -143,7 +218,7 @@ class TestPhase96SpiderHook:
 
         monkeypatch.setattr(adapter, "_run_spider_fetch", fake_run)
         assert adapter.fetch_via_spider(
-            "https://b-learning.bill-jc.com/learn/kng-401"
+            "https://b-learning.bill-jc.com/kng/#/video/play?kngId=kng-401"
         ) is None
 
     def test_constructor_accepts_spider_kwarg(self):
@@ -173,8 +248,10 @@ class TestPhase96SpiderHook:
         assert adapter._screenshot_controller is None  # type: ignore[attr-defined]
         assert adapter._spider is None  # type: ignore[attr-defined]
         # match 仍能用;fetch_via_spider 因 _spider=None → None(预期)。
-        assert InternalSiteAdapter.match("https://b-learning.bill-jc.com/learn/x") is True
-        assert adapter.fetch_via_spider("https://b-learning.bill-jc.com/learn/x") is None
+        assert InternalSiteAdapter.match("https://b-learning.bill-jc.com/") is True
+        assert adapter.fetch_via_spider(
+            "https://b-learning.bill-jc.com/kng/#/video/play?kngId=x"
+        ) is None
 
     def test_registry_class_register_no_args_does_not_typeerror(self):
         """`PlatformAdapterRegistry.register(InternalSiteAdapter)` + get_for_url
@@ -185,7 +262,11 @@ class TestPhase96SpiderHook:
         reg = PlatformAdapterRegistry()
         reg.register(InternalSiteAdapter)  # class-register
         # 无 internal_site spider 注入的生产路径;get_for_url 调 InternalSiteAdapter()
-        adapter = reg.get_for_url("https://b-learning.bill-jc.com/learn/kng-1")
+        adapter = reg.get_for_url(
+            "https://b-learning.bill-jc.com/kng/#/video/play?kngId=kng-1"
+        )
         assert isinstance(adapter, InternalSiteAdapter)
         # fetch_via_spider 在 _spider=None 时返 None(不抛)
-        assert adapter.fetch_via_spider("https://b-learning.bill-jc.com/learn/kng-1") is None
+        assert adapter.fetch_via_spider(
+            "https://b-learning.bill-jc.com/kng/#/video/play?kngId=kng-1"
+        ) is None

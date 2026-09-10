@@ -364,6 +364,7 @@ class SubtitleStrategy:
         流程:
         1. FR-2.10:session 已标记 unavailable → 跳过 ②
         2. 第一次尝试 adapter.fetch_browser_subtitle(FR-2.5~2.8)
+        2.5 FR-11.11:adapter.plugin_popup_enabled=False(内部站)→ 跳过弹窗,降级 ③
         3. miss → 暂停页面视频 + 弹 A 级 dialog 询问用户是否已开启 Screen Recorder
         4. 用户响应:
            - "enabled" → 调已注入 recorder 的 record_and_transcribe(FR-2.14 的 stub)
@@ -382,6 +383,16 @@ class SubtitleStrategy:
         first = self._fetch_browser_once(adapter, url, label="第一次")
         if first is not None:
             return first
+
+        # 2.5 平台闸门(FR-11.11,2026-09-10):不依赖浏览器插件的平台(内部站)
+        # 直接降级 ③。弹窗问的是"是否已开启字幕插件",内部站没有插件可开 ——
+        # 用户无法给出有意义的回答,只会白等 timeout 再降级。
+        # 探测(2.)照跑:未来内部站若有 DOM 字幕仍能命中,只是不再弹窗。
+        if not getattr(adapter, "plugin_popup_enabled", True):
+            self.log.info(
+                "adapter 不依赖浏览器插件(plugin_popup_enabled=False),跳过策略 ② 弹窗,降级 ③",
+            )
+            return None
 
         # 3. 暂停视频 + 弹窗(若 driver 为 None,跳过 pause 但仍弹窗)
         # v3.2.1.9 (2026-09-08):复用用户已开 B站 tab,不开新空白页 — 同 Phase A/C 思路

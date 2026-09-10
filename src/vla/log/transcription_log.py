@@ -16,11 +16,15 @@
 from __future__ import annotations
 
 import csv
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
 
 from ..models import QualityResult
+
+
+logger = logging.getLogger(__name__)
 
 
 # 转写失败 CSV 列
@@ -57,6 +61,36 @@ def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+# ---------------- 落盘目录(唯一来源,2026-09-10) ----------------
+#
+# 日期分组逻辑此前散在两处:`TranscriptionLog.__init__` 写
+# `<log_dir>/transcribed/<date>/transcripts|summaries`,而
+# `transcribe/streaming.py` 另写一套**扁平**的 `<log_dir>/transcripts/` ——
+# 于是 `.transcript.txt` / `.refined.txt` 与正式产物落在两棵不同的树上。
+# 统一为下面三个函数,调用方一律引用,不再各算各的日期。
+
+
+def dated_root_for(log_dir: Path, when: datetime | None = None) -> Path:
+    """`<log_dir>/transcribed/<YYYY-MM-DD>` —— 日期分组根。"""
+    stamp = (when or datetime.now()).strftime("%Y-%m-%d")
+    return Path(log_dir) / "transcribed" / stamp
+
+
+def transcripts_dir_for(log_dir: Path, when: datetime | None = None) -> Path:
+    """`<log_dir>/transcribed/<YYYY-MM-DD>/transcripts` —— 字幕落盘目录。
+
+    正式产物 `<id>_<title>.txt`、原始 `.transcript.txt`、Level 4 `.refined.txt`
+    **全部**落这里。注意 `LLMSummarizer._load_items` 对该目录是无条件
+    `glob("*.txt")`,所以后两者必须由 summarizer 侧排除(见其 `_DERIVED_SUFFIXES`)。
+    """
+    return dated_root_for(log_dir, when) / "transcripts"
+
+
+def summaries_dir_for(log_dir: Path, when: datetime | None = None) -> Path:
+    """`<log_dir>/transcribed/<YYYY-MM-DD>/summaries` —— 摘要落盘目录。"""
+    return dated_root_for(log_dir, when) / "summaries"
+
+
 class TranscriptionLog:
     """转写日志 + 字幕原文落盘。
 
@@ -71,12 +105,17 @@ class TranscriptionLog:
     - `summaries_dir`    = `<log_dir>/transcribed/<today>/summaries` (summary 写盘目录)
     """
 
+    # 转写链路的中间产物后缀(2026-09-10)。与 `llm_summarizer._DERIVED_SUFFIXES`
+    # 是同一批文件的两端:那边是「读 6h 总结时要排除什么」,这里是「质量通过后要丢弃什么」。
+    _INTERMEDIATE_SUFFIXES = (".transcript.txt", ".refined.txt")
+
     def __init__(self, log_dir: Path) -> None:
         self.log_dir = Path(log_dir)
         self.transcribed_root = self.log_dir / "transcribed"
-        today = datetime.now().strftime("%Y-%m-%d")
-        self.transcribed_dir = self.transcribed_root / today / "transcripts"
-        self.summaries_dir = self.transcribed_root / today / "summaries"
+        # 同一个 when 派生两棵子树:避免跨零点时 transcripts 落今天、summaries 落明天
+        when = datetime.now()
+        self.transcribed_dir = transcripts_dir_for(self.log_dir, when)
+        self.summaries_dir = summaries_dir_for(self.log_dir, when)
         self.failed_texts_dir = self.log_dir / "failed_texts"
         # 初始化时建好子目录,让 save_* 路径上不存在不需要 mkdir
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -151,6 +190,42 @@ class TranscriptionLog:
             mtime=0.0,
         )
         return write_transcribed(path, item)
+
+    def discard_transcribe_intermediates(self, stem: str) -> list[Path]:
+        """质量**通过**后丢弃 `<stem>.transcript.txt` / `<stem>.refined.txt`。
+
+        2026-09-10 用户裁定:中间产物只在质量**未通过**时留作诊断证据
+        (`.refined.txt` 可能带 Refiner 降级的 `# notes: <原因>`,failed_texts/
+        里没有这个信息 —— 失败时要答得上「是转写烂还是 Refiner 烂」)。
+        通过后正式产物已含最终文本,二者纯冗余 ⇒ 丢弃(磁盘友好)。
+
+        **本方法只该在质量通过、且正式产物写盘成功之后调用** —— 调用方
+        (`main_provider.process_asset` Step 5)负责这个时序。写盘失败时先删,
+        中间产物就成了唯一剩下的副本。
+
+        Args:
+            stem: 转写时的音频文件名(不含后缀),即 `asset.audio_path.stem`;
+                  内部站路径下等于 task.id,与 `streaming.transcribe` 的
+                  `stem = audio_path.stem` 同源。
+
+        Returns:
+            实际被删的路径列表(文件本就不存在则为空 —— **幂等,不抛**)。
+        """
+        # 用 transcripts_dir_for **当场算**,不用 self.transcribed_dir(那是
+        # __init__ 快照):批量跨零点时快照会指向昨天,而 transcriber 是转写那刻
+        # 现算的,两者不一致就删不中。
+        transcripts_dir = transcripts_dir_for(self.log_dir)
+        removed: list[Path] = []
+        for suffix in self._INTERMEDIATE_SUFFIXES:
+            path = transcripts_dir / f"{stem}{suffix}"
+            try:
+                if path.exists():
+                    path.unlink()
+                    removed.append(path)
+            except OSError as e:
+                # 清理失败不该影响主流程(字幕已通过质量并落盘)
+                logger.warning("丢弃中间产物失败 %s: %s", path, e)
+        return removed
 
     def save_failed_text(
         self,

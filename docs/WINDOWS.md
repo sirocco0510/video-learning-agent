@@ -113,7 +113,8 @@ uv run python scripts/spike_bill_jc_full.py `
 
 **B. 手动拿 URL**:
 - 打开 `https://b-learning.bill-jc.com`
-- 浏览目录,点进某个视频 → URL 形如 `https://b-learning.bill-jc.com/learn/<kng_id>`
+- 浏览目录,点进某个视频 → URL 形如 `https://b-learning.bill-jc.com/kng/#/video/play?kngId=<kng_id>&...`
+  (`kngId` 在**查询参数**里;`/learn/<kng_id>` 这种 path 形式不存在)
 
 ### 4.2 跑单视频端到端
 
@@ -164,7 +165,7 @@ uv run vla process `
 
 # bill-jc(需 Chrome debug)
 uv run vla process `
-  --url "https://b-learning.bill-jc.com/learn/<kng_id>" `
+  --url "https://b-learning.bill-jc.com/kng/#/video/play?kngId=<kng_id>" `
   --title "内训课程" `
   --duration 3600 `
   --real-provider

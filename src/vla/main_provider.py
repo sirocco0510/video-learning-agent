@@ -65,7 +65,7 @@ class RealTextProvider:
         checker: Any | None = None,
         refiner: Any | None = None,
         today_dir: Path | None = None,
-        summarizer: Any | None = None,
+        video_summarizer: Any | None = None,
     ) -> None:
         """
         Args:
@@ -83,8 +83,11 @@ class RealTextProvider:
                        §4.2 ④ 用;build_text_provider 自动从 cfg.audio.downloads_dir
                        计算,测试 fixture 也可手动注入,None 时 fetch_asset 路径 ④
                        仍走 audio_scan 但目录需由调用方保证存在)
-            summarizer: VideoSummarizer(可选,2026-09-10 新增 — 长视频 Refiner
-                       长度超限时生成 200-300 字单视频摘要)
+            video_summarizer: VideoSummarizer(可选 — 单视频 200-300 字摘要,FR-2.15d)。
+                       **注意不是** `VideoLearningAgent.summarizer`(那个是
+                       LLMSummarizer,6h 批量总结 FR-5/FR-9)。两者同名不同物,
+                       2026-09-10 前都叫 `summarizer`,已在 cli._build_learn_provider
+                       误传过一次 → 摘要静默不产出。现在形参名区分开,误传当场 TypeError。
         """
         self.cfg = cfg
         self.strategy = strategy
@@ -96,7 +99,7 @@ class RealTextProvider:
         self.log = log or TranscriptionLog(cfg.logging.log_dir)
         self.checker = checker
         self.refiner = refiner
-        self.summarizer = summarizer
+        self.video_summarizer = video_summarizer
         self._today_dir = today_dir
 
     async def fetch_asset(self, task: VideoTask) -> Asset | None:
@@ -283,7 +286,7 @@ class RealTextProvider:
         # 那个长度会被 Refiner 压缩影响,导致摘要静默不产出。
         # 注意:在 save_transcribed 之前调,因为 summary 文件路径依赖 task.id。
         # 用 getattr 兼容 test_process_asset.py 用 __new__ 跳过 __init__ 的 case。
-        summarizer = getattr(self, "summarizer", None)
+        summarizer = getattr(self, "video_summarizer", None)
         if summarizer is not None:
             try:
                 summary = summarizer.summarize_one(text, title=task.title)
@@ -311,6 +314,25 @@ class RealTextProvider:
             quality=qr, source=asset.source,
             duration_sec=task.expected_duration,
         )
+
+        # Step 6: 质量已通过 + 正式产物已落盘 → 丢弃转写中间产物(2026-09-10)
+        # `.transcript.txt` / `.refined.txt` 只对**未通过**的视频有诊断价值
+        # (见 TranscriptionLog.discard_transcribe_intermediates)。失败分支
+        # 已在 Step 3 提前 return,走不到这里。
+        # 时序刻意放在 save_transcribed **之后**:万一下面那步之前的写盘失败,
+        # 中间产物就是唯一幸存的副本,不能先删。
+        # audio_path is None(api/browser 路径,根本没转写)⇒ 无中间产物,跳过。
+        if asset.audio_path is not None:
+            try:
+                removed = self.log.discard_transcribe_intermediates(asset.audio_path.stem)
+                if removed:
+                    logger.info(
+                        "🗑️ 质量通过 → 丢弃 %d 个转写中间产物: %s",
+                        len(removed), ", ".join(p.name for p in removed),
+                    )
+            except Exception as e:
+                # 清理失败(含 transcriber 与 log 的 stem 推导不一致等)不该影响主流程
+                logger.warning("丢弃转写中间产物失败,主流程继续: %s", e)
 
         # (Step 6 已删除,2026-09-10 FR-3.7:音频改在 Step 1 转写成功后立即删,
         #  不再等质量门控 —— 见上面的删除块)
@@ -343,7 +365,12 @@ def build_text_provider(
     refiner: Any | None = None,
     strategy: Any | None = None,
     internal_spider: Any | None = None,  # Phase 9.6:bill-jc 用,注入 InternalSiteSpider
-    summarizer: Any | None = None,  # 2026-09-10 / FR-2.15d:长视频 200-300 字单视频摘要
+    # 2026-09-10 / FR-2.15d:单视频 200-300 字摘要。形参**故意**不叫 `summarizer` ——
+    # `VideoLearningAgent(summarizer=LLMSummarizer)` 那个是 6h 批量总结(FR-5/FR-9),
+    # 同名不同物。cli._build_learn_provider 曾把后者注进这里,注入又优先于兜底,
+    # 于是 summarize_one AttributeError 被 process_asset 宽 except 吞成一行 warning,
+    # 整批一条摘要都没产出。改名后误传会当场 `TypeError: unexpected keyword argument`。
+    video_summarizer: Any | None = None,
 ) -> tuple[FetchAssetFn, ProcessAssetFn]:
     """工厂函数:装配一个完整的 RealTextProvider,返回 (fetch_asset, process_asset) 两个 callable。
 
@@ -384,6 +411,9 @@ def build_text_provider(
                   路径 ② 接管抽音。None 时维持旧 class-registered 行为
                   (spider 未注入,InternalSiteAdapter 的 fetch_via_spider 直接
                   返回 None,不影响老测试)。
+        video_summarizer: VideoSummarizer(可选 — 单视频 200-300 字摘要,FR-2.15d;
+                  与 `VideoLearningAgent.summarizer=LLMSummarizer` **不是同一个东西**)。
+                  None 时自动构造 `VideoSummarizer(cfg)`(构造期零凭据,LLM 惰性构造)。
 
     Returns:
         (fetch_asset, process_asset):两个独立 callable,分别对应"取资产"和"处理资产"。
@@ -430,9 +460,9 @@ def build_text_provider(
     #   ② 改成在这里 eager 建 `LLMClient(...)` → 构造期就要凭据,
     #      `build_text_provider` 的单测(无 .env)全炸 Missing credentials;
     #   ③ 定稿:构造零依赖 + 类内惰性构造。装配路径不再决定摘要产不产出。
-    if summarizer is None:
+    if video_summarizer is None:
         from vla.summary.video_summarizer import VideoSummarizer
-        summarizer = VideoSummarizer(cfg)
+        video_summarizer = VideoSummarizer(cfg)
 
     source_factory = VideoSourceFactory(tmp_dir=save_dir, log=log, config=cfg)
     if transcriber is None:
@@ -475,7 +505,7 @@ def build_text_provider(
         checker=checker,
         refiner=refiner,
         today_dir=today_dir,
-        summarizer=summarizer,
+        video_summarizer=video_summarizer,
     )
 
     return provider.fetch_asset, provider.process_asset

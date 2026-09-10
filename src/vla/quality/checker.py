@@ -7,7 +7,8 @@
 - LLM 返回 pass / score / issues / suggestion,组装成 QualityResult
 
 设计:
-- LLM 通过构造 / set_llm 注入(默认 None,首次 check 时报错)
+- LLM 通过构造 / set_llm 注入;**没注入则首次 check 时按 cfg 惰性构造**
+  (2026-09-10,见 `_resolve_llm`)
 - 异常向上传播(FR-3.5 风格:由 Phase 6 log 模块负责记录)
 - JSON 解析鲁棒:处理 ```json``` 代码块 / 前缀文字
 """
@@ -19,7 +20,7 @@ import re
 from collections import Counter
 
 from vla.config import VLAConfig
-from vla.llm.client import LLMClientLike
+from vla.llm.client import LLMClient, LLMClientLike
 from vla.models import QualityResult
 
 
@@ -70,6 +71,32 @@ class QualityChecker:
     def set_llm(self, llm: LLMClientLike) -> None:
         """注入 LLM 客户端(测试用 + 延迟初始化)。"""
         self._llm = llm
+
+    @property
+    def model(self) -> str:
+        """质量检查用的模型名(与 spike / config 的 quality_check.model 一致)。"""
+        return self.config.quality_check.model
+
+    def _resolve_llm(self) -> LLMClientLike:
+        """取 LLM 客户端;没注入就按 config **惰性构造**一个。
+
+        为什么不在 __init__ 里构造(2026-09-10):
+        构造期就要凭据 → `build_text_provider(cfg)` 在没加载 .env 的环境(CI /
+        单测)直接炸 `OpenAIError: Missing credentials`,而装配路径本身与
+        凭据无关(同 SubtitleRefiner:`Xxx(cfg)` 构造期零依赖)。
+
+        为什么要兜底而不是"没注入就报错"(2026-09-10 真机批量修复):
+        调用方 `build_text_provider` 的 T13 兜底只建 `QualityChecker(cfg)`、
+        没注入 LLM → 旧实现抛 RuntimeError → 该异常**穿过 process_asset /
+        _process_one 一路上抛**,把整个 `vla learn` 批量带走(不是 fail 单条,
+        是崩全批 —— 比 VideoSummarizer 那次的"静默不产出"更狠)。
+
+        与 `VideoSummarizer._resolve_llm` 同一契约:构造期零依赖 + 类内惰性
+        构造,装配路径不再决定功能是否可用。
+        """
+        if self._llm is None:
+            self._llm = LLMClient(self.config.llm_client, model=self.model)
+        return self._llm
 
     # ---------------- 主流程 ----------------
 
@@ -125,9 +152,8 @@ class QualityChecker:
                 char_count=char_count,
             )
 
-        # LLM 检查
-        if self._llm is None:
-            raise RuntimeError("QualityChecker 没有 LLM 客户端,请先 set_llm() 或构造时注入")
+        # LLM 检查(没注入则惰性构造 —— 见 _resolve_llm)
+        llm = self._resolve_llm()
 
         prompt = PROMPT.format(
             title=title,
@@ -137,7 +163,7 @@ class QualityChecker:
             char_per_second=cps,
             text=text,
         )
-        response = self._llm.complete(prompt, max_tokens=2000)
+        response = llm.complete(prompt, max_tokens=2000)
         from vla.llm.response import parse_json_response
         data = parse_json_response(response)
 

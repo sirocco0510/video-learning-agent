@@ -140,6 +140,98 @@ def test_build_text_provider_auto_constructs_refiner_when_enabled(tmp_path: Path
     assert isinstance(provider.refiner, SubtitleRefiner)
 
 
+# ---------------- FR-2.15d 单视频摘要:槽位归属(2026-09-10) ----------------
+#
+# 背景:两个**同名不同物**的 summarizer 撞在一起 ——
+#   VideoLearningAgent(summarizer=LLMSummarizer)      ← 6h 批量(FR-5/FR-9)
+#   build_text_provider(summarizer=VideoSummarizer)   ← 单视频(FR-2.15d)
+# `cli._build_learn_provider` 把前者注进了后者的槽位,注入又优先于兜底,
+# 于是 RealTextProvider 拿着没有 summarize_one 的对象 → AttributeError 被
+# process_asset 的宽 except 吞成一行 warning → **整批一条摘要都没产出**。
+# ① 兜底必须是 VideoSummarizer;② 形参名必须能区分两者,让误传当场 TypeError。
+
+
+def test_build_text_provider_auto_constructs_video_summarizer(tmp_path: Path):
+    """不传 video_summarizer → 兜底构造 VideoSummarizer(与 T13 的 checker/refiner 同契约)。
+
+    少了这道兜底,摘要槽位可能是 None 或错的对象;而 process_asset 的宽 except
+    会把失败吞成 warning,FR-2.15d **静默不产出**(真机已发生过一次)。
+    """
+    from vla.summary.video_summarizer import VideoSummarizer
+
+    cfg = _full_cfg(refine_enabled=False)
+    provider = _stub_provider(cfg, tmp_path)
+
+    assert provider.video_summarizer is not None
+    assert isinstance(provider.video_summarizer, VideoSummarizer)
+    assert hasattr(provider.video_summarizer, "summarize_one")
+
+
+def test_build_text_provider_param_is_video_summarizer():
+    """形参必须叫 video_summarizer —— 旧名 `summarizer` 与 6h 批量那个同名,是误传温床。"""
+    import inspect
+
+    params = inspect.signature(build_text_provider).parameters
+    assert "video_summarizer" in params
+    assert "summarizer" not in params, (
+        "形参名与 VideoLearningAgent(summarizer=LLMSummarizer) 撞名,"
+        "注错对象时静默失败;改名后误传会当场 TypeError"
+    )
+
+
+def test_real_text_provider_param_is_video_summarizer():
+    """RealTextProvider.__init__ 的形参/属性同改,避免类内继续用歧义名。"""
+    import inspect
+
+    params = inspect.signature(RealTextProvider.__init__).parameters
+    assert "video_summarizer" in params
+    assert "summarizer" not in params
+
+
+def test_learn_provider_does_not_inject_batch_summarizer(monkeypatch, tmp_path: Path):
+    """`vla learn` 装配路径不得把 6h 批量 LLMSummarizer 注进单视频摘要槽位。
+
+    这是本次缺陷的**根因测试**:capture 住 `_build_learn_provider` 传给
+    `build_text_provider` 的关键字实参,断言它没有接管摘要槽位 ——
+    槽位归兜底,兜底在真机上已验证能建出可用的 VideoSummarizer。
+    """
+    from vla import cli
+
+    class BatchSummarizerStandIn:
+        """LLMSummarizer 的形状:有 summarize_batch / write_to_notes,**没有** summarize_one。"""
+
+        def summarize_batch(self, *a, **kw): ...
+
+        def write_to_notes(self, *a, **kw): ...
+
+    captured: dict = {}
+
+    def fake_build(cfg, **kw):
+        captured.update(kw)
+        return ("fetch", "process")
+
+    # _build_learn_provider 在函数体内 import,所以要打在 main_provider 名字空间
+    monkeypatch.setattr("vla.main_provider.build_text_provider", fake_build)
+
+    cli._build_learn_provider(
+        _full_cfg(refine_enabled=False),
+        spider=MagicMock(),
+        # comps["summarizer"] 就是真机里那个 LLMSummarizer(6h 批量用)
+        comps={
+            "notifier": MagicMock(),
+            "plugin_status": MagicMock(),
+            "summarizer": BatchSummarizerStandIn(),
+        },
+    )
+
+    assert "summarizer" not in captured, (
+        "把 LLMSummarizer 注进这个槽位会顶掉兜底,导致 summarize_one AttributeError"
+    )
+    # 若将来真要显式注入,注进来的必须**是**能干单视频摘要的对象
+    injected = captured.get("video_summarizer")
+    assert injected is None or hasattr(injected, "summarize_one")
+
+
 # ---------------- T14: today_dir 注入(回归 fix 1) ----------------
 
 

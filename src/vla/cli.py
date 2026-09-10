@@ -487,7 +487,13 @@ def _build_learn_provider(
         plugin_status=comps["plugin_status"],
         refiner=refiner,
         internal_spider=spider,
-        summarizer=comps["summarizer"],
+        # 2026-09-10 修复:这里原来传 `summarizer=comps["summarizer"]`,即把
+        # **LLMSummarizer**(6h 批量总结,FR-5/FR-9)注进了单视频摘要槽位
+        # (FR-2.15d 要的是 VideoSummarizer)。注入优先于兜底,于是
+        # `summarize_one` AttributeError 被 process_asset 的宽 except 吞成一行
+        # warning → 真机整批 5 条视频一条摘要都没产出。
+        # 不传 ⇒ 走 build_text_provider 的兜底 `VideoSummarizer(cfg)`。
+        # 形参也已改名 `video_summarizer`,误传会当场 TypeError 而非静默失败。
     )
 
 

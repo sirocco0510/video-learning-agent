@@ -64,6 +64,20 @@ SUMMARIZE_BATCH_PROMPT = """你是视频内容总结助手。以下是累计约 
 _HEADER_TITLE_RE = re.compile(r"^#\s+(.+)$")
 _META_TOKEN_RE = re.compile(r"(来源|质量|时长):\s*([^|\s]+(?:[^\n|]*))?")
 
+# 转写链路的中间产物后缀(2026-09-10)。
+#
+# `StreamingTranscriber` 把 `<stem>.transcript.txt`(Whisper 原始)与
+# `<stem>.refined.txt`(Level 4 产物)和正式产物 `<id>_<title>.txt` **写进同一个
+# 目录**(`logs/transcribed/<date>/transcripts/`)。本模块对那个目录是无条件
+# `glob("*.txt")`,不过滤就会把一条视频当成三条重复内容喂进 6h 总结。
+# 注意顺序:先长后短,`.transcript.txt` 必须排在 `.txt` 之前匹配才不会被截断。
+_DERIVED_SUFFIXES = (".transcript.txt", ".refined.txt")
+
+
+def _is_derived(path: Path) -> bool:
+    """是否是转写中间产物(而非 FR-7.7 正式字幕)。"""
+    return path.name.endswith(_DERIVED_SUFFIXES)
+
 
 # ---------------- 主类 ----------------
 
@@ -86,6 +100,7 @@ class LLMSummarizer:
           2. logs/transcribed/                            — 顶级根目录,递归所有日期
           3. logs/transcribed/*.txt                       — 旧版扁平结构(向后兼容)
         跳过 summaries/ 下的 .summary.txt(中间产物,不是源字幕)。
+        跳过 .transcript.txt / .refined.txt 转写中间产物(见 _DERIVED_SUFFIXES)。
         """
         transcribed_dir = Path(transcribed_dir)
         if not transcribed_dir.exists():
@@ -101,6 +116,9 @@ class LLMSummarizer:
             files = list(transcribed_dir.rglob("transcripts/*.txt"))
             if not files:
                 files = list(transcribed_dir.glob("*.txt"))
+
+        # 中间产物排除放在三条分支合流之后 —— 三个 glob 都可能有
+        files = [p for p in files if not _is_derived(p)]
 
         items: list[TranscribedItem] = []
         for path in sorted(files, key=lambda p: p.stat().st_mtime):

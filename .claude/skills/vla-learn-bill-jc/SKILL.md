@@ -41,8 +41,8 @@ description: Use when the user wants to transcribe video from b-learning.bill-jc
 请粘贴 bill-jc 链接 —— 两种都可以:
 
 ① 单个视频(详情页):
-     https://b-learning.bill-jc.com/learn/<kng_id>
      https://b-learning.bill-jc.com/kng/#/video/play?kngId=<kng_id>
+     https://b-learning.bill-jc.com/?kngId=<kng_id>
 
 ② 整门课(课程目录页)—— 会按目录翻页批量跑:
      https://b-learning.bill-jc.com/kng/#/list?catalogId=<X>&cid=<Y>&order=0&sort=0&type=
@@ -54,13 +54,16 @@ description: Use when the user wants to transcribe video from b-learning.bill-jc
 
 **必须先判断是哪一种**,再分别校验。
 
-#### 2a. 单视频(含 `kngId`)—— 三种形式任一
+#### 2a. 单视频(含 `kngId`)—— 两种形式任一
+
+> **`kngId` 永远是查询参数,不在 path 里。** `/learn/<kng_id>` 这种 path 形式
+> **不存在**(它是 2026-09-09 设计文档里的凭空假设;2026-09-10 用户裁定真机没有这种
+> URL)。代码侧 `internal_site_adapter` 也据此改成解析查询参数。
 
 | 形式 | regex |
 |---|---|
-| `learn` 路径 | `^https?://b-learning\.bill-jc\.com/learn/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/?$` |
+| **SPA 视频详情页**(实际唯一形式) | `^https?://b-learning\.bill-jc\.com/kng/#/video/play\?kngId=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:&.*)?$` |
 | SPA query(根 + kngId) | `^https?://b-learning\.bill-jc\.com/\?kngId=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$` |
-| **SPA 视频详情页**(常见) | `^https?://b-learning\.bill-jc\.com/kng/#/video/play\?kngId=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:&.*)?$` |
 
 通过 → 提取 `kng_id`(UUID),继续 Step 3(单视频路径)。
 
@@ -222,6 +225,9 @@ uv run vla learn \
 - **不要**加 `--config` / `--cdp-url` / `--resolution`(用默认值)
 - mac 默认 CDP URL 是 `http://localhost:9222`,Windows 也一样,不用问
 - 已转写过的视频按 `logs/transcribed_history.jsonl` **自动跳过**(不是失败,是跳过)
+- **全程不弹窗**(FR-11.12):内部站走 m3u8 直抽,不碰浏览器插件路径。**若看到
+  "是否已开启字幕插件"的弹窗,说明 kngId 解析 miss 了** —— 停下查 URL 形式
+  (见 Step 2a),不要点"跳过"硬跑(会连带记 `transcribe_fail`)
 
 ### B3. 停法(报给用户时要说清是哪一种)
 
