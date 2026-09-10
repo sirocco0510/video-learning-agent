@@ -199,7 +199,9 @@ tags:
 `build_text_provider` 此前装配 `VideoSummarizer(cfg)`(**不带 LLM**),`summarize_one` 抛 `RuntimeError` → 被 `process_asset` 的宽 `except Exception` 吞成一条 warning;而 CLI 与 spike **两条装配路径都传 `summarizer=None`**(唯一构造 `LLMSummarizer` 的地方是 6h 批量总结,那是另一个类,没有 `summarize_one`)。旧的长度门控(短文本先返回空)把它盖住了,门控一撤即现形。
 **定稿形态**:构造期零依赖(同 `QualityChecker` / `SubtitleRefiner`)+ 类内**惰性构造** LLM。中间版本曾在 build 期 eager 建 `LLMClient`,导致构造期就要凭据 → `build_text_provider` 的单测全炸 `Missing credentials`。**教训:装配路径不该决定摘要产不产出。**
 
-**同时记录的事实**:`SubtitleRefiner` 被调用了**两次**每条视频 —— `StreamingTranscriber._maybe_refine` 与 `process_asset` Step 4 各一次(实测日志:867→901 字符 8 条修正,紧接 901→901 字符 3 条修正,第二次精修的是已精修文本)。**未修,留作后续。**
+**已知且暂时接受的事实**:`SubtitleRefiner` 被调用了**两次**每条视频 —— `StreamingTranscriber._maybe_refine` 与 `process_asset` Step 4 各一次(实测日志:867→901 字符 8 条修正,紧接 901→901 字符 3 条修正,第二次精修的是已精修文本)。
+
+**裁定(2026-09-10):暂时允许二次精修。** 代价是每条视频多一次云端 LLM 调用(计入配额 ① 字幕质量检查);收益是幂等 —— 第二次跑在已精修文本上通常收敛(实测 901→901,仅 3 条修正),不会持续改写。**不视为 bug,不再单独修**;若日后要收敛,方向是让 `_maybe_refine` 与 Step 4 只留一处,而不是在 `SubtitleRefiner` 内部加去重。
 
 **验证**:全量 `18 failed / 709 passed`。这 18 项(16 `test_e2e` + 2 `test_quality_checker`)为**既有失败** —— 已用 `git stash` 把工作树退回干净的 HEAD(72b269a)复跑同两个文件,得 `18 failed / 18 passed`,逐项一致,本次改动新增 0 个失败;`vla doctor` 全 OK;端到端 spike 质量分 88,m3u8 直抽 5.7MB/177s,315 字摘要落盘。
 
