@@ -27,8 +27,8 @@ from vla.models import QualityResult
 logger = logging.getLogger(__name__)
 
 
-# LLM Prompt(从 implementation-plan.md Phase 5 复制,保持一致)
-PROMPT = """你是字幕质量审核员。请评估以下 Whisper 转写的字幕质量。
+# LLM Prompt(FR-4.2 / FR-4.4,2026-09-10 重写为两类判定 + pass/score 锚定)
+PROMPT = """你是字幕质量审核员。判断这份 Whisper 转写的字幕**能不能用**。
 
 【视频标题】:{title}
 【视频时长】:{duration_sec} 秒
@@ -40,11 +40,29 @@ PROMPT = """你是字幕质量审核员。请评估以下 Whisper 转写的字�
 【转写文本】
 {text}
 
-【检查维度】
-1. **通顺度**:有无明显乱码、无意义重复、语序混乱?
-2. **完整性**:是否覆盖视频大部分内容?语速是否在正常范围?
-3. **准确性**:专业术语是否正确(可基于标题推断)?
-4. **重复异常**:是否出现 ≥3 次重复的同一句话(Whisper 失败的典型表现)?
+【判定类别 —— 只有第一类才 fail】
+
+■ 第一类:**转写失败** → pass=false
+  出现任一即属此类:
+  - 大面积乱码 / 无意义字符
+  - 同一句话重复 ≥3 次的死循环
+  - 覆盖面严重不足:只转出视频开头一小段(字幕远少于视频实际内容)
+  - 语速远超正常范围(疑似幻觉)
+
+■ 第二类:**可读但需校对** → pass=true
+  这些是**可修复的瑕疵**,不是转写失败 —— 记进 issues 并在 score 上扣分即可:
+  - 错别字 / 同音字(如 "PASS" 应为 "Python"、"加碼" 应为 "Java")
+  - 繁简混杂(部分片段输出繁体)
+  - 口语化、语气词冗余
+  - 个别语句语序混乱,但结合上下文能读懂
+  - 专有名词拼写不一致
+  **注意**:内容读得懂就不算失败。不要因为"有错别字"或"繁简混杂"判 pass=false。
+
+【评分与 pass 的关系】
+score 是 0-100 的可读性评分。pass 必须与 score 一致,规则:
+    pass = (score >= {min_score})
+即 score >= {min_score} 时 pass 必须为 true;只有低于 {min_score} 时才为 false。
+不要给出 pass 与 score 互相矛盾的结论。
 
 【输出 JSON】
 {{
@@ -119,6 +137,7 @@ class QualityChecker:
         char_count = len(text)
         safe_duration = max(duration_sec, 1)
         cps = char_count / safe_duration
+        min_score = self.config.quality_check.min_score_to_pass
 
         # 启发式 1a:语速过低(< min)
         min_cps = self.config.quality_check.min_char_per_second
@@ -162,6 +181,10 @@ class QualityChecker:
             char_count=char_count,
             char_per_second=cps,
             text=text,
+            # 2026-09-10:把阈值**注入 prompt**,让 LLM 的 `pass` 锚定到与代码
+            # 同一个数 —— 否则 LLM 可以给出 `score=55 / pass=false` 这种
+            # 自相矛盾的结果,而下面那记 AND 会让 `pass=false` 一票否决。
+            min_score=min_score,
         )
         response = llm.complete(prompt, max_tokens=2000)
         from vla.llm.response import parse_json_response
@@ -172,8 +195,12 @@ class QualityChecker:
         issues = list(data.get("issues", []))
         suggestion = str(data.get("suggestion", ""))
 
-        # passed 综合判定:LLM 通过 AND 分数 ≥ 阈值
-        passed = llm_pass and score >= self.config.quality_check.min_score_to_pass
+        # passed 综合判定:LLM 通过 AND 分数 ≥ 阈值。
+        #
+        # 2026-09-10:prompt 已注入同一个 min_score、并要求 `pass = score >= 阈值`,
+        # 所以两个判据**按构造一致** —— 这里的 AND 退化为安全网(只在 LLM 仍
+        # 返回自相矛盾结果时才咬),不再是"双重否决"。
+        passed = llm_pass and score >= min_score
 
         return QualityResult(
             passed=passed,

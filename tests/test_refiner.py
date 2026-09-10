@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -21,8 +22,10 @@ from vla.config import VLAConfig
 from vla.models import Correction, RefinementResult
 from vla.quality.refiner import (
     SubtitleRefiner,
+    _MAX_CHUNKS,
     _SYSTEM_PROMPT,
     _USER_PROMPT_TEMPLATE,
+    _split_by_lines,
     write_cleaned_transcript,
 )
 
@@ -389,110 +392,198 @@ class TestFailureFallback:
 # ---------------- 长度超限保护 ----------------
 
 
-class TestMaxCharsGuard:
-    """FR-2.15c 2026-09-10 修正:超限由"跳过 LLM"改为"截断精修前段 + 尾部接回"。"""
+class TestSplitByLines:
+    """`_split_by_lines` 纯函数:按行边界切块,无损。
 
-    def test_text_exceeds_max_chars_still_calls_llm(self, cfg, mock_llm):
-        """超过 refine_max_chars → **仍然**调 LLM(旧行为是跳过)。
+    转写产物是段落行结构(实测 252 行 / 平均 36 字每行),按行切**不会切断句子**
+    —— 这是分块精修能成立的前提。单行本身超过 max_chars 才硬切。
+    """
 
-        30 分钟语音 ≈ 8700 字,正好落在 6000 之上 —— 跳过会让长视频永远
-        拿不到精修。"""
+    def test_lossless_roundtrip(self):
+        """核心不变量:"".join(chunks) == 原文。
+
+        分块只改变"送给 LLM 的切法",**任何一块都不能被丢弃** ——
+        返回文本会被 process_asset 当成 canonical 转写落盘。"""
+        for text in [
+            "一" * 250,
+            "\n".join(["一" * 40] * 3),
+            "\n".join(f"第{i}行" + "字" * 30 for i in range(20)),
+            "短",
+        ]:
+            for max_chars in (10, 37, 100, 6000):
+                chunks = _split_by_lines(text, max_chars)
+                assert "".join(chunks) == text
+
+    def test_each_chunk_within_limit(self):
+        """切完每块都不超 cap(否则送 LLM 就失去意义)。"""
+        text = "\n".join(f"第{i}行" + "字" * 30 for i in range(20))
+        chunks = _split_by_lines(text, 100)
+
+        assert all(len(c) <= 100 for c in chunks)
+
+    def test_splits_on_newline_boundary(self):
+        """优先在换行处切 —— 不切在句子中间。"""
+        text = "\n".join(["一" * 40] * 3)   # 122 字,3 行
+
+        chunks = _split_by_lines(text, 100)
+
+        assert len(chunks) == 2
+        # 第一块吃掉前两行(82 字),第二块是第三行
+        assert chunks[0] == "\n".join(["一" * 40] * 2) + "\n"
+        assert chunks[1] == "一" * 40
+
+    def test_hard_cuts_single_oversized_line(self):
+        """单行超长(无换行可依)→ 硬切,不能死循环、不能丢字。"""
+        text = "一" * 250
+
+        chunks = _split_by_lines(text, 100)
+
+        assert [len(c) for c in chunks] == [100, 100, 50]
+        assert "".join(chunks) == text
+
+    def test_short_text_single_chunk(self):
+        assert _split_by_lines("短文本", 100) == ["短文本"]
+
+    def test_non_positive_limit_returns_whole(self):
+        """cap ≤ 0 是配置错误,但不该把文本切成无穷多块。"""
+        assert _split_by_lines("一二三", 0) == ["一二三"]
+
+
+class TestChunkedRefine:
+    """FR-2.15c 2026-09-10 二次修正:超限由"截断精修前段 + 尾部原文接回"改为**分块精修**。
+
+    旧行为**自己制造了门控失败**:头部 6000 字被精修(繁简统一为简体),
+    尾部 2911 字保持 Whisper 原生繁体 → 质量 LLM 报"后半段繁简混杂"而 fail。
+    那个混杂是精修造的,不是转写造的。
+    """
+
+    # 40 字/行 × 3 行 = 122 字;在 max_chars=100 下切成 2 块
+    LINES = ("一" * 40, "二" * 40, "三" * 40)
+    TEXT = "\n".join(LINES)
+
+    def test_calls_llm_once_per_chunk(self, cfg, mock_llm):
+        """超限 → 每块调一次,不再"只送前段"。"""
         cfg.quality_check.refine_max_chars = 100
-        mock_llm.complete.return_value = '{"cleaned_text": "精修过", "corrections": [], "notes": ""}'
+        mock_llm.complete.return_value = '{"cleaned_text": "X", "corrections": [], "notes": ""}'
         r = SubtitleRefiner(cfg, llm=mock_llm)
 
-        result = r.refine("一" * 200, title="t")
+        r.refine(self.TEXT, title="t")
 
-        mock_llm.complete.assert_called_once()
-        assert result.cleaned_text.startswith("精修过")
+        assert mock_llm.complete.call_count == 2
 
-    def test_truncation_preserves_tail_verbatim(self, cfg, mock_llm):
-        """尾部必须原样接回 —— 一字不丢。
-
-        cleaned_text 会被 process_asset 当成 canonical 转写落盘,丢尾等于让
-        内容从正式产物里静默消失。"""
+    def test_chunks_concatenated_in_order(self, cfg, mock_llm):
+        """各块结果按原顺序拼回。"""
         cfg.quality_check.refine_max_chars = 100
-        mock_llm.complete.return_value = '{"cleaned_text": "HEAD", "corrections": [], "notes": ""}'
+        mock_llm.complete.side_effect = [
+            '{"cleaned_text": "块一", "corrections": [], "notes": ""}',
+            '{"cleaned_text": "块二", "corrections": [], "notes": ""}',
+        ]
         r = SubtitleRefiner(cfg, llm=mock_llm)
-        text = "头" * 100 + "尾" * 50
+
+        result = r.refine(self.TEXT, title="t")
+
+        assert result.cleaned_text == "块一块二"
+        assert result.original_text == self.TEXT
+
+    def test_failed_chunk_keeps_raw_text_others_refined(self, cfg, mock_llm):
+        """某块失败 → **该块保原文**,其余块照用精修结果。
+
+        选"保该块原文"而非"整体回退原文":已成功那块的 token 已经花掉了,
+        整体回退等于白丢;而门控看到的混杂是**真实的**(该块确实没清理过)。
+        """
+        cfg.quality_check.refine_max_chars = 100
+        mock_llm.complete.side_effect = [
+            '{"cleaned_text": "块一", "corrections": [], "notes": ""}',
+            RuntimeError("第二块炸了"),
+        ]
+        r = SubtitleRefiner(cfg, llm=mock_llm)
+
+        result = r.refine(self.TEXT, title="t")
+
+        assert result.cleaned_text.startswith("块一")
+        assert result.cleaned_text.endswith(self.LINES[2])
+        assert mock_llm.complete.call_count == 2
+
+    def test_failed_chunk_recorded_in_notes(self, cfg, mock_llm):
+        """哪几块没精修,notes 里要说清。"""
+        cfg.quality_check.refine_max_chars = 100
+        mock_llm.complete.side_effect = [
+            '{"cleaned_text": "块一", "corrections": [], "notes": ""}',
+            RuntimeError("第二块炸了"),
+        ]
+        r = SubtitleRefiner(cfg, llm=mock_llm)
+
+        result = r.refine(self.TEXT, title="t")
+
+        assert "2" in result.notes
+        assert "保留原文" in result.notes
+
+    def test_failure_does_not_raise_in_chunked_path(self, cfg, mock_llm):
+        """所有块都失败也不抛错(与单块路径同契约)。"""
+        cfg.quality_check.refine_max_chars = 100
+        mock_llm.complete.side_effect = RuntimeError("全挂")
+        r = SubtitleRefiner(cfg, llm=mock_llm)
+
+        result = r.refine(self.TEXT, title="t")
+
+        assert result.cleaned_text == self.TEXT
+
+    def test_notes_from_all_chunks_aggregated(self, cfg, mock_llm):
+        """每块自己的 notes 不能被吞掉。"""
+        cfg.quality_check.refine_max_chars = 100
+        mock_llm.complete.side_effect = [
+            '{"cleaned_text": "块一", "corrections": [], "notes": "统一繁简"}',
+            '{"cleaned_text": "块二", "corrections": [], "notes": "修 3 个术语"}',
+        ]
+        r = SubtitleRefiner(cfg, llm=mock_llm)
+
+        result = r.refine(self.TEXT, title="t")
+
+        assert "统一繁简" in result.notes
+        assert "修 3 个术语" in result.notes
+
+    def test_corrections_aggregated_across_chunks(self, cfg, mock_llm):
+        """corrections 跨块累加。"""
+        cfg.quality_check.refine_max_chars = 100
+        mock_llm.complete.side_effect = [
+            json.dumps({"cleaned_text": "块一", "notes": "", "corrections": [
+                {"original": "PASS", "fixed": "Python", "reason": "同音字"}]}),
+            json.dumps({"cleaned_text": "块二", "notes": "", "corrections": [
+                {"original": "加碼", "fixed": "Java", "reason": "同音字"}]}),
+        ]
+        r = SubtitleRefiner(cfg, llm=mock_llm)
+
+        result = r.refine(self.TEXT, title="t")
+
+        assert [c.fixed for c in result.corrections] == ["Python", "Java"]
+
+    def test_max_chunks_guard_keeps_remainder_verbatim(self, cfg, mock_llm):
+        """块数超 `_MAX_CHUNKS` → 只精修前 N 块,其余保原文 + 打 warning。
+
+        明确退化,不静默:既要在 notes 里写明,也不能丢字。
+        """
+        cfg.quality_check.refine_max_chars = 100
+        mock_llm.complete.return_value = '{"cleaned_text": "", "corrections": [], "notes": ""}'
+        r = SubtitleRefiner(cfg, llm=mock_llm)
+        # 20 行 × 40 字 → 每块 2 行 → 10 块,超过上限 6
+        lines = [f"{i:02d}" + "一" * 38 for i in range(20)]
+        text = "\n".join(lines)
 
         result = r.refine(text, title="t")
 
-        # 头被替换为精修结果,尾逐字保留
-        assert result.cleaned_text == "HEAD" + "尾" * 50
-        assert result.cleaned_text.endswith("尾" * 50)
-        assert len(result.cleaned_text) == 4 + 50
+        assert mock_llm.complete.call_count == _MAX_CHUNKS
+        assert "保留原文" in result.notes
+        assert result.cleaned_text.endswith(lines[-1])
 
-    def test_truncation_keeps_length_above_max_chars(self, cfg, mock_llm):
-        """接回尾部后长度 > refine_max_chars —— 这是 VideoSummarizer 的触发条件。
-
-        若截到正好等于 max_chars,`len(text) > max_chars` 为假 →
-        FR-2.15d 长视频摘要静默失效。这里用返回值守住这个不变量。"""
-        cfg.quality_check.refine_max_chars = 100
-        mock_llm.complete.return_value = '{"cleaned_text": "OK", "corrections": [], "notes": ""}'
-        r = SubtitleRefiner(cfg, llm=mock_llm)
-
-        result = r.refine("一" * 300, title="t")
-
-        assert len(result.cleaned_text) > cfg.quality_check.refine_max_chars
-
-    def test_truncation_only_head_sent_to_llm(self, cfg, mock_llm):
-        """送进 prompt 的必须只是 head —— 尾部不该进 LLM 消耗 token。"""
-        cfg.quality_check.refine_max_chars = 100
-        mock_llm.complete.return_value = '{"cleaned_text": "OK", "corrections": [], "notes": ""}'
-        r = SubtitleRefiner(cfg, llm=mock_llm)
-        text = "A" * 100 + "B" * 50
-
-        r.refine(text, title="t")
-
-        prompt = mock_llm.complete.call_args[0][0]
-        assert "A" * 100 in prompt
-        assert "B" * 50 not in prompt
-
-    def test_truncation_recorded_in_notes(self, cfg, mock_llm):
-        """notes 要标注截断 —— 审计时能看出尾部没精修过。"""
-        cfg.quality_check.refine_max_chars = 100
-        mock_llm.complete.return_value = '{"cleaned_text": "OK", "corrections": [], "notes": "模型备注"}'
-        r = SubtitleRefiner(cfg, llm=mock_llm)
-
-        result = r.refine("一" * 200, title="t")
-
-        assert "100" in result.notes          # 精修了多少字
-        assert "100" in result.notes or "尾部" in result.notes
-        assert "尾部" in result.notes
-        assert "模型备注" in result.notes      # 模型自己的 notes 不能被吞掉
-
-    def test_no_truncation_leaves_notes_clean(self, cfg, mock_llm):
-        """没超限 → notes 不该被塞进截断标记。"""
-        cfg.quality_check.refine_max_chars = 6000
+    def test_within_limit_stays_single_call(self, cfg, mock_llm):
+        """未超限 → 路径与旧实现完全一致(一次调用,notes 不被污染)。"""
         mock_llm.complete.return_value = '{"cleaned_text": "OK", "corrections": [], "notes": "正常"}'
         r = SubtitleRefiner(cfg, llm=mock_llm)
 
         result = r.refine("短文本", title="t")
 
         assert result.cleaned_text == "OK"
-        assert "尾部" not in result.notes
-
-    def test_truncation_fallback_path_returns_full_original(self, cfg, mock_llm):
-        """截断 + LLM 失败 → 必须回退**全文**,不能回退被截断的 head。"""
-        cfg.quality_check.refine_max_chars = 100
-        mock_llm.complete.side_effect = RuntimeError("API 挂了")
-        r = SubtitleRefiner(cfg, llm=mock_llm)
-        text = "一" * 200
-
-        result = r.refine(text, title="t")
-
-        assert result.cleaned_text == text
-        assert len(result.cleaned_text) == 200
-
-    def test_text_within_limit_calls_llm(self, cfg, mock_llm):
-        cfg.quality_check.refine_max_chars = 100
-        mock_llm.complete.return_value = '{"cleaned_text": "ok", "corrections": [], "notes": ""}'
-        r = SubtitleRefiner(cfg, llm=mock_llm)
-
-        result = r.refine("短文本", title="t")
-
-        assert result.cleaned_text == "ok"
+        assert result.notes == "正常"
         mock_llm.complete.assert_called_once()
 
     def test_default_max_chars_6000(self, cfg, mock_llm):
@@ -501,8 +592,7 @@ class TestMaxCharsGuard:
         r = SubtitleRefiner(cfg, llm=mock_llm)
 
         # 5000 字符 < 默认 6000,正常调 LLM
-        text = "中" * 5000
-        result = r.refine(text)
+        result = r.refine("中" * 5000)
 
         mock_llm.complete.assert_called_once()
         assert result.cleaned_text == "ok"

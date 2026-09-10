@@ -143,6 +143,49 @@ class TestWhisperTranscribe:
         kwargs = mock_model.transcribe.call_args.kwargs
         assert kwargs["language"] == "zh"
 
+    # ---- FR-3.10 强制简体(2026-09-10) ----
+
+    def test_initial_prompt_passed_from_config(self, cfg, audio_file, mock_model):
+        """`whisper.initial_prompt` 必须透传给 faster-whisper。
+
+        中文简繁选择对 Whisper 不可控:同一段普通话可能前段简体、后段繁体
+        (真机 30 分钟 Python 课即如此)。`initial_prompt` 是标准压制手段。
+        """
+        cfg.whisper.initial_prompt = "以下是普通话的句子,请使用简体中文。"
+        transcriber = StreamingTranscriber(cfg, model=mock_model)
+
+        transcriber.transcribe(audio_file)
+
+        kwargs = mock_model.transcribe.call_args.kwargs
+        assert kwargs["initial_prompt"] == "以下是普通话的句子,请使用简体中文。"
+
+    def test_initial_prompt_defaults_to_simplified(self, cfg, audio_file, mock_model):
+        """不改配置(走默认值)也要带上简体提示。
+
+        简体统一是**基础可读性要求**,不能只在精修(refine_enabled,默认 False)
+        打开时才生效 —— 所以默认就开。
+        """
+        transcriber = StreamingTranscriber(cfg, model=mock_model)
+
+        transcriber.transcribe(audio_file)
+
+        prompt = mock_model.transcribe.call_args.kwargs["initial_prompt"]
+        assert prompt and "简体" in prompt
+
+    def test_blank_initial_prompt_sends_none(self, cfg, audio_file, mock_model):
+        """显式置空 → 传 None,而不是空字符串。
+
+        空串在某些 faster-whisper 版本下仍会作为 prompt 参与解码,语义与
+        "不传"不同;置空必须是干净的关闭。
+        """
+        cfg.whisper.initial_prompt = ""
+        transcriber = StreamingTranscriber(cfg, model=mock_model)
+
+        transcriber.transcribe(audio_file)
+
+        assert mock_model.transcribe.call_args.kwargs["initial_prompt"] is None
+
+
     def test_vad_filter_enabled(self, transcriber, audio_file, mock_model):
         """FR-3.x: vad_filter=True 必须开(过滤静音段)。"""
         transcriber.transcribe(audio_file)

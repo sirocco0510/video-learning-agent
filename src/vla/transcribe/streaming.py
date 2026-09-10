@@ -148,11 +148,14 @@ class StreamingTranscriber:
             raise ValueError(f"transcribe 期望 wav,得到 {audio_path}")
 
         # 转写(FR-3.1 + 3.2)
+        # FR-3.10(2026-09-10):initial_prompt 强制简体。空串 → None(干净关闭,
+        # 空串在某些 faster-whisper 版本下仍会作为 prompt 参与解码)。
         segments, info = self.model.transcribe(
             str(audio_path),
             language=self.config.whisper.language,
             beam_size=5,
             vad_filter=True,
+            initial_prompt=self.config.whisper.initial_prompt or None,
         )
         raw_text = "\n".join(seg.text for seg in segments)
         logger.info(

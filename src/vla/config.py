@@ -32,6 +32,14 @@ class WhisperConfig(BaseModel):
     postprocess_min_line_chars: int = 8      # 短于这个字符的行认为碎片
     postprocess_max_line_chars: int = 80     # 合并后单行上限
     postprocess_min_overlap_chars: int = 6   # 重复段最小公共子串
+    # FR-3.10(2026-09-10):Whisper 强制简体输出。
+    # 中文简繁选择对 Whisper **不可控** —— 同一段普通话可能前段简体、后段繁体
+    # (真机 30 分钟 Python 课即如此:头部简体、尾部繁体)。`initial_prompt`
+    # 是标准压制手段。带默认值 ⇒ `config/vla.yaml` 无需改动。
+    # 置空字符串 = 关闭(传 None,而非空串 —— 空串在某些 faster-whisper
+    # 版本下仍会作为 prompt 参与解码,语义与"不传"不同)。
+    # 注意:这只是**源头压制**,不是保证;精修侧(FR-2.15c)仍会做繁简统一兜底。
+    initial_prompt: str = "以下是普通话的句子,请使用简体中文。"
 
 
 class VideoSourceDownloadConfig(BaseModel):
