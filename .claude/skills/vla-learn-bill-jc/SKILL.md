@@ -42,12 +42,13 @@ description: Use when the user wants to transcribe a video from b-learning.bill-
 
 ### 2. URL 校验(白名单)
 
-**必须**匹配以下两种之一:
+**必须**匹配以下三种之一:
 
 | 形式 | regex |
 |---|---|
 | `learn` 路径 | `^https?://b-learning\.bill-jc\.com/learn/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/?$` |
-| SPA query | `^https?://b-learning\.bill-jc\.com/\?kngId=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$` |
+| SPA query(根 + kngId) | `^https?://b-learning\.bill-jc\.com/\?kngId=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$` |
+| **SPA 视频详情页**(常见) | `^https?://b-learning\.bill-jc\.com/kng/#/video/play\?kngId=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:&.*)?$` |
 
 **拒绝**所有其他形式:
 - ❌ `www.bilibili.com/video/BV1xxx` → "本 skill 仅支持 bill-jc 内部站;B 站请用 `uv run vla process --url <url>`"
@@ -59,15 +60,21 @@ description: Use when the user wants to transcribe a video from b-learning.bill-
 
 ### 3. 默认走 `--parse-only`(2026-09-10 设计:让用户先看参数,再决定跑不跑)
 
-**skill 默认不跑转写**,只跑 `spider.fetch_metadata(kng_id)`,返回 JSON 含:
+**skill 默认不跑转写**,只跑 `spider.fetch_metadata(kng_id)`,返回 JSON 含**播放就绪信息**:
 
-- `kng_id` / `m3u8_url` / `resolution` — 必返
-- `title` — 服务端字段,可能 None
-- `duration_sec` — 服务端字段,可能 None(可让用户决定质量门控是否过)
-- `college_id` — 服务端字段,可能 None(让用户核对是否与所属课程一致)
+- `kng_id` / `m3u8_url` / `resolution` / `fileId` — 必返
+- `all_resolutions` — 服务端提供的全部档位(如 `["1080p","720p","480p","360p"]`)
+- `subtitles_flag` — `0` = 服务端无官方字幕(走抽音 + Whisper),`1` = 有官方字幕
+- `title` / `duration_sec` / `college_id` — **固定 None**(2026-09-10 真账号探勘结论:
+  yunxuetang kngPlay API 顶层响应**不含**业务元数据,只返播放配置)
 
-**这一步 `kng_id` 是必需的,但 `college_id` 不是** —— spike `--parse-only` 模式会走 kngPlay API
-反向拿 `college_id`,告诉用户该视频属于哪个课程,顺便核对一致性。
+**业务元数据从哪里来**:
+- `title` / `college_id` — 用户从课程目录页 URL 上下文拿,或在端到端 spike 跑起来后
+  通过 `list_tasks` 间接拿到(端到端路径会自动覆盖)
+- `duration_sec` — 端到端路径下,转写前 `ffprobe` 抽音后真实测量
+
+**这一步 `kng_id` 是必需的,但 `college_id` 不是** —— `--parse-only` 不依赖 college_id,
+直接 kngPlay API 拿播放信息。
 
 ```bash
 uv run python scripts/spike_bill_jc_full.py \
@@ -76,36 +83,27 @@ uv run python scripts/spike_bill_jc_full.py \
   --cdp-url http://localhost:9222
 ```
 
-```text
-college_id 从课程目录页 URL 拿(形如 /college/<id>/... 或首页 URL path segment)。
-例如: --college-id 7c80b070-28ac-4c1a-b54b-35b327b870eb
-
-请提供本视频所属课程的 college_id:
-```
-
-如用户在最近对话里已经给过 college_id(同一课程下的多视频),直接复用,不必再问。
-
-### 4. 报告参数 + 询问 college_id(若 parse 拿不到)
+### 4. 报告参数 + 询问是否继续
 
 把 parse 拿到的 JSON 打印给用户,然后:
 
 ```text
-✅ 已解析该视频:
-   kng_id:     <kng_id>
-   title:      <title 或 "未知">
-   duration:   <sec>s 或 "未知"
-   m3u8:       <m3u8_url>
-   resolution: <resolution>
-   college_id: <来自服务端 或 "未知,需您提供">
+✅ 已解析该视频(播放就绪):
+   kng_id:       <kng_id>
+   m3u8:         <m3u8_url>
+   resolution:   <resolution>(备选:<all_resolutions>)
+   fileId:       <fileId>
+   subtitles:    <0 = 无官方字幕(走抽音+Whisper) / 1 = 有官方字幕>
+
+注意:title / duration / college_id **不在 kngPlay 响应里**(2026-09-10 真账号探勘确认)。
+  - 若您已知 college_id(同一课程下的多视频),直接给我,我跑端到端。
+  - 若您只想要"确认 m3u8 能拿到" → 告诉 AI "到此为止" 即可。
 
 接下来:
-- 若服务端已返 college_id 且您认可 → 直接跑端到端(Step 5)
-- 若您已知 college_id(如 --college-id 7c80b070-28ac-4c1a-b54b-35b327b870eb),可以覆盖
-- 若服务端没返 college_id → 问用户要(原 Step 3 行为)
-- 若只想要参数,不要转写 → 告诉 AI "到此为止"
+- 您已知 college_id → 跑端到端(Step 5)
+- 您只想要参数   → 告诉 AI "到此为止"
+- 您想看其他分辨率 → 改 --resolution 360p / 480p / 720p / 1080p 重跑 parse-only
 ```
-
-如用户在最近对话里已经给过 college_id(同一课程下的多视频),直接复用,不必再问。
 
 ---
 
@@ -153,7 +151,6 @@ uv run python scripts/spike_bill_jc_full.py \
 ## 不要做的事
 
 - ❌ 不自动重试 spike(失败一次报一次,让用户决定)
-- ❌ 不改 `scripts/spike_bill_jc_full.py`(本次只写 skill 文件)
 - ❌ 不引 Phase 1+ 的 spider / 录屏路径(走 spike 既有 happy path)
 - ❌ 不假装 skill 走 `vla process` fallback(严格 bill-jc 专用)
 - ❌ 不自动 commit spike 落盘的 .txt / .summary.txt(让用户决定)
