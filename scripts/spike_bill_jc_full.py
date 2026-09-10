@@ -1,9 +1,11 @@
 """b-learning.bill-jc.com end-to-end spike — Phase 9.6 验收脚本。
 
-3 种模式:
+4 种模式(通过 flag 区分,2026-09-10 加 --parse-only):
   1. --list-only:爬目录树 + 视频列表,打印 kng_id / title / url。
   2. --kng-id <id>:端到端跑单视频(爬 m3u8 → 抽音 → 转写 → 质量门控)。
   3. --kng-id + --resolution 360p:走低分辨率档(其他参数化同理)。
+  4. --parse-only:只解析单视频元数据(走 kngPlay API 拿 title / duration / collegeId),
+     **不**跑转写。给一个 kng_id,返回 JSON,方便用户预检 / 调试。
 
 前置:用户手动启 Chrome debug 并登录 b-learning.bill-jc.com:
   chrome --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-debug &
@@ -17,11 +19,16 @@
 
   uv run python scripts/spike_bill_jc_full.py \\
       --college-id <cid> --kng-id <kng_id> --resolution 360p
+
+  uv run python scripts/spike_bill_jc_full.py \\
+      --parse-only --kng-id <kng_id> --cdp-url http://localhost:9222
+  (注:--parse-only 模式 --college-id 非必需)
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import subprocess
 import sys
@@ -74,10 +81,15 @@ app = typer.Typer(add_completion=False, help="b-learning.bill-jc.com end-to-end 
 @app.command()
 def run(
     kng_id: str | None = typer.Option(
-        None, "--kng-id", help="单视频模式:直接跑这个 kng_id",
+        None, "--kng-id", help="单视频模式:直接跑这个 kng_id(parse / 端到端均需)",
     ),
     list_only: bool = typer.Option(
         False, "--list-only", help="只跑 list_tasks 打印目录 + 视频",
+    ),
+    parse_only: bool = typer.Option(
+        False, "--parse-only",
+        help="只解析单视频元数据(走 kngPlay API 拿 title / duration / collegeId),"
+             "**不**跑转写。需同时给 --kng-id,可不给 --college-id",
     ),
     root_label: str | None = typer.Option(
         None, "--root-label", help="list 模式:限定根目录 label(如 '技术分享')",
@@ -90,7 +102,8 @@ def run(
         10, "--limit", help="list 模式:最多返回几条 VideoTask",
     ),
     college_id: str = typer.Option(
-        ..., "--college-id", help="collegeId(必填,从 b-learning.bill-jc.com URL 取)",
+        "", "--college-id",
+        help="collegeId(parse 模式可不填,其他模式必填,从 b-learning.bill-jc.com URL 取)",
     ),
     cdp_url: str = typer.Option(
         "http://localhost:9222", "--cdp-url", help="Chrome CDP debug URL",
@@ -103,7 +116,7 @@ def run(
     ),
     verbose: bool = typer.Option(False, "--verbose", help="DEBUG 级日志"),
 ) -> None:
-    """3 种模式:list-only / 端到端单视频 / 参数化(改 --resolution 等)。"""
+    """4 种模式:list-only / parse-only / 端到端单视频 / 参数化(--resolution 等)。"""
     setup_logging()
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
@@ -120,16 +133,55 @@ def run(
     )
 
     if list_only:
+        if not college_id:
+            typer.echo("ERROR: --list-only 必须同时给 --college-id", err=True)
+            raise typer.Exit(1)
         _run_list_mode(spider, root_label, catalog_id, limit)
         return
 
+    if parse_only:
+        if not kng_id:
+            typer.echo("ERROR: --parse-only 必须同时给 --kng-id", err=True)
+            raise typer.Exit(1)
+        _run_parse_mode(spider, kng_id)
+        return
+
+    # 端到端模式:college_id 必须,kng_id 必须
+    if not college_id:
+        typer.echo("ERROR: 端到端模式必须给 --college-id", err=True)
+        raise typer.Exit(1)
     if kng_id is None:
-        typer.echo("ERROR: --kng-id 或 --list-only 至少一个", err=True)
+        typer.echo("ERROR: --kng-id 或 --list-only 或 --parse-only 至少一个", err=True)
         raise typer.Exit(1)
 
     # 端到端模式:整段包在单个 asyncio.run 里 — fetch_asset / process_asset
     # 共享 HTTP client / CDP 连接,跨 loop 会 "Event loop is closed"。
     asyncio.run(_run_endtoend(cfg, spider, kng_id))
+
+
+def _run_parse_mode(
+    spider: "InternalSiteSpider",
+    kng_id: str,
+) -> None:
+    """模式 4:--parse-only,只解析单视频元数据,不打字幕 / 不抽音 / 不跑质量门控。
+
+    走 spider.fetch_metadata(kng_id) → 打印 JSON。
+    失败不抛:打印错误 + typer.Exit(1)。
+    """
+    logger = logging.getLogger("spike.parse")
+    logger.info("[PARSE] kng_id=%s resolution=%s", kng_id, spider.resolution)
+    try:
+        meta = asyncio.run(spider.fetch_metadata(kng_id))
+    except Exception as e:
+        logger.error("[FAIL] fetch_metadata 异常:%s", e, exc_info=True)
+        typer.echo(
+            json.dumps({"kng_id": kng_id, "error": str(e)}, ensure_ascii=False, indent=2),
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    typer.echo(json.dumps(meta, ensure_ascii=False, indent=2))
+    logger.info("[OK] parse 完成,kng_id=%s title=%r", kng_id, meta.get("title"))
 
 
 def _run_list_mode(

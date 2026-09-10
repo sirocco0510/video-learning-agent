@@ -57,9 +57,24 @@ description: Use when the user wants to transcribe a video from b-learning.bill-
 
 通过校验 → 提取 `kng_id`(UUID)。
 
-### 3. 询问 college_id
+### 3. 默认走 `--parse-only`(2026-09-10 设计:让用户先看参数,再决定跑不跑)
 
-**URL 里没有 college_id**,必须问用户:
+**skill 默认不跑转写**,只跑 `spider.fetch_metadata(kng_id)`,返回 JSON 含:
+
+- `kng_id` / `m3u8_url` / `resolution` — 必返
+- `title` — 服务端字段,可能 None
+- `duration_sec` — 服务端字段,可能 None(可让用户决定质量门控是否过)
+- `college_id` — 服务端字段,可能 None(让用户核对是否与所属课程一致)
+
+**这一步 `kng_id` 是必需的,但 `college_id` 不是** —— spike `--parse-only` 模式会走 kngPlay API
+反向拿 `college_id`,告诉用户该视频属于哪个课程,顺便核对一致性。
+
+```bash
+uv run python scripts/spike_bill_jc_full.py \
+  --parse-only \
+  --kng-id <kng_id> \
+  --cdp-url http://localhost:9222
+```
 
 ```text
 college_id 从课程目录页 URL 拿(形如 /college/<id>/... 或首页 URL path segment)。
@@ -70,7 +85,31 @@ college_id 从课程目录页 URL 拿(形如 /college/<id>/... 或首页 URL pat
 
 如用户在最近对话里已经给过 college_id(同一课程下的多视频),直接复用,不必再问。
 
-### 4. 跑 spike
+### 4. 报告参数 + 询问 college_id(若 parse 拿不到)
+
+把 parse 拿到的 JSON 打印给用户,然后:
+
+```text
+✅ 已解析该视频:
+   kng_id:     <kng_id>
+   title:      <title 或 "未知">
+   duration:   <sec>s 或 "未知"
+   m3u8:       <m3u8_url>
+   resolution: <resolution>
+   college_id: <来自服务端 或 "未知,需您提供">
+
+接下来:
+- 若服务端已返 college_id 且您认可 → 直接跑端到端(Step 5)
+- 若您已知 college_id(如 --college-id 7c80b070-28ac-4c1a-b54b-35b327b870eb),可以覆盖
+- 若服务端没返 college_id → 问用户要(原 Step 3 行为)
+- 若只想要参数,不要转写 → 告诉 AI "到此为止"
+```
+
+如用户在最近对话里已经给过 college_id(同一课程下的多视频),直接复用,不必再问。
+
+---
+
+### 5. 跑 spike(端到端模式)
 
 ```bash
 uv run python scripts/spike_bill_jc_full.py \
@@ -83,7 +122,7 @@ uv run python scripts/spike_bill_jc_full.py \
 - **不要**加 `--list-only`(skill 的目的是真跑)
 - mac 默认 CDP URL 是 `http://localhost:9222`,Windows 也一样,不用问
 
-### 5. 报告结果
+### 6. 报告结果
 
 **成功**(spike exit 0):
 

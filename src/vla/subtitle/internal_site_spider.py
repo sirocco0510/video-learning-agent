@@ -305,6 +305,94 @@ class InternalSiteSpider:
         logger.info("fetch_m3u8 kng=%s resolution=%s → %s", kng_id, self.resolution, url)
         return url
 
+    async def fetch_metadata(self, kng_id: str) -> dict[str, Any]:
+        """走 preinit + kngPlay, 返回 dict(含 m3u8_url + title + duration_sec + college_id)。
+
+        与 fetch_m3u8 共享 preinit + kngPlay HTTP 调用, 但额外提取 yunxuetang
+        返回的元数据(title / duration / collegeId)供 --parse-only 模式用。
+
+        字段语义(均为 None 表示服务端未返):
+          - m3u8_url    str   resolution 匹配的播放地址
+          - title       str   视频标题(yunxuetang data.title)
+          - duration_sec int  视频时长秒(yunxuetang data.videoLongTime 或 studyTime)
+          - college_id  str   collegeId(yunxuetang data.collegeId)
+          - kng_id      str   入参透传
+          - resolution  str   选中的分辨率档
+
+        Raises:
+            RuntimeError: cookie 借取失败, preinit/kngPlay HTTP 非 200,
+                          或 playDetails 为空(同 fetch_m3u8)。
+        """
+        cookies, token = await self._borrow_auth()
+        headers = self._auth_headers(cookies, token)
+
+        base_payload: dict[str, Any] = {
+            "kngId": kng_id,
+            "courseId": "",
+            "studyParam": {"originOrgId": "", "previewType": 0},
+            "targetCode": "kng",
+            "targetId": "",
+            "targetParam": {"taskId": "", "projectId": "", "flipId": "", "batchId": ""},
+            "customFunctionCode": "",
+        }
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            # 第 1 步:preinit(预热 study session)
+            preinit_resp = await client.post(_PREINIT_URL, json=base_payload, headers=headers)
+            if preinit_resp.status_code != 200:
+                raise RuntimeError(
+                    f"preinit 失败 status={preinit_resp.status_code}(cookie 可能过期): "
+                    f"{preinit_resp.text[:300]}"
+                )
+
+            # 第 2 步:kngPlay(拿 m3u8 URL + 元数据)
+            kngplay_payload = {**base_payload, "fullname": "", "lang": ""}
+            kngplay_resp = await client.post(_KNGPLAY_URL, json=kngplay_payload, headers=headers)
+            if kngplay_resp.status_code != 200:
+                raise RuntimeError(
+                    f"kngPlay 失败 status={kngplay_resp.status_code}: {kngplay_resp.text[:300]}"
+                )
+
+            data = kngplay_resp.json()
+
+        play_details = data.get("playDetails") or []
+        if not play_details:
+            raise RuntimeError(f"kngPlay 返回空 playDetails: {data}")
+
+        # 选 desc == self.resolution;找不到 fallback 到第一档
+        match = next((p for p in play_details if p.get("desc") == self.resolution), None)
+        m3u8_url = match["url"] if match else play_details[0]["url"]
+
+        # 提取元数据(服务端字段命名取多种可能, 容错取 None)
+        # yunxuetang 真实字段名待真账号验证 — 兜底 data.get(key) 全部返 None 不抛错
+        # 注意:college_id 不 fallback 到 self.college_id — self 是 spider 构造参数,
+        # 可能传错或留空;只有 kngPlay 真实返回的字段才可信。
+        title = data.get("title") or data.get("name") or data.get("knwTitle")
+        duration_raw = (
+            data.get("videoLongTime")
+            or data.get("duration")
+            or data.get("studyTime")
+            or data.get("length")
+        )
+        try:
+            duration_sec: int | None = int(duration_raw) if duration_raw is not None else None
+        except (TypeError, ValueError):
+            duration_sec = None
+        college_id = data.get("collegeId") or data.get("collegeID") or None
+
+        logger.info(
+            "fetch_metadata kng=%s resolution=%s title=%r duration=%s college=%s",
+            kng_id, self.resolution, title, duration_sec, college_id,
+        )
+        return {
+            "kng_id": kng_id,
+            "m3u8_url": m3u8_url,
+            "title": title,
+            "duration_sec": duration_sec,
+            "college_id": college_id,
+            "resolution": self.resolution,
+        }
+
 
 def _flatten_leaves(
     tree: list[dict[str, Any]],

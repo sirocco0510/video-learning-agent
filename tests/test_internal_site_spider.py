@@ -462,3 +462,104 @@ async def test_list_tasks_rejects_both_root_label_and_catalog_id(monkeypatch):
         await spider.list_tasks(
             root_label="技术分享", catalog_id="some-uuid", limit=10
         )
+
+
+# --- Phase 10: --parse-only support (2026-09-10) ---
+
+
+@pytest.mark.asyncio
+async def test_fetch_metadata_returns_dict_with_m3u8_url(monkeypatch):
+    """fetch_metadata 返回 dict, 含 m3u8_url(从 fetch_m3u8 同源逻辑拿)。
+
+    关键差异:fetch_metadata 复用 fetch_m3u8 路径但额外返回 title / duration_sec / college_id。
+    """
+    spider = InternalSiteSpider(
+        cdp_url="http://localhost:9222", college_id="cid", resolution="720p"
+    )
+
+    async def fake_borrow():
+        return [{"name": "tk", "value": "tv", "domain": ".yunxuetang.cn"}], "fake-jwt"
+
+    monkeypatch.setattr(spider, "_fetch_cookies_and_token", fake_borrow)
+
+    kngplay_payload = {
+        "playDetails": [
+            {"url": "https://video.bill-jc.com/a_720p.m3u8", "desc": "720p"},
+        ],
+        "fileId": "uuid-1",
+        "title": "Python 入门教程",
+        "videoLongTime": 1800,
+        "collegeId": "cid-from-kngplay",
+    }
+    responses = [
+        MagicMock(status_code=200, json=lambda: {"code": 0}),
+        MagicMock(status_code=200, json=lambda: kngplay_payload),
+    ]
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        return responses[0 if "preinit" in url else 1]
+
+    with patch(
+        "vla.subtitle.internal_site_spider.httpx.AsyncClient", return_value=_fake_client(fake_post)
+    ):
+        meta = await spider.fetch_metadata("kng-id-abc")
+
+    assert isinstance(meta, dict)
+    assert meta["m3u8_url"] == "https://video.bill-jc.com/a_720p.m3u8"
+    assert meta["title"] == "Python 入门教程"
+    assert meta["duration_sec"] == 1800
+    assert meta["college_id"] == "cid-from-kngplay"
+    assert meta["kng_id"] == "kng-id-abc"
+    assert meta["resolution"] == "720p"
+
+
+@pytest.mark.asyncio
+async def test_fetch_metadata_handles_missing_optional_fields(monkeypatch):
+    """kngPlay 响应缺 title / duration_sec / collegeId 时返回 None, 不抛错。"""
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
+
+    async def fake_borrow():
+        return [{"name": "tk", "value": "tv", "domain": ".yunxuetang.cn"}], "fake-jwt"
+
+    monkeypatch.setattr(spider, "_fetch_cookies_and_token", fake_borrow)
+
+    # 模拟服务端只返 playDetails
+    kngplay_payload = {
+        "playDetails": [{"url": "https://video.bill-jc.com/a_480p.m3u8", "desc": "480p"}],
+    }
+    responses = [
+        MagicMock(status_code=200, json=lambda: {"code": 0}),
+        MagicMock(status_code=200, json=lambda: kngplay_payload),
+    ]
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        return responses[0 if "preinit" in url else 1]
+
+    with patch(
+        "vla.subtitle.internal_site_spider.httpx.AsyncClient", return_value=_fake_client(fake_post)
+    ):
+        meta = await spider.fetch_metadata("kng-id-xyz")
+
+    assert meta["m3u8_url"] == "https://video.bill-jc.com/a_480p.m3u8"
+    assert meta["title"] is None
+    assert meta["duration_sec"] is None
+    assert meta["college_id"] is None
+    assert meta["kng_id"] == "kng-id-xyz"
+
+
+@pytest.mark.asyncio
+async def test_fetch_metadata_propagates_fetch_m3u8_errors(monkeypatch):
+    """fetch_metadata 在 preinit/kngPlay 失败时抛 RuntimeError(同 fetch_m3u8)。"""
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
+
+    async def fake_borrow():
+        return [{"name": "tk", "value": "tv", "domain": ".yunxuetang.cn"}], "fake-jwt"
+
+    monkeypatch.setattr(spider, "_fetch_cookies_and_token", fake_borrow)
+
+    fake_post = AsyncMock(return_value=MagicMock(status_code=401, text="Unauthorized"))
+    with patch(
+        "vla.subtitle.internal_site_spider.httpx.AsyncClient", return_value=_fake_client(fake_post)
+    ):
+        with pytest.raises(RuntimeError, match="preinit 失败"):
+            await spider.fetch_metadata("kng-x")
