@@ -258,7 +258,16 @@ async def _run_endtoend(
     notifier = create_notifier()
     plugin_status = PluginStatus()
     log = TranscriptionLog(cfg.logging.log_dir)
-    transcriber = StreamingTranscriber(cfg)
+
+    # Critical (2026-09-10):refiner 必须在 StreamingTranscriber 之前构造 —
+    # StreamingTranscriber._maybe_refine 内部要 self.refiner.refine(...) ,
+    # 不注入则 Level 4 云端字幕清理被跳过,cleaned 直接进 QualityChecker 打分,
+    # 专有名词错 / 口语化填词都不修,score 容易 fail。
+    refine_llm = None
+    if cfg.quality_check.refine_enabled:
+        refine_llm = LLMClient(cfg.llm_client, model=cfg.quality_check.refine_model)
+    refiner = SubtitleRefiner(cfg, refine_llm) if cfg.quality_check.refine_enabled else None
+    transcriber = StreamingTranscriber(cfg, refiner=refiner)
 
     # driver=None 跳过 BrowserDriver 后台 thread:bill-jc 路径走 InternalSiteSpider
     # + extract_browser_audio,两者都直接 connect_over_cdp(临时连接,不长期持有
@@ -311,11 +320,6 @@ async def _run_endtoend(
     quality_llm = LLMClient(cfg.llm_client, model=cfg.quality_check.model)
     checker = QualityChecker(cfg)
     checker.set_llm(quality_llm)
-
-    refine_llm = None
-    if cfg.quality_check.refine_enabled:
-        refine_llm = LLMClient(cfg.llm_client, model=cfg.quality_check.refine_model)
-    refiner = SubtitleRefiner(cfg, refine_llm) if cfg.quality_check.refine_enabled else None
 
     today_dir = find_today_dir(Path(cfg.audio.downloads_dir)) if cfg.audio is not None else None
 
@@ -384,9 +388,12 @@ async def _run_endtoend(
 
     logger.info("[OK] Quality score=%d passed=%s", result.qr.score, result.qr.passed)
     logger.info("[OK] Duration: %ds source=%s", result.duration_sec, result.source)
+    # transcript/refined 实际落盘在 cfg.storage.tmp_dir/transcripts/(StreamingTranscriber 写)
+    # 不是 cfg.storage.transcribed_dir(那是 build_text_provider 内部用的另一条路径)
+    transcripts_dir = Path(cfg.storage.tmp_dir) / "transcripts"
     logger.info(
-        "[DONE] 字幕落盘: %s/%s.txt",
-        cfg.storage.transcribed_dir, kng_id,
+        "[DONE] 字幕落盘: %s/%s.{transcript,cleaned,refined}.txt",
+        transcripts_dir, kng_id,
     )
 
 
