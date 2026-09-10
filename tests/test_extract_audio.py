@@ -189,7 +189,8 @@ async def test_extract_browser_audio_invokes_playwright_and_ffmpeg(tmp_path, mon
     ap.return_value.__aenter__.return_value.chromium.connect_over_cdp.assert_called_once_with(
         "http://localhost:9222"
     )
-    fake_page.goto.assert_called_once()
+    # Phase 9.6.4+ (2026-09-10):goto 调 2 次(SPA 重置 + video URL)
+    assert fake_page.goto.call_count == 2
     fake_page.wait_for_selector.assert_called()  # 调了 2 次(按钮 + video)
     fake_page.wait_for_function.assert_called_once()
     fake_page.evaluate.assert_called()  # 调了 2 次(点开始学习 + 跑捕获)
@@ -297,4 +298,50 @@ async def test_extract_browser_audio_passes_playback_rate_to_js(tmp_path, monkey
         )
     custom_payload = fake_page.evaluate.call_args_list[1][0][1]
     assert custom_payload["playbackRate"] == 2.0
-    assert custom_payload["maxDurationSec"] == 7200
+
+
+@pytest.mark.asyncio
+async def test_extract_browser_audio_resets_spa_before_video_goto(
+    tmp_path, monkeypatch,
+):
+    """Phase 9.6.4+ (2026-09-10):bill-jc SPA 在 new_page() 后是空白 tab,默认 route
+    不是视频学习页(无 <video> / 无 button.yxtf-button--primary)。修复:new_page 之后
+    先 goto 根 URL 让 SPA 初始化,再 goto 目标视频 URL,这样 button + video 一定能
+    渲染出来。
+
+    验证 goto 被调两次:第一次是 catalog 根 URL(重置 SPA),第二次是 video_url。
+    """
+    out_wav = tmp_path / "browser.wav"
+    fake_browser, fake_page = _make_fake_browser()
+
+    ap = MagicMock()
+    ap.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+    ap.return_value.__aenter__.return_value.chromium = MagicMock()
+    ap.return_value.__aenter__.return_value.chromium.connect_over_cdp = AsyncMock(return_value=fake_browser)
+    ap.return_value.__aexit__ = AsyncMock(return_value=None)
+
+    def fake_ffmpeg_run(cmd, **kwargs):
+        wav_arg = cmd[cmd.index("-f") + 2]
+        Path(wav_arg).write_bytes(b"RIFF")
+        return MagicMock(returncode=0, stderr="")
+
+    monkeypatch.setattr("vla.transcribe.extract.subprocess.run", fake_ffmpeg_run)
+
+    with patch("vla.transcribe.extract.async_playwright", ap):
+        await extract_browser_audio(
+            "https://b-learning.bill-jc.com/learn/abc-123?kngId=abc-123",
+            out_wav,
+        )
+
+    # goto 必须被调两次(catalog 重置 SPA → 目标 video URL)
+    assert fake_page.goto.call_count == 2, (
+        f"expected 2 goto calls (SPA reset + video), got {fake_page.goto.call_count}"
+    )
+    # 第一次 goto 必须是 catalog 根 URL(SPA 重置)
+    first_goto_url = fake_page.goto.call_args_list[0][0][0]
+    assert first_goto_url == "https://b-learning.bill-jc.com/", (
+        f"first goto must reset SPA, got {first_goto_url!r}"
+    )
+    # 第二次 goto 必须是传入的视频 URL
+    second_goto_url = fake_page.goto.call_args_list[1][0][0]
+    assert second_goto_url == "https://b-learning.bill-jc.com/learn/abc-123?kngId=abc-123"

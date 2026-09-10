@@ -177,9 +177,12 @@ async def extract_browser_audio(
     流程:
       1. async_playwright + chromium.connect_over_cdp(cdp_url) 借用户主 Chrome
       2. context.new_page() 新建播放页(不污染用户当前 tab)
-      3. goto → 等 <video> ready → playbackRate 加速 → MediaRecorder 录 webm/opus
-      4. base64 传回 Python → 临时 webm → ffmpeg -vn -ac 1 -ar 16000 转 wav
-      5. unlink webm(磁盘友好), close page
+      3. **SPA 重置**:先 goto bill-jc 根 URL 让 SPA 初始化(否则 new_page 后的空白
+         tab 默认 route 不是视频学习页,button.yxtf-button--primary 永远不渲染)
+      4. goto video_url → 等 button → 点"开始学习" → 等 <video> ready →
+         playbackRate 加速 → MediaRecorder 录 webm/opus
+      5. base64 传回 Python → 临时 webm → ffmpeg -vn -ac 1 -ar 16000 转 wav
+      6. unlink webm(磁盘友好), close page
 
     Args:
         video_url: yunxuetang 播放页 URL(已带 kngId / token)
@@ -208,6 +211,13 @@ async def extract_browser_audio(
             context = browser.contexts[0]
             page = await context.new_page()
 
+            # Phase 9.6.4+ (2026-09-10):SPA 重置 — new_page() 创建空白 tab,
+            # bill-jc SPA 默认 route 不是视频学习页(SPA 状态未知)。先 goto 根
+            # URL 让 SPA 初始化,再 goto 目标 video URL,这样 button 一定能渲染。
+            # 否则 30s 等不到 button.yxtf-button--primary → RuntimeError → fallback。
+            await page.goto(
+                "https://b-learning.bill-jc.com/", wait_until="domcontentloaded",
+            )
             await page.goto(video_url, wait_until="domcontentloaded")
 
             try:
