@@ -25,6 +25,40 @@ DEFAULT_SIMULATE_TIMEOUT_SEC = 30
 DEFAULT_EXTRACT_TIMEOUT_SEC = 600  # 10 分钟:60min 长视频 + 弱网络
 
 
+def probe_duration(audio_path: Path) -> int:
+    """用 ffprobe 拿音频时长(秒)。失败 fallback 到 0(主流程不阻塞)。
+
+    失败一律返回 0 而不是抛错,调用方必须自己判断 0 = "不知道"。
+    两条调用路径:
+      - AudioSourceFactory.extract() → AudioExtractionResult.duration_sec
+      - learn 批量入口 → 回填 VideoTask.expected_duration(替换占位值),
+        见 src/vla/learn.py
+    """
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        logger.warning("ffprobe 未安装,duration_sec 退化为 0")
+        return 0
+    try:
+        proc = subprocess.run(
+            [
+                ffprobe,
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "json",
+                str(audio_path),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=10,
+        )
+        data = json.loads(proc.stdout)
+        return int(float(data["format"]["duration"]))
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+            KeyError, ValueError, json.JSONDecodeError) as e:
+        logger.warning("ffprobe 解析时长失败:%s", e)
+        return 0
+
+
 @dataclass(frozen=True)
 class AudioExtractionResult:
     """音频抽取结果(SSOT: spec §3.2)。"""
@@ -123,27 +157,5 @@ class AudioSourceFactory:
         )
 
     def _probe_duration(self, audio_path: Path) -> int:
-        """用 ffprobe 拿时长(秒)。失败 fallback 到 0(主流程不阻塞)。"""
-        ffprobe = shutil.which("ffprobe")
-        if ffprobe is None:
-            logger.warning("ffprobe 未安装,duration_sec 退化为 0")
-            return 0
-        try:
-            proc = subprocess.run(
-                [
-                    ffprobe,
-                    "-v", "error",
-                    "-show_entries", "format=duration",
-                    "-of", "json",
-                    str(audio_path),
-                ],
-                check=True,
-                capture_output=True,
-                timeout=10,
-            )
-            data = json.loads(proc.stdout)
-            return int(float(data["format"]["duration"]))
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
-                KeyError, ValueError, json.JSONDecodeError) as e:
-            logger.warning("ffprobe 解析时长失败:%s", e)
-            return 0
+        """用 ffprobe 拿时长(秒)—— 委托给模块级 probe_duration(2026-09-10)。"""
+        return probe_duration(audio_path)

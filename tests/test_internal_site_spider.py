@@ -340,6 +340,153 @@ async def test_list_tasks_skips_empty_leaves(monkeypatch):
     assert pagelist_calls == ["full-leaf"]
 
 
+# --- 分页 (2026-09-10 learn 批量入口需要,见 FR-11) ---
+
+
+def _fake_pagelist_client(captured: list[dict]):
+    """构造一个只处理 pagelist 的 fake client,把每次请求的 params 记进 captured。"""
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        captured.append(kwargs.get("params") or {})
+        body = {"datas": [{"id": f"kng-{i}", "title": f"t{i}"} for i in range(3)]}
+        return MagicMock(status_code=200, json=lambda: body)
+
+    return _fake_client(fake_post)
+
+
+@pytest.mark.asyncio
+async def test_catalog_id_mode_skips_tree(monkeypatch):
+    """catalog_id 直通模式不调 tree,直接 pagelist —— 基线,分页测试的地基。"""
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
+    monkeypatch.setattr(spider, "_fetch_cookies_and_token", _fake_cookies)
+    urls: list[str] = []
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        urls.append(url)
+        body = {"datas": [{"id": "kng-1", "title": "t"}]}
+        return MagicMock(status_code=200, json=lambda: body)
+
+    with patch(
+        "vla.subtitle.internal_site_spider.httpx.AsyncClient", return_value=_fake_client(fake_post)
+    ):
+        tasks = await spider.list_tasks(catalog_id="cat-1", limit=10)
+
+    assert all("tree" not in u for u in urls), f"直通模式不该调 tree:{urls}"
+    assert len(urls) == 1
+    assert [t.id for t in tasks] == ["kng-1"]
+
+
+@pytest.mark.asyncio
+async def test_page_size_follows_limit_not_hardcoded_16(monkeypatch):
+    """翻页步长必须 == 页大小,否则每页漏掉 (16 - limit) 条。
+
+    旧实现 params 里写死 `limit: 16` 而本地只收 `limit` 条:limit=10 时
+    每页丢弃 6 条 —— 目录页有 100 个视频会静默漏掉 60 个。
+    """
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
+    monkeypatch.setattr(spider, "_fetch_cookies_and_token", _fake_cookies)
+    captured: list[dict] = []
+
+    with patch(
+        "vla.subtitle.internal_site_spider.httpx.AsyncClient",
+        return_value=_fake_pagelist_client(captured),
+    ):
+        await spider.list_tasks(catalog_id="cat-1", limit=10)
+
+    assert captured[0]["limit"] == 10, f"页大小应等于 limit,实际 {captured[0]!r}"
+
+
+@pytest.mark.asyncio
+async def test_offset_forwarded_to_pagelist(monkeypatch):
+    """offset 透传到 pagelist params —— learn 翻页靠它。"""
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
+    monkeypatch.setattr(spider, "_fetch_cookies_and_token", _fake_cookies)
+    captured: list[dict] = []
+
+    with patch(
+        "vla.subtitle.internal_site_spider.httpx.AsyncClient",
+        return_value=_fake_pagelist_client(captured),
+    ):
+        await spider.list_tasks(catalog_id="cat-1", limit=10, offset=20)
+
+    assert captured[0]["offset"] == 20
+    assert captured[0]["orderType"] == "desc"
+    assert captured[0]["orderBy"] == "createTime"
+
+
+@pytest.mark.asyncio
+async def test_offset_defaults_to_zero(monkeypatch):
+    """不传 offset → 0(现有调用方行为不变)。"""
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
+    monkeypatch.setattr(spider, "_fetch_cookies_and_token", _fake_cookies)
+    captured: list[dict] = []
+
+    with patch(
+        "vla.subtitle.internal_site_spider.httpx.AsyncClient",
+        return_value=_fake_pagelist_client(captured),
+    ):
+        await spider.list_tasks(catalog_id="cat-1", limit=10)
+
+    assert captured[0]["offset"] == 0
+
+
+@pytest.mark.asyncio
+async def test_offset_without_catalog_id_raises(monkeypatch):
+    """offset > 0 但没给 catalog_id → ValueError。
+
+    tree 模式下"offset"语义不明(多个叶子各自 offset 什么?)—— 显式拒绝,
+    而不是把它静默套到每个叶子上产出错乱的结果。
+    """
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
+    monkeypatch.setattr(spider, "_fetch_cookies_and_token", _fake_cookies)
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        raise AssertionError("参数校验应发生在任何 HTTP 调用之前")
+
+    with patch(
+        "vla.subtitle.internal_site_spider.httpx.AsyncClient", return_value=_fake_client(fake_post)
+    ):
+        with pytest.raises(ValueError, match="offset"):
+            await spider.list_tasks(root_label="L", offset=10)
+
+
+@pytest.mark.asyncio
+async def test_offset_without_catalog_id_and_without_root_label_raises(monkeypatch):
+    """全树模式(既无 catalog_id 也无 root_label)+ offset → 同样拒绝。"""
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
+    monkeypatch.setattr(spider, "_fetch_cookies_and_token", _fake_cookies)
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        raise AssertionError("参数校验应发生在任何 HTTP 调用之前")
+
+    with patch(
+        "vla.subtitle.internal_site_spider.httpx.AsyncClient", return_value=_fake_client(fake_post)
+    ):
+        with pytest.raises(ValueError, match="offset"):
+            await spider.list_tasks(offset=10)
+
+
+@pytest.mark.asyncio
+async def test_offset_zero_allowed_in_tree_mode(monkeypatch):
+    """offset=0(显式)在 tree 模式合法 —— 校验的是 offset>0 而非 offset 存在。"""
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
+    monkeypatch.setattr(spider, "_fetch_cookies_and_token", _fake_cookies)
+    tree_payload = [{"id": "leaf-1", "label": "L", "kngCount": 1, "children": []}]
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        if "tree" in url:
+            return MagicMock(status_code=200, json=lambda: tree_payload)
+        body = {"datas": [{"id": "kng-1", "title": "t"}]}
+        return MagicMock(status_code=200, json=lambda: body)
+
+    with patch(
+        "vla.subtitle.internal_site_spider.httpx.AsyncClient", return_value=_fake_client(fake_post)
+    ):
+        tasks = await spider.list_tasks(offset=0)
+
+    assert [t.id for t in tasks] == ["kng-1"]
+
+
 # --- Phase 9.6.3 真实环境适配 (token/source/yxtspanid/catalog_id) ---
 
 

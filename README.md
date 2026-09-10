@@ -134,6 +134,15 @@ uv run vla process \
 
 # 6. 批量处理(从 videos.yaml,FR-10)
 uv run vla batch --config ./videos.yaml
+
+# 7. 课程目录批量转写(FR-11,2026-09-10)—— 只支持 bill-jc
+#    参数从课程目录页 URL 拿:
+#    https://b-learning.bill-jc.com/kng/#/list?catalogId=<X>&cid=<Y>&...
+uv run vla learn \
+  --college-id  "7c80b070-28ac-4c1a-b54b-35b327b870eb" \
+  --catalog-id  "4ff8c024-219c-4e49-91d0-ec869bcf859f" \
+  --limit 10            # 每页 10 条 + 翻页步长;累计 6h 或目录翻完即停
+# 先看要跑哪些(不转写、不装配 LLM):加 --dry-run
 ```
 
 ### Claude skill 入口(2026-09-10)
@@ -142,7 +151,7 @@ uv run vla batch --config ./videos.yaml
 
 | Skill | 触发 | 适用场景 |
 |---|---|---|
-| `/vla-learn-bill-jc` | "学 bill-jc 视频" / "跑 bill-jc 转写" | b-learning.bill-jc.com 单视频端到端转写(只支持 bill-jc,其他平台用 `vla process`) |
+| `/vla-learn-bill-jc` | "学 bill-jc 视频" / "跑 bill-jc 转写" | b-learning.bill-jc.com 端到端转写。**单视频**(粘详情页 URL)或**整课批量**(粘目录页 URL,内部走 `vla learn`) |
 
 
 ### `videos.yaml` 写法(FR-10.5)

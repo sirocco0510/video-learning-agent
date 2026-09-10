@@ -205,6 +205,64 @@ tags:
 
 **验证**:全量 `18 failed / 709 passed`。这 18 项(16 `test_e2e` + 2 `test_quality_checker`)为**既有失败** —— 已用 `git stash` 把工作树退回干净的 HEAD(72b269a)复跑同两个文件,得 `18 failed / 18 passed`,逐项一致,本次改动新增 0 个失败;`vla doctor` 全 OK;端到端 spike 质量分 88,m3u8 直抽 5.7MB/177s,315 字摘要落盘。
 
+#### 2026-09-10 课程目录批量入口 — `vla learn`(FR-11 新增)
+
+**背景**:bill-jc 课程目录动辄几十上百条视频,原来只能一条条粘 URL 跑
+`vla-learn-bill-jc` skill(单视频 scope)。需要批量入口,且**不影响单条转写逻辑**。
+
+**改动点**
+
+| # | 位置 | 改动 | 依据 |
+|---|---|---|---|
+| 1 | FR-11(新增) | 新子命令 `vla learn --college-id <cid> --catalog-id <catalogId>`,自己翻页取任务 | 用户 2026-09-10 裁定入口形态 |
+| 2 | `internal_site_spider.list_tasks` | 加 `offset` 参数;**修掉页大小写死 16 的分页 bug** | 见下 |
+| 3 | `audio/source_factory` | `probe_duration` 从 `AudioSourceFactory` 方法抽成**模块级函数** | learn 拿到 wav 后要回填真实时长,那条路径不经过 `AudioSourceFactory`,但需同一份 ffprobe 逻辑与失败语义。方法保留为一行委托 |
+| 4 | `learn.py`(新增) | `iter_course_tasks`(翻页代数唯一定义处)+ `with_duration_resolution`(时长回填包装器) | 见下 |
+| 5 | `cli.py` | `learn` 子命令 + `_build_learn_provider`(**自建 refiner + transcriber**) | 见下 |
+
+**页大小写死 16 的分页 bug(本次修复)**:
+旧 `list_tasks` 把 `"limit": 16` 硬编码进 pagelist params,而本地只收 `limit` 条 ——
+`--limit 10` 时每页静默丢弃 6 条,100 条视频的目录会漏掉 60 条且**无任何报错**。
+定稿:**页大小 == 翻页步长 == `--limit`**,两者由同一个变量驱动。
+
+**"不影响单条转写逻辑"如何做到**:`fetch_asset` / `process_asset` /
+`VideoLearningAgent.run` **一行未改**。时长回填靠**包装器**在 asset 到手后、
+`process_asset` 看到它之前改 `task.expected_duration`(依赖 `main.py:_process_one`
+Step 1 → Step 2 的调用顺序)。免费:bill-jc 路径必须先抽音才有得转写,
+包装器运行时 wav 一定已在磁盘上,ffprobe 是纯读。
+
+**探测失败不覆盖占位值**:`probe_duration` 返 0(ffprobe 缺失/超时/解析失败)时
+保留原值 3600。覆盖成 0 会让 `char_per_second = chars / 0` → inf,踩爆
+`max_char_per_second` 上限,把正常视频误判成幻觉。
+
+**Refiner 必须早于质量门控(装配注意)**:`build_text_provider` 的 auto-construct
+会建 `StreamingTranscriber(cfg)` **不带 refiner**,Level 4 云端清理被
+`_maybe_refine` 静默跳过,未清理文本直接进质量门控。2026-09-10 实测:未注入
+score **45(不过)** vs 注入后 **88(过)**。`learn` 因此像 spike 一样自建
+refiner(with LLM)+ transcriber 再注入。(`process_asset` Step 4 也 refine,
+但那在门控**之后**,救不回 fail。)
+
+**不传 browser_driver**:批量路径不需要截图,且 `main.py:_stop_chrome_session`
+会无条件对已注入的 driver 调 `disconnect()`(`ctx.close` + `browser.close`)
+—— `run()` 每页调一次,可能关掉**下一页还要借 cookie** 的那个 Chrome 会话。
+当前 `chrome_session.enabled` 默认 False,该风险未激活;`learn` 主动规避。
+
+**去重的实际前提(2026-09-10 实测发现)**:
+`logs/transcribed_history.jsonl` 由 `agent.run` 在每条成功后写入,而
+**`scripts/spike_bill_jc_full.py` 从不写它**(spike 直接调 fetch/process,不经过
+agent)。所以既往用 spike 跑过的 bill-jc 视频**不在** history 里,FR-9.6 去重对
+它们无效 —— `vla learn` 会重跑。`--dry-run` 的"已转写 N 条"反映的正是 history
+的真实内容,不是磁盘上 transcript 的数量。
+
+**验证**:全量 `18 failed / 739 passed`。18 项(16 `test_e2e` + 2 `test_quality_checker`)
+为**既有失败**(与 72b269a 基线逐项一致),本次新增 0 个失败;`739 = 709 + 30`,
+新增测试 = 7(spider 分页)+ 7(`probe_duration`)+ 16(`learn`)。
+
+**真机验证(2026-09-10)**:对用户给定的课程目录页跑 `vla learn --dry-run`,
+从真实 API 翻出 `目录共 5250 条 / 已转写 0 条`(525 页 × 10 条,offset 0→5250
+逐页递增,空页终止)。这同时验证了 FR-11.3(页大小==步长,无跳号)与
+FR-11.5(只认空页)。
+
 ### FR-1 视频源管理
 
 | ID     | 描述                                                      | 优先级 |
@@ -606,6 +664,53 @@ accumulated_duration_sec = 0
 - 用户当前没有明确的视频组字段(FR-10.3)
 - 实际场景下,**同一 B站视频组里的视频**才会被批量观看
 - 用 group_id(暂时 = 视频组名字)作为配额累计单位,跨组可以独立累计
+
+---
+
+### FR-11 课程目录批量转写(2026-09-10 新增)
+
+**背景**:bill-jc 课程目录动辄几十上百条视频,原来只能一条条粘 URL 跑 skill
+(单视频 scope,见 `.claude/skills/vla-learn-bill-jc/SKILL.md`)。需要一个入口:
+给出**目录页 URL 的两个参数**,自动翻页取任务并复用既有单条转写链路。
+
+| ID       | 描述                                                                                     | 优先级 |
+| -------- | -------------------------------------------------------------------------------------- | --- |
+| FR-11.1  | 新增子命令 `vla learn --college-id <cid> --catalog-id <catalogId>`                          | P0  |
+| FR-11.2  | 两个参数取自课程目录页 URL:`/kng/#/list?catalogId=<X>&cid=<Y>`,其中 **`cid` 就是 collegeId**    | P0  |
+| FR-11.3  | 翻页:`list_tasks(offset=N)` 循环取任务,**页大小 == 翻页步长 == `--limit`(默认 10)**                | P0  |
+| FR-11.4  | 停法只有两条:① 目录翻完(空页)② 累计配额到且 `on_exhausted=stop_session`(FR-9.4)                | P0  |
+| FR-11.5  | **页内条数 < limit 不当作翻完** —— 服务端若压低页大小上限,"不满页=最后一页"会静默截断整个课程                    | P0  |
+| FR-11.6  | 整页都已转写(FR-9.6 去重后 `processed=0`)→ **照常翻页**,不是停                                        | P0  |
+| FR-11.7  | 每条任务转为 VideoTask 时 `expected_duration` 由 ffprobe 实测**回填**(替换 3600 占位)                  | P0  |
+| FR-11.8  | 探测失败(ffprobe 缺失/超时/解析失败)时**保留占位值,不覆盖为 0** —— 覆盖会让 cps = chars/0 踩爆上限误判幻觉 | P0  |
+| FR-11.9  | **单条转写链路零改动**:`fetch_asset` / `process_asset` / `VideoLearningAgent.run` 语义不变,回填靠包装器    | P0  |
+| FR-11.10 | `--dry-run` 只翻页列任务,不装配 transcriber / refiner / LLM(零凭据零副作用)                          | P1  |
+
+**翻页代数定稿(2026-09-10)**:
+
+```text
+offset = 0
+while True:
+    page = list_tasks(catalog_id, limit=limit, offset=offset)
+    if not page: break                    # ① 翻完 —— 唯一终止信号
+    agent.run(page)                       # 去重/配额/6h 全在既有 run 内
+    if not quota.should_continue(): break # ② 配额到 + stop_session
+    offset += limit                       #   页大小与步长必须相等
+```
+
+**页大小写死 16 的坑(本次修复)**:旧 `list_tasks` 把 `limit: 16` 硬编码进
+pagelist params,而本地只收 `limit` 条 —— `--limit 10` 时每页静默丢弃 6 条,
+100 条视频的目录会漏掉 60 条且**无任何报错**。
+
+**为什么时长回填免费**:bill-jc 路径 ② 必须先抽音(m3u8 → wav)才有得转写,
+所以包装器运行时 wav 一定已在磁盘上,ffprobe 是纯读。占位值 3600 会让
+quota 明显高估、cps 明显低估(chars/3600 远小于真实语速),回填是修正而非优化。
+
+**Refiner 必须早于质量门控(装配注意)**:`build_text_provider` 的 auto-construct
+会建 `StreamingTranscriber(cfg)` **不带 refiner**,于是 Level 4 云端清理被
+`_maybe_refine` 静默跳过,未清理文本进质量门控。2026-09-10 实测:未注入
+score 45(不过)vs 注入后 88(过)。`learn` 因此自建 refiner + transcriber 再注入。
+(`process_asset` Step 4 也 refine,但那在门控**之后**,救不回 fail。)
 
 ---
 

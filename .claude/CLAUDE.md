@@ -39,10 +39,11 @@
 
 ```text
 src/vla/
-├── cli.py             # typer 入口(vla doctor / process / batch)
+├── cli.py             # typer 入口(vla doctor / process / batch / learn / summarize)
 ├── config.py          # 配置加载(.env + config/vla.yaml)
 ├── models.py          # pydantic 数据模型
 ├── main.py            # 主调度(Phase 8)
+├── learn.py           # 课程目录批量入口(FR-11:翻页 + 时长回填,不改单条链路)
 ├── llm/               # 统一 LLM 客户端(Phase 1)
 ├── source/            # 视频源工厂(yt-dlp / ffmpeg 录屏,Phase 2)
 ├── subtitle/          # 三级字幕策略(Phase 3)
