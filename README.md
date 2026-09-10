@@ -135,6 +135,15 @@ uv run vla process \
 uv run vla batch --config ./videos.yaml
 ```
 
+### Claude skill 入口(2026-09-10)
+
+项目根 `.claude/skills/` 下挂了项目级 skill,直接 `/<name>` 触发:
+
+| Skill | 触发 | 适用场景 |
+|---|---|---|
+| `/vla-implement-phase` | "实现 Phase N" / "继续 Phase" | 按 `implementation-plan.md` 推进 TDD |
+| `/vla-learn-bill-jc` | "学 bill-jc 视频" / "跑 bill-jc 转写" | b-learning.bill-jc.com 单视频端到端转写(只支持 bill-jc,其他平台用 `vla process`) |
+
 
 ### `videos.yaml` 写法(FR-10.5)
 
