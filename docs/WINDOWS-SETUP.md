@@ -765,10 +765,9 @@ cd video-learning-agent
 claude
 
 # 关键文件(项目已含):
-#   .claude/CLAUDE.md          — 项目铁三角(SSOT = requirements.md)
-#   .claude/skills/            — 自定义 skill(vla-implement-phase / vla-learn-bill-jc)
+#   .claude/CLAUDE.md          — 项目规范(SSOT = requirements.md)
+#   .claude/skills/            — 自定义 skill(vla-learn-bill-jc)
 #   requirements.md            — 需求 SSOT(改需求先改这里)
-#   implementation-plan.md     — 9 Phase 实施计划
 ```
 
 #### 3.4 常用命令

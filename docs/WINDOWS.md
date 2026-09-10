@@ -230,6 +230,5 @@ uv run vla doctor
 ## 十、相关文档
 
 - `requirements.md` — 需求 SSOT(FR-1 ~ FR-10)
-- `implementation-plan.md` — 9 个 Phase 实施计划
 - `README.md` — 项目门户
 - `docs/superpowers/specs/2026-09-09-bill-jc-spider-impl-design.md` — bill-jc spider 设计 spec
