@@ -7,8 +7,15 @@
 
 为什么不直接覆盖 .transcript.txt?
 - 用户/审计需要保留原 Whisper 输出(可能是模型对比、回放)
-- cleaned.txt 是"二次加工",可追溯
-- 与 FR-2.15b (transcript 落盘) 模式一致:同目录 `<stem>.cleaned.txt`
+- Level 4 结果是"二次加工",写成独立文件可追溯
+- 与 FR-2.15b (transcript 落盘) 模式一致
+
+落盘文件名(2026-09-10 厘清):活跃路径是 `streaming.py::_maybe_refine` **内联**
+写 `<stem>.refined.txt`(Level 4 产物),不经过下面的 `write_cleaned_transcript()`
+helper。那个 helper 目前只剩两个调用方:`quality/pipeline.py`(写
+`<stem>.cleaned.txt`,但该模块**只被 `__init__` re-export,全仓无实例化**)
+和 `scripts/spike_refiner_integration.py`(spike)。Level 1(`clean_transcript`)
+结果自 2026-09-10 起**不落盘**。
 
 配额归类:
 - 项目 SSOT:"云端 LLM 限定两件事: ① 字幕质量检查 ② 6h 批量总结"
@@ -85,7 +92,7 @@ class SubtitleRefiner:
     用法:
         refiner = SubtitleRefiner(config, llm_client)
         result = refiner.refine(text, title="xxx")
-        # result.cleaned_text → 写到 <stem>.cleaned.txt
+        # result.cleaned_text → 活跃路径写 <stem>.refined.txt(见 streaming.py)
         # result.corrections → 审计 / 词典生成
     """
 

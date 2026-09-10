@@ -7,7 +7,7 @@
 - 超长输入(> ~12000 字)送 LLM 前**三明治抽样**(头/中/尾各 4000 字),
   避免纯截断丢后半段,同时覆盖视频开场 / 主体 / 收尾关键位置
 - 输出 SummaryResult;失败 fallback(不抛错,主流程不中断)
-- 落盘 helper:`<id>.summary.txt`(与 cleaned.txt 平级)
+- 落盘 helper:`summaries/<id>_<safe_title>.summary.txt`(与 transcripts/ 分目录)
 
 LLM 注入契约(2026-09-10):
 - `VideoSummarizer(cfg)` 构造期**零依赖**(不需要 api_key),同 QualityChecker /
@@ -20,7 +20,7 @@ LLM 注入契约(2026-09-10):
 为什么不在 Refiner 里做:
 - Refiner 是"清理"(preserve original length),与"压缩"语义不同
 - Refiner 输入是 transcript,摘要输入是 cleaned_text(更干净,压缩效果更好)
-- 长视频同时保留 cleaned.txt(全文本)+ .summary.txt(摘要),职责清晰
+- 长视频同时保留 refined.txt(全文本)+ .summary.txt(摘要),职责清晰
 
 配额归类:
 - 项目 SSOT:"云端 LLM 限定两件事: ① 字幕质量检查 ② 6h 批量总结"

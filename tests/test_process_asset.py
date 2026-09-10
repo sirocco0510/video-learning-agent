@@ -60,7 +60,14 @@ async def test_process_asset_wav_transcribe_passes(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_process_asset_wav_quality_fail_keeps_audio(tmp_path):
+async def test_process_asset_wav_quality_fail_still_deletes_audio(tmp_path):
+    """2026-09-10 FR-3.7 修正:转写成功即删音频 —— 质量失败也不留。
+
+    旧策略「质量失败 → 保留 .wav 供重转写」已作废。新理由:重跑 refine /
+    summary 只需**文本**(transcript.txt 已落盘,Refiner 吃的是文本),
+    只有重**转写**才需要 wav,而 bill-jc 走 m3u8 直抽 + 30 分钟上限,
+    重抽成本有界。
+    """
     wav = tmp_path / "a.wav"
     wav.write_bytes(b"\x00")
     p = _make_provider()
@@ -70,8 +77,41 @@ async def test_process_asset_wav_quality_fail_keeps_audio(tmp_path):
     result = await p.process_asset(asset, _task())
     assert result is None
     p.log.log_quality_fail.assert_called_once()
-    # 质量 fail → 不 unlink,保留供 retry(FR-3.7 v3.2)
-    assert wav.exists()
+    # 转写已成功 → 音频已删,质量失败也留不下
+    assert not wav.exists()
+
+
+@pytest.mark.asyncio
+async def test_process_asset_deletes_audio_before_quality_gate(tmp_path):
+    """删除时机在质量门控**之前** —— 门控判 fail 时 wav 已经不在了。"""
+    wav = tmp_path / "a.wav"
+    wav.write_bytes(b"\x00")
+    p = _make_provider()
+    asset = Asset(text=None, source="whisper_download", audio_path=wav, deletable=True)
+    p.transcriber.transcribe = MagicMock(return_value="text")
+    seen: list[bool] = []
+    p.checker.check = MagicMock(side_effect=lambda **kw: (
+        seen.append(wav.exists()), _qr_fail(30, "低质")
+    )[1])
+
+    await p.process_asset(asset, _task())
+
+    assert seen == [False], "质量门控被调用时 wav 应已删除"
+
+
+@pytest.mark.asyncio
+async def test_process_asset_not_deletable_keeps_audio(tmp_path):
+    """deletable=False 的 asset(字幕命中,无 wav)不受影响。"""
+    wav = tmp_path / "a.wav"
+    wav.write_bytes(b"\x00")
+    p = _make_provider()
+    asset = Asset(text=None, source="whisper_download", audio_path=wav, deletable=False)
+    p.transcriber.transcribe = MagicMock(return_value="text")
+    p.checker.check = MagicMock(return_value=_qr_pass(90))
+
+    await p.process_asset(asset, _task())
+
+    assert wav.exists(), "deletable=False 时不该删"
 
 
 @pytest.mark.asyncio

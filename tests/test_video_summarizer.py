@@ -9,7 +9,7 @@ Refiner 压缩影响,导致摘要静默不产出。
 为什么不在 Refiner 里做:
 - Refiner 是"清理"(preserve original + 修正),与"压缩"语义不同
 - Refiner 输入是 transcript,摘要输入是 cleaned_text(更干净,压缩效果更好)
-- 长视频同时保留 cleaned.txt(全文本)+ .summary.txt(摘要),职责清晰
+- 长视频同时保留 refined.txt(全文本)+ .summary.txt(摘要),职责清晰
 """
 
 from __future__ import annotations

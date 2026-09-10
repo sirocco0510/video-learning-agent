@@ -5,7 +5,8 @@
 - transcribe(audio_path) 只做 Whisper;ffmpeg 抽音已迁到 extract.extract_audio(2026-09-09 T2)
 - FR-3.3 删视频源已迁到 fetch_asset(2026-09-09 T7);transcribe 不再 unlink
 - WhisperModel 懒加载,允许测试注入
-- cleanup() 静态方法给质量检查通过后调用
+- cleanup() 静态方法供调用方在**转写成功后**删音频(2026-09-10 FR-3.7:
+  不再等质量门控)
 
 测试策略:注入 mock WhisperModel;不再 patch subprocess(ffmpeg 已不在此模块)。
 """
@@ -237,6 +238,62 @@ class TestLazyModelLoad:
             mock_model.transcribe.assert_called_once()
 
 
+class TestLocalOnlyModelLoad:
+    """2026-09-10:加载必须先 `local_files_only=True`。
+
+    实测 `huggingface_hub` 会向 huggingface.co 做一次 metadata 校验请求,
+    网络不可达时在超时重试里干等 **150s**(`small` 冷加载 150.6s → 本地
+    0.5s,300×),而实际转写只要 24s。这与红线「字幕永远本地」同向。
+    """
+
+    @staticmethod
+    def _fake_model() -> MagicMock:
+        inst = MagicMock()
+        inst.transcribe.return_value = (
+            make_fake_segments("x"),
+            MagicMock(language_probability=1.0),
+        )
+        return inst
+
+    def test_local_files_only_true_on_first_attempt(self, cfg, audio_file):
+        """首次加载带 local_files_only=True(不碰网络)。"""
+        with patch("vla.transcribe.streaming.WhisperModel") as mock_cls:
+            mock_cls.return_value = self._fake_model()
+
+            StreamingTranscriber(cfg, model=None).transcribe(audio_file)
+
+            mock_cls.assert_called_once()
+            assert mock_cls.call_args.kwargs["local_files_only"] is True
+
+    def test_falls_back_to_download_when_local_missing(self, cfg, audio_file):
+        """本地没有该模型 → 回落到允许下载(仅此一次)。"""
+        with patch("vla.transcribe.streaming.WhisperModel") as mock_cls:
+            mock_cls.side_effect = [
+                RuntimeError("model not found in local cache"),
+                self._fake_model(),
+            ]
+
+            StreamingTranscriber(cfg, model=None).transcribe(audio_file)
+
+            assert mock_cls.call_count == 2
+            # 第一次:只认本地
+            assert mock_cls.call_args_list[0].kwargs["local_files_only"] is True
+            # 第二次:允许下载
+            assert mock_cls.call_args_list[1].kwargs.get("local_files_only") is not True
+            # 两次都用同一份 model/compute_type
+            for call in mock_cls.call_args_list:
+                assert call.args[0] == "small"
+                assert call.kwargs["compute_type"] == "int8"
+
+    def test_download_failure_propagates(self, cfg, audio_file):
+        """本地没有 + 下载也失败 → 异常上抛(不静默吞)。"""
+        with patch("vla.transcribe.streaming.WhisperModel") as mock_cls:
+            mock_cls.side_effect = RuntimeError("offline")
+
+            with pytest.raises(RuntimeError, match="offline"):
+                StreamingTranscriber(cfg, model=None).transcribe(audio_file)
+
+
 # ---------------- cleanup 静态方法 ----------------
 
 
@@ -274,21 +331,25 @@ class TestCleanup:
         StreamingTranscriber.cleanup()
 
 
-# ---------------- 音频文件保留到 cleanup ----------------
+# ---------------- 音频文件保留到 cleanup(本模块不删,由调用方删) ----------------
 
 
 class TestAudioFileLifecycle:
     def test_audio_kept_after_successful_transcribe(self, transcriber, audio_file):
-        """transcribe() 成功 → 音频文件保留(等 cleanup() / 质量检查通过后再删)。"""
+        """transcribe() 成功 → 本模块**不删**音频(FR-3.7 2026-09-10:删的时机
+        是"转写成功",但执行者是调用方 main_provider,不是这里)。"""
         transcriber.transcribe(audio_file)
         assert audio_file.exists()
 
 
-# ---------------- FR-3.8 / FR-2.15c:落盘 transcript.txt + cleaned.txt ----------------
+# ---------------- FR-3.8 / FR-2.15c:落盘 transcript.txt(+ 可选 refined.txt) ----------------
 
 
 class TestTranscriptAndCleanedWrite:
-    """FR-3.8:转写后写 logs/transcripts/<stem>.transcript.txt + .cleaned.txt。"""
+    """FR-3.8:转写后写 logs/transcripts/<stem>.transcript.txt。
+
+    .cleaned.txt 自 2026-09-10 起不再落盘(见下面 postprocess 那条测试)。
+    """
 
     def test_transcribe_writes_transcript_txt(
         self, tmp_path, mock_model
@@ -323,10 +384,14 @@ class TestTranscriptAndCleanedWrite:
         assert "你好" in transcript_path.read_text(encoding="utf-8")
         assert "世界" in transcript_path.read_text(encoding="utf-8")
 
-    def test_transcribe_with_postprocess_writes_cleaned_txt(
+    def test_transcribe_with_postprocess_does_not_write_cleaned_txt(
         self, tmp_path, mock_model
     ) -> None:
-        """postprocess_enabled=True → 额外写 .cleaned.txt。"""
+        """postprocess_enabled=True → **不再**写 .cleaned.txt(2026-09-10)。
+
+        cleaned.txt 是只写不读的中间产物(全仓无读取方);Level 1 结果
+        只留在内存里,作质量门控输入 + refiner 输入。
+        """
         cfg = VLAConfig.model_validate({
             "storage": {"tmp_dir": "./tmp", "auto_cleanup_on_pass": True},
             "whisper": {
@@ -351,11 +416,17 @@ class TestTranscriptAndCleanedWrite:
         audio_file.write_bytes(b"x")
         transcriber = StreamingTranscriber(cfg, model=mock_model)
 
-        transcriber.transcribe(audio_file)
+        returned = transcriber.transcribe(audio_file)
 
         transcripts_dir = tmp_path / "logs" / "transcripts"
         assert (transcripts_dir / "test.transcript.txt").exists()
-        assert (transcripts_dir / "test.cleaned.txt").exists()
+        assert not (transcripts_dir / "test.cleaned.txt").exists()
+        # 清理确实跑了,只是结果留在内存里:mock 两行「你好」「世界」都短于
+        # postprocess_min_line_chars=8 → 被合并成一行;而落盘的原始
+        # transcript.txt 仍保留换行。返回的是清理后的文本 = 下游拿得到。
+        assert "\n" not in returned, "返回值应是 Level 1 清理后的(已合并碎片)"
+        assert "你好" in returned and "世界" in returned
+        assert "\n" in (transcripts_dir / "test.transcript.txt").read_text(encoding="utf-8")
 
 
 # ---------------- FR-3.9 / FR-2.15c Level 4:SubtitleRefiner 串接 ----------------
@@ -447,8 +518,8 @@ class TestRefinerIntegration:
         refined_path = transcripts_dir / "BV1refine.refined.txt"
         assert refined_path.exists()
         assert refined_text in refined_path.read_text(encoding="utf-8")
-        # cleaned.txt 也保留供审计
-        assert (transcripts_dir / "BV1refine.cleaned.txt").exists()
+        # cleaned.txt 不再落盘(2026-09-10)
+        assert not (transcripts_dir / "BV1refine.cleaned.txt").exists()
         # transcript.txt 也保留
         assert (transcripts_dir / "BV1refine.transcript.txt").exists()
         # 返回 refined_text

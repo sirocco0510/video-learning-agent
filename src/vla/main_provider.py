@@ -213,11 +213,13 @@ class RealTextProvider:
 
         步骤:
           ① 转写(if needs_transcribe) → 失败 log + return None
-          ② 质量门控 → 失败 log + 不 unlink(FR-3.7 v3.2 retry 保留) + browser 源 mark_unavailable
+          ② 质量门控 → 失败 log + browser 源 mark_unavailable(wav 已在 ① 删掉)
           ③ Refine(可选,cfg.quality_check.refine_enabled) → 失败 log warning + 用原文
           ④ save_transcribed(落盘 transcribed/)
-          ⑤ cleanup:unlink wav if deletable(best-effort)
-          ⑥ return ProcessResult
+          ⑤ return ProcessResult
+
+        音频生命周期(2026-09-10 FR-3.7 修正):
+          ① 转写成功 → 立即 unlink wav(不等质量门控);转写失败 → 保留供排查
         """
         # Step 1: 转写
         if asset.needs_transcribe:
@@ -235,6 +237,20 @@ class RealTextProvider:
                     asset.audio_path.with_suffix(".transcribed.txt").touch()
                 except Exception as e:
                     logger.warning("touch sidecar 失败 %s: %s", asset.audio_path, e)
+
+            # 2026-09-10 FR-3.7 修正:音频**转写成功即删**,不再等质量门控。
+            # 旧策略是"质量失败 → 保留 .wav 供重转写",已作废 —— 重跑 refine /
+            # summary 只需**文本**(transcript.txt 已落盘,Refiner 吃的是文本),
+            # 只有重**转写**才需要 wav,而 bill-jc 走 m3u8 直抽(FR-2.30)+
+            # 30 分钟上限(FR-2.30.1),重抽成本有界。
+            # 位置在 Step 2 质量门控**之前**,所以门控判 fail 时 wav 已不在。
+            # 转写失败(上面的 except 分支)仍保留 wav 供排查 —— 那是 FR-3.5。
+            if asset.deletable and asset.audio_path is not None and asset.audio_path.exists():
+                try:
+                    asset.audio_path.unlink()
+                    logger.info("🗑️ 转写成功 → 删音频: %s", asset.audio_path)
+                except Exception as e:
+                    logger.warning("删音频失败 %s,主流程继续: %s", asset.audio_path, e)
         else:
             text = asset.text
 
@@ -296,12 +312,8 @@ class RealTextProvider:
             duration_sec=task.expected_duration,
         )
 
-        # Step 6: 清理 wav(best-effort)
-        if asset.deletable and asset.audio_path is not None and asset.audio_path.exists():
-            try:
-                asset.audio_path.unlink()
-            except Exception as e:
-                logger.warning("删音频失败 %s,主流程继续: %s", asset.audio_path, e)
+        # (Step 6 已删除,2026-09-10 FR-3.7:音频改在 Step 1 转写成功后立即删,
+        #  不再等质量门控 —— 见上面的删除块)
 
         return ProcessResult(
             text=text, qr=qr,
