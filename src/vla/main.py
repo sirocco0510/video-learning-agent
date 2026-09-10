@@ -42,7 +42,11 @@ logger = logging.getLogger(__name__)
 
 
 class NotifierLike(Protocol):
-    """通知(MacOSNotifier — info / warning)。"""
+    """通知(NotifierLike — MacOSNotifier on darwin / NullNotifier 其他平台)。
+
+    2026-09-10 轻量化:跨平台 notifier 由 `vla.ui.notifier.create_notifier()` 装配,
+    Windows/Linux 走 NullNotifier(静默 + 默认按钮)。
+    """
 
     def info(self, title: str, message: str) -> None: ...
 
@@ -126,13 +130,14 @@ class VideoLearningAgent:
         self._browser_driver = browser_driver
         self._screenshot = screenshot_controller
         self._chrome_session_ready = False  # _start_chrome_session 后才置 True
-        # transcribed_dir(Phase 7 读盘需要)
+        # transcribed_dir(本次写盘,今日 transcripts/)+ transcribed_root(整棵树,总结读盘)
         self.transcribed_dir = log.transcribed_dir
+        self.transcribed_root = log.transcribed_root
         # FR-6.6:失败上限弹窗(默认按 cfg.logging 构造)
         self.failure_alert = failure_alert or FailureAlert(
             threshold=cfg.logging.log_alert_threshold,
             log=log,  # type: ignore[arg-type]  # duck typing:TranscriptionLog 满足 _TranscriptionLogLike
-            notifier=notifier,  # type: ignore[arg-type]  # MacOSNotifier 满足 _NotifierLike
+            notifier=notifier,  # type: ignore[arg-type]  # NotifierLike 满足 _NotifierLike
             enabled=cfg.logging.log_alert_enabled,
         )
 
@@ -314,7 +319,7 @@ class VideoLearningAgent:
         """配额触发时调 summarize_batch,写盘 + 清空 transcribed。"""
         self.quota.drain()
         content = self.summarizer.summarize_batch(
-            self.transcribed_dir,
+            self.transcribed_root,
             group_title=group_title,
             clear_after=True,
         )
@@ -351,6 +356,9 @@ class TranscriptionLogLike(Protocol):
 
     @property
     def transcribed_dir(self) -> Path: ...
+
+    @property
+    def transcribed_root(self) -> Path: ...
 
     def log_quality_fail(self, video_id: str, title: str, url: str, result: QualityResult, text: str) -> None: ...
     def save_transcribed(self, video_id: str, title: str, text: str, quality: QualityResult, source: str, duration_sec: int) -> Path: ...

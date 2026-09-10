@@ -58,15 +58,30 @@ def _now_iso() -> str:
 
 
 class TranscriptionLog:
-    """转写日志 + 字幕原文落盘。"""
+    """转写日志 + 字幕原文落盘。
+
+    目录布局(2026-09-10 改为 date + type 双层分组,参考 audio_downloads/):
+        <log_dir>/transcribed/<YYYY-MM-DD>/
+            ├── transcripts/<id>_<title>.txt         # 转写 + 质量门控后的字幕原文
+            └── summaries/<id>_<title>.summary.txt   # 长视频单视频摘要(FR-2.15d)
+
+    字段语义:
+    - `transcribed_root` = `<log_dir>/transcribed` (整棵树,总结读盘走 rglob)
+    - `transcribed_dir`  = `<log_dir>/transcribed/<today>/transcripts` (本次写盘目录)
+    - `summaries_dir`    = `<log_dir>/transcribed/<today>/summaries` (summary 写盘目录)
+    """
 
     def __init__(self, log_dir: Path) -> None:
         self.log_dir = Path(log_dir)
-        self.transcribed_dir = self.log_dir / "transcribed"
+        self.transcribed_root = self.log_dir / "transcribed"
+        today = datetime.now().strftime("%Y-%m-%d")
+        self.transcribed_dir = self.transcribed_root / today / "transcripts"
+        self.summaries_dir = self.transcribed_root / today / "summaries"
         self.failed_texts_dir = self.log_dir / "failed_texts"
         # 初始化时建好子目录,让 save_* 路径上不存在不需要 mkdir
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.transcribed_dir.mkdir(parents=True, exist_ok=True)
+        self.summaries_dir.mkdir(parents=True, exist_ok=True)
         self.failed_texts_dir.mkdir(parents=True, exist_ok=True)
 
     # ---------------- 失败日志 ----------------
@@ -162,11 +177,13 @@ class TranscriptionLog:
         n_transcribe_fail = self._count_csv_rows(self.log_dir / "transcribe_fail.csv")
         n_quality_fail = self._count_csv_rows(self.log_dir / "quality_fail.csv")
         n_transcribed = len(list(self.transcribed_dir.glob("*.txt")))
+        n_summaries = len(list(self.summaries_dir.glob("*.txt")))
         n_failed_texts = len(list(self.failed_texts_dir.glob("*.txt")))
         return (
             f"transcribe_fail: {n_transcribe_fail} | "
             f"quality_fail: {n_quality_fail} | "
             f"transcribed: {n_transcribed} | "
+            f"summaries: {n_summaries} | "
             f"failed_texts: {n_failed_texts}"
         )
 

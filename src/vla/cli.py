@@ -244,7 +244,7 @@ def _assemble_components(cfg_path: Path) -> dict:
     from vla.state.plugin_status import PluginStatus
     from vla.state.quota import QuotaManager
     from vla.summary.llm_summarizer import LLMSummarizer
-    from vla.ui.macos_notify import MacOSNotifier
+    from vla.ui.notifier import create_notifier
 
     cfg = VLAConfig.from_yaml(cfg_path)
 
@@ -256,7 +256,10 @@ def _assemble_components(cfg_path: Path) -> dict:
         cfg.summary.notes_file,
     )
     summarizer.cfg = cfg
-    notifier = MacOSNotifier()
+    # 2026-09-10 轻量化:跨平台 notifier — macOS 走 MacOSNotifier,
+    # Windows/Linux/CI 走 NullNotifier(策略 ② 弹窗已被 TabAudioRecorder
+    # 移除,Windows 上 ask_open_browser 直接返 "skip")。
+    notifier = create_notifier()
     plugin_status = PluginStatus()
 
     return {
@@ -297,7 +300,7 @@ def _build_real_provider(
 
     Args:
         cfg: VLAConfig
-        notifier: MacOSNotifier(必需 — FR-2.5/2.6 弹窗)
+        notifier: NotifierLike(MacOSNotifier / NullNotifier,跨平台)
         plugin_status: PluginStatus(必需 — session 单例)
 
     Returns:
@@ -457,7 +460,7 @@ def summarize(
     comps = _assemble_components(config_path)
 
     content = comps["summarizer"].summarize_batch(
-        comps["log"].transcribed_dir,
+        comps["log"].transcribed_root,
         group_title=comps["cfg"].summary.notes_section_header.lstrip("# ").strip() or None,
         clear_after=clear,
     )

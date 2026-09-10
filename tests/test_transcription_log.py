@@ -3,7 +3,8 @@
 设计:
 - log_transcribe_fail() → 追加到 transcribe_fail.csv(列:timestamp, id, title, url, stage, error)
 - log_quality_fail() → 追加到 quality_fail.csv + 存原文到 failed_texts/<id>_<title短>.txt
-- save_transcribed() → 存原文到 transcribed/<id>_<title短>.txt(FR-7.7,2026-09 新增)
+- save_transcribed() → 存原文到 transcribed/<YYYY-MM-DD>/transcripts/<id>_<title短>.txt
+  (FR-7.7,2026-09 新增;2026-09-10 调整为 date+type 双层子目录,参考 audio_downloads/)
 - save_failed_text() → 存原文到 failed_texts/<id>_<title短>.txt(FR-7.3,显式调用场景)
 - 目录不存在时自动创建
 - 标题做 safe_filename 清洗(/ \\ : * ? \" < > | → _)
@@ -48,10 +49,18 @@ def sample_quality() -> QualityResult:
 
 class TestConstruct:
     def test_creates_subdirs_on_init(self, log_dir):
-        """构造时自动创建 transcribed/ 和 failed_texts/ 子目录。"""
+        """构造时自动创建 transcribed/<today>/transcripts/ + summaries/ + failed_texts/。
+
+        2026-09-10 结构调整:date + type 双层分组,顶层 transcribed/ + 今日子目录 + 类型子目录。
+        """
         assert not log_dir.exists()
-        TranscriptionLog(log_dir)
+        log = TranscriptionLog(log_dir)
+        # 顶层根
         assert (log_dir / "transcribed").is_dir()
+        # 今日 transcripts/ + summaries/
+        assert log.transcribed_dir.is_dir()
+        assert log.summaries_dir.is_dir()
+        # 失败字幕目录(不变)
         assert (log_dir / "failed_texts").is_dir()
 
     def test_accepts_existing_log_dir(self, log_dir):
@@ -188,7 +197,10 @@ class TestLogQualityFail:
 
 class TestSaveTranscribed:
     def test_writes_text_to_transcribed_dir(self, transcriber_log, log_dir, sample_quality):
-        """save_transcribed → 写 transcribed/<id>_<title短>.txt,header 含来源/质量/时长。"""
+        """save_transcribed → 写 transcribed/<YYYY-MM-DD>/transcripts/<id>_<title短>.txt。
+
+        2026-09-10 结构调整:date + type 双层子目录。
+        """
         transcriber_log.save_transcribed(
             video_id="BV1xxx",
             title="Python 装饰器教程",
@@ -197,10 +209,14 @@ class TestSaveTranscribed:
             source="whisper",
             duration_sec=1800,
         )
-        text_files = list((log_dir / "transcribed").glob("*.txt"))
+        # 递归找 transcripts/ 下的所有 .txt(适配 date 子目录层级)
+        text_files = list((log_dir / "transcribed").rglob("transcripts/*.txt"))
         assert len(text_files) == 1
         f = text_files[0]
+        # 路径形如:logs/transcribed/2026-09-10/transcripts/BV1xxx_Python 装饰器教程.txt
         assert f.stem.startswith("BV1xxx_")
+        # 父目录应该是 type 子目录(不是 date)
+        assert f.parent.name == "transcripts"
         content = f.read_text(encoding="utf-8")
         # header
         assert "# Python 装饰器教程" in content
@@ -217,7 +233,7 @@ class TestSaveTranscribed:
                 video_id="v1", title="t", text="新文本", quality=sample_quality,
                 source="whisper", duration_sec=100,
             )
-        text_files = list((log_dir / "transcribed").glob("*.txt"))
+        text_files = list((log_dir / "transcribed").rglob("transcripts/*.txt"))
         assert len(text_files) == 1
 
     def test_safe_title_sanitizes_special_chars(self, transcriber_log, log_dir, sample_quality):
@@ -226,7 +242,7 @@ class TestSaveTranscribed:
             video_id="v1", title='教程:Python/进阶\\核心*知识?"<>|',
             text="x", quality=sample_quality, source="whisper", duration_sec=100,
         )
-        text_files = list((log_dir / "transcribed").glob("*.txt"))
+        text_files = list((log_dir / "transcribed").rglob("transcripts/*.txt"))
         assert len(text_files) == 1
         # 文件名应该只含字母数字/中文/_/-
         for char in ["/", "\\", ":", "*", "?", '"', "<", ">", "|"]:
@@ -239,7 +255,7 @@ class TestSaveTranscribed:
             video_id="v1", title=long_title, text="x",
             quality=sample_quality, source="whisper", duration_sec=100,
         )
-        text_files = list((log_dir / "transcribed").glob("*.txt"))
+        text_files = list((log_dir / "transcribed").rglob("transcripts/*.txt"))
         assert len(text_files) == 1
         # 文件 stem 应该在合理范围(<80 字符)
         assert len(text_files[0].stem) < 80
@@ -281,7 +297,7 @@ class TestSaveFailedText:
 
 class TestSummary:
     def test_returns_counts(self, transcriber_log, log_dir, sample_quality):
-        """summary() 返回带计数的人类可读摘要。"""
+        """summary() 返回带计数的人类可读摘要(含 summaries,2026-09-10 新增)。"""
         transcriber_log.log_transcribe_fail("v1", "t1", "u", "x", "e")
         transcriber_log.log_transcribe_fail("v2", "t2", "u", "x", "e")
         transcriber_log.log_quality_fail("v3", "t3", "u", sample_quality, "x")
@@ -291,6 +307,7 @@ class TestSummary:
         assert "transcribe_fail: 2" in s
         assert "quality_fail: 1" in s
         assert "transcribed: 1" in s
+        assert "summaries: 0" in s  # 还没生成 summary
         assert "failed_texts: 1" in s
 
 

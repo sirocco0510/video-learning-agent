@@ -79,13 +79,31 @@ class LLMSummarizer:
     # ---------------- 读盘 ----------------
 
     def _load_items(self, transcribed_dir: Path) -> list[TranscribedItem]:
-        """从 transcribed/*.txt 读所有字幕,按 mtime 升序。"""
+        """从 transcribed_dir 读所有字幕,按 mtime 升序。
+
+        兼容三种传入路径(2026-09-10 结构调整后):
+          1. logs/transcribed/<YYYY-MM-DD>/transcripts/   — 单日 transcripts/ 子目录
+          2. logs/transcribed/                            — 顶级根目录,递归所有日期
+          3. logs/transcribed/*.txt                       — 旧版扁平结构(向后兼容)
+        跳过 summaries/ 下的 .summary.txt(中间产物,不是源字幕)。
+        """
         transcribed_dir = Path(transcribed_dir)
         if not transcribed_dir.exists():
             return []
 
+        # 智能选 glob 范围
+        if transcribed_dir.name == "transcripts":
+            # 已在单日 transcripts/ 子目录里
+            files = list(transcribed_dir.glob("*.txt"))
+        else:
+            # 顶级根目录(含日期子目录或扁平):递归 transcripts/*.txt + 顶层 *.txt 双兜底。
+            # rglob 也覆盖旧版扁平结构(旧版没有子目录,直接 *.txt 也被 rglob 抓到)。
+            files = list(transcribed_dir.rglob("transcripts/*.txt"))
+            if not files:
+                files = list(transcribed_dir.glob("*.txt"))
+
         items: list[TranscribedItem] = []
-        for path in sorted(transcribed_dir.glob("*.txt"), key=lambda p: p.stat().st_mtime):
+        for path in sorted(files, key=lambda p: p.stat().st_mtime):
             try:
                 item = self._parse_file(path)
             except Exception as e:

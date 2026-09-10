@@ -34,7 +34,6 @@ def cfg(tmp_path: Path) -> VLAConfig:
         "whisper": {"model": "small", "language": "zh", "segment_seconds": 30, "compute_type": "int8"},
         "video_source": {"prefer_download": True, "download": {"format": "worst"}, "record": {"enabled": True, "screen_index": 2, "fps": 30, "crf": 28, "audio_input": "0", "preset": "ultrafast"}},
         "quality_check": {"enabled": True, "model": "x", "min_score_to_pass": 70, "min_char_per_second": 1.0, "max_char_per_second": 15.0},
-        "browser_plugin": {"name": "VideoTrans", "enabled": True, "remind_timeout_sec": 30, "plugin_paths": []},
         "summary": {"model": "x", "target_words_min": 500, "target_words_max": 800, "notes_file": str(tmp_path / "notes.md"), "cross_video_dedup": True, "trigger_mode": "quota", "notes_section_header": "## x"},
         "quota": {"summary_threshold_sec": 21600, "on_exhausted": "stop_session"},
         "history": {"file": str(tmp_path / "h.jsonl")},
@@ -136,8 +135,8 @@ class TestPassFlow:
         # 验证:video 已删(FR-3.3),audio 已删(FR-4.5 + FR-3.7)
         assert not video.exists()
         assert not audio.exists()
-        # 验证:text 已存盘
-        text_files = list((log_dir / "transcribed").glob("*.txt"))
+        # 验证:text 已存盘(2026-09-10 结构调整:rglob transcripts/*.txt)
+        text_files = list((log_dir / "transcribed").rglob("transcripts/*.txt"))
         assert len(text_files) == 1
         assert "Python 教程" in text_files[0].read_text(encoding="utf-8")
         assert "高质量的字幕内容" in text_files[0].read_text(encoding="utf-8")
@@ -196,6 +195,8 @@ class TestBatchSummarizeAfterPasses:
         transcribed_dir = log_dir / "transcribed"
 
         log = TranscriptionLog(log_dir)
+        # 2026-09-10 结构调整:transcribed/<today>/transcripts/*.txt
+        log.transcribed_dir.mkdir(parents=True, exist_ok=True)
         transcriber = FakeTranscriber(text="内容。" * 50)
         checker = FakeQualityChecker(passed=True, score=85)
         llm = FakeLLM()
@@ -216,8 +217,8 @@ class TestBatchSummarizeAfterPasses:
             )
             StreamingTranscriber.cleanup(audio)
 
-        # 配额触发 → 总结
-        assert len(list(transcribed_dir.glob("*.txt"))) == 3
+        # 配额触发 → 总结(2026-09-10 结构调整:递归找 transcripts/*.txt)
+        assert len(list(transcribed_dir.rglob("transcripts/*.txt"))) == 3
 
         summarizer = LLMSummarizer(llm, cfg.summary.notes_file)
         summarizer.cfg = cfg
@@ -228,8 +229,8 @@ class TestBatchSummarizeAfterPasses:
         notes = cfg.summary.notes_file.read_text(encoding="utf-8")
         assert "Python 基础" in notes
         assert "统一总结内容" in notes
-        # 验证:transcribed 目录已清空(避免下次重复总结)
-        assert list(transcribed_dir.glob("*.txt")) == []
+        # 验证:transcribed 目录已清空(避免下次重复总结;2026-09-10 rglob)
+        assert list(transcribed_dir.rglob("transcripts/*.txt")) == []
         # 验证:LLM 调一次
         assert len(llm.calls) == 1
 

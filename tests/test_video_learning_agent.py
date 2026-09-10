@@ -38,7 +38,6 @@ def cfg(tmp_path: Path) -> VLAConfig:
         "whisper": {"model": "small", "language": "zh", "segment_seconds": 30, "compute_type": "int8"},
         "video_source": {"prefer_download": True, "download": {"format": "worst"}, "record": {"enabled": True, "screen_index": 2, "fps": 30, "crf": 28, "audio_input": "0", "preset": "ultrafast"}},
         "quality_check": {"enabled": True, "model": "x", "min_score_to_pass": 70, "min_char_per_second": 1.0, "max_char_per_second": 15.0},
-        "browser_plugin": {"name": "VideoTrans", "enabled": True, "remind_timeout_sec": 30, "plugin_paths": []},
         "summary": {"model": "x", "target_words_min": 500, "target_words_max": 800, "notes_file": str(tmp_path / "notes.md"), "cross_video_dedup": True, "trigger_mode": "quota", "notes_section_header": "## x"},
         "quota": {"summary_threshold_sec": 21600, "on_exhausted": "stop_session"},
         "history": {"file": str(tmp_path / "h.jsonl")},
@@ -103,8 +102,9 @@ class StubSummarizer:
             "clear_after": clear_after,
         })
         # 实际清空 transcribed_dir(否则下次还会读)
+        # 2026-09-10 结构调整:递归找 transcripts/*.txt
         if clear_after:
-            for f in transcribed_dir.glob("*.txt"):
+            for f in transcribed_dir.rglob("transcripts/*.txt"):
                 f.unlink()
         return self.response
 
@@ -283,7 +283,7 @@ class TestPassFlow:
         assert stats == {"processed": 1, "passed": 1, "failed": 0, "skipped": 0, "summarized": 0}
         # transcribed/ 有文件
         transcribed_dir = Path(cfg.logging.log_dir) / "transcribed"
-        text_files = list(transcribed_dir.glob("*.txt"))
+        text_files = list(transcribed_dir.rglob("transcripts/*.txt"))
         assert len(text_files) == 1
         # audio 已删
         assert not audio.exists()
@@ -315,7 +315,7 @@ class TestPassFlow:
         assert stats == {"processed": 3, "passed": 3, "failed": 0, "skipped": 0, "summarized": 0}
         assert agent.quota.current == 5400  # 3 * 1800
         # 3 个 transcribed 文件
-        assert len(list((Path(cfg.logging.log_dir) / "transcribed").glob("*.txt"))) == 3
+        assert len(list((Path(cfg.logging.log_dir) / "transcribed").rglob("transcripts/*.txt"))) == 3
         # 没总结
         assert len(summarizer.calls) == 0
 
@@ -749,7 +749,7 @@ class TestRefineOrdering:
         assert stats["passed"] == 1
         assert stats["failed"] == 0
         # transcribed 文件仍落盘(用原文)
-        transcripts = list((cfg.logging.log_dir / "transcribed").glob("*.txt"))
+        transcripts = list((cfg.logging.log_dir / "transcribed").rglob("transcripts/*.txt"))
         assert len(transcripts) == 1
         assert original_text in transcripts[0].read_text()
 

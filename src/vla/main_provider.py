@@ -68,7 +68,7 @@ class RealTextProvider:
             strategy: SubtitleStrategy(必填 — FR-2.5/2.6 popup 流程)
             source_factory: VideoSourceFactory(必填)
             transcriber: StreamingTranscriber(必填)
-            notifier: MacOSNotifier(必填 — 弹窗)
+            notifier: NotifierLike(必填 — MacOSNotifier / NullNotifier 跨平台弹窗)
             plugin_status: PluginStatus(必填 — session 单例)
             save_dir: 临时文件目录
             log: TranscriptionLog(可选,默认从 cfg.logging.log_dir 构造)
@@ -247,11 +247,11 @@ class RealTextProvider:
                 summary = summarizer.summarize_one(text, title=task.title)
                 if summary.summary_text:
                     # 文件命名与 save_transcribed 对齐:`<id>_<safe_title>.summary.txt`,
-                    # 方便用户 grep / 关联。
+                    # 写到 summaries/ 子目录与源文件分开(2026-09-10 结构调整)。
                     from vla.log.transcription_log import _safe_title
                     safe = _safe_title(task.title)
                     summary_path = (
-                        self.log.transcribed_dir / f"{task.id}_{safe}.summary.txt"
+                        self.log.summaries_dir / f"{task.id}_{safe}.summary.txt"
                     )
                     written = summarizer.write_summary(summary_path, summary)
                     if written is not None:
@@ -316,12 +316,15 @@ def build_text_provider(
     允许 spike 在传入预构造 strategy 时复用其内部 adapter / recorder,以便
     monkey-patch 命中真实组件。
 
+    2026-09-10 轻量化:tab_recorder / browser_plugin 已删;strategy 不再需要
+    remind_timeout_sec / plugin_name(走 notifier.ask_open_browser 默认 30s)。
+
     Args:
         cfg: VLAConfig(若 cfg.audio 存在,装配时会自动算 today_dir = find_today_dir(
              cfg.audio.downloads_dir) 并注入 provider)
         transcriber: StreamingTranscriber(可选 — 测试 fixture 注入 MagicMock;
                   None 时内部 auto-create)
-        notifier: MacOSNotifier(必填 — 弹窗)
+        notifier: NotifierLike(必填 — MacOSNotifier / NullNotifier 跨平台)
         plugin_status: PluginStatus(可选 — cli.py 生产路径必传,测试 stub 可省)
         save_dir: 临时文件目录(默认 cfg.storage.tmp_dir)
         driver: BrowserDriver(可选,字幕策略需要)
@@ -333,8 +336,8 @@ def build_text_provider(
                  `cfg.quality_check.refine_enabled=True` 时自动构造
                  `SubtitleRefiner(cfg)`,否则保持 None — 避免无谓 LLM 客户端浪费)
         strategy: SubtitleStrategy(可选 — spike 注入预构造的 strategy,内部
-                  audio_factory / tab_recorder / bilibili_adapter 等组件可被
-                  monkey-patch 复用;None 时内部 auto-construct)
+                  audio_factory / bilibili_adapter 等组件可被 monkey-patch 复用;
+                  None 时内部 auto-construct)
                   装配后 today_dir 会被算出来传给 RealTextProvider(若 cfg.audio 不为 None),
                   fetch_asset 路径 ④ scan_today_dir(§4.2 ④)才能跑通。
         internal_spider: InternalSiteSpider(可选 — Phase 9.6:bill-jc 用)。
@@ -353,7 +356,6 @@ def build_text_provider(
     from vla.source.video_source import VideoSourceFactory
     from vla.subtitle.audio_scan import find_today_dir
     from vla.subtitle.strategy import SubtitleStrategy
-    from vla.subtitle.tab_audio_recorder import TabAudioRecorder
     from vla.transcribe.streaming import StreamingTranscriber
 
     save_dir = Path(save_dir) if save_dir else Path(cfg.storage.tmp_dir)
@@ -391,19 +393,15 @@ def build_text_provider(
         transcriber = StreamingTranscriber(cfg)
 
     if strategy is None:
+        # 2026-09-10 轻量化:TabAudioRecorder 已删 — 策略 ② 弹窗询问统一走
+        # notifier.ask_open_browser(Windows/Linux 走 NullNotifier 返 "skip")。
         # F2-8:不再自动构造旧 Screen Recorder。弹窗 enabled 路径已废弃 —
         # 真实录屏兜底走策略 ③ adapter.fetch_via_recording(只剩 yt-dlp path ①)。
-        # driver 仍按需自动连 Chrome CDP。
+        # driver 仍按需自动连 Chrome CDP(cookie 借取用)。
         if driver is None:
             driver = _try_connect_chrome(cfg, transcriber, notifier)
 
         audio_factory = AudioSourceFactory(save_dir=save_dir / "audio_raw")
-        tab_recorder = TabAudioRecorder(
-            match_keyword=getattr(
-                getattr(cfg, "extension", None), "tab_audio_recorder.match_keyword", "tab audio",
-            ),
-            save_dir=save_dir / "audio_raw",
-        )
 
         strategy = SubtitleStrategy(
             registry=_build_registry(
@@ -413,10 +411,7 @@ def build_text_provider(
             recorder=recorder,  # 保留(测试 fixture 注入 MagicMock,enabled 路径 stub)
             notifier=notifier,
             plugin_status=plugin_status,
-            remind_timeout_sec=cfg.browser_plugin.remind_timeout_sec,
-            plugin_name=cfg.browser_plugin.name,
             audio_factory=audio_factory,
-            tab_recorder=tab_recorder,
             transcriber=transcriber,
             save_dir=save_dir,
             cfg=cfg,  # F2-10:扫今天 YYYY-MM-DD/ 用
@@ -460,6 +455,9 @@ def _build_registry(
     构造参数删除(分别由 strategy._try_browser 弹窗 enabled 分支和 main.py 的
     ScreenshotPhaseController 接管)。
 
+    **2026-09-10 轻量化**:tab_recorder 已彻底删除(strategy / InternalSiteAdapter
+    不再持有);弹窗询问统一走 notifier.ask_open_browser。
+
     **Phase 9.6 (2026-09-09)**:InternalSiteAdapter 改实例注册(spider 注入)— `internal_spider`
     非 None 时构造 `InternalSiteAdapter(spider=internal_spider, ...)`;None 时 fallback 到
     原 `register(InternalSiteAdapter)` 行为(spider 未注入,fetch_via_spider 内部 None)。
@@ -477,6 +475,7 @@ def _build_registry(
         official = BilibiliOfficialSubtitle()
         # F2-10:2 deps(audio_factory + transcriber);tab_recorder 改由 strategy 持有,
         # screenshot_controller 改由 main.py 持有。
+        # 2026-09-10 轻量化:tab_recorder 已从 strategy 也删除。
         audio_factory = AudioSourceFactory(save_dir=save_dir / "audio_raw")
         transcriber = StreamingTranscriber(cfg)
         adapter = BilibiliAdapter(
@@ -498,7 +497,6 @@ def _build_registry(
             transcriber = _ST(cfg)
             instance = InternalSiteAdapter(
                 audio_factory=audio_factory,
-                tab_recorder=None,
                 transcriber=transcriber,
                 spider=internal_spider,
             )
@@ -517,7 +515,7 @@ def _try_connect_chrome(cfg, transcriber, notifier) -> Any:
 
     F2-8:不再构造旧 Screen Recorder(已删)。新架构下,driver 仅给策略 ②
     BrowserDriver.fetch_subtitle_via_browser 用;录屏兜底走策略 ③
-    adapter.fetch_via_recording(audio_factory + tab_recorder)。
+    adapter.fetch_via_recording(audio_factory + transcriber) — 2026-09-10 起,tab_recorder 已彻底删除。
 
     失败(端口未监听 / playwright 未装 / connect 异常)→ 返回 None,
     调用方继续走 ffmpeg 兜底。
