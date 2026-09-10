@@ -21,7 +21,7 @@ import pytest
 
 from vla.config import QualityCheckConfig, VLAConfig, WhisperConfig
 from vla.models import SummaryResult
-from vla.summary.video_summarizer import VideoSummarizer
+from vla.summary.video_summarizer import VideoSummarizer, sandwich_sample
 
 
 # ---------------- Fixture ----------------
@@ -67,7 +67,6 @@ def cfg(tmp_path: Path) -> VLAConfig:
             min_score_to_pass=50, min_char_per_second=0.5, max_char_per_second=20.0,
             refine_enabled=True, refine_max_chars=6000, refine_max_output_tokens=4000,
         ),
-        browser_plugin={"name": "Tab Audio Recorder", "remind_timeout_sec": 30},
         summary={"model": "gpt-4o-mini", "target_words_min": 500,
                  "target_words_max": 800, "notes_file": "./notes/v.md",
                  "cross_video_dedup": True, "trigger_mode": "quota",
@@ -187,17 +186,98 @@ class TestPrompt:
         assert long_text[:200] in prompt  # 至少包含文本开头
 
     def test_prompt_truncates_very_long_input(self, cfg: VLAConfig) -> None:
-        """超长输入(20000 字)在送 LLM 前截断,避免爆 token。"""
+        """超长输入(20000 字)在送 LLM 前三明治抽样,避免爆 token。"""
         text = "中" * 20000
         llm = FakeLLM(response='{"summary_text": "x"}')
         summarizer = VideoSummarizer(cfg, llm)
 
-        # 强制触发(超过阈值太多 → 截断到可输入 LLM 的大小)
+        # 强制触发(超过阈值太多 → 三明治抽样到可输入 LLM 的大小)
         summarizer.summarize_one(text, title="超长视频")
 
         # 输入给 LLM 的 prompt 长度应远小于原始 20000 字
         prompt_len = len(llm.calls[0]["prompt"])
-        assert prompt_len < 15000  # 截断了一些
+        assert prompt_len < 15000  # 抽样了一些
+
+        # 三明治抽样的特征标记应在 prompt 中
+        prompt = llm.calls[0]["prompt"]
+        assert "[..." in prompt  # 中间省略标记
+
+
+class TestSandwich:
+    """三明治抽样(head + mid + tail)替代纯截断(SSOT: 2026-09-10)。
+
+    视频字幕信息密度不均:开头导入 / 中间口水话多 / 结尾结论。
+    三明治覆盖关键位置,一次 LLM call。
+    """
+
+    def test_short_text_unchanged(self) -> None:
+        """≤ _PROMPT_MAX_CHARS(12000) → 整篇保留,不抽样。"""
+        text = "中" * 10000  # < 12000
+        sampled = sandwich_sample(text)
+        assert sampled == text
+
+    def test_exactly_at_budget_unchanged(self) -> None:
+        """恰好 = 12000 → 不抽样(边界检查)。"""
+        text = "中" * 12000
+        sampled = sandwich_sample(text)
+        assert sampled == text
+
+    def test_just_over_budget_uses_sandwich(self) -> None:
+        """12001 → 抽样(省略标记出现)。sandwich 总长会略 > 原长(多了省略标记),
+        所以不判 len(sampled) < len(text),只判采样启动信号。"""
+        text = "中" * 12001
+        sampled = sandwich_sample(text)
+        assert "[..." in sampled  # 含省略标记 = 已抽样
+        assert "省略 1 字" in sampled  # 12001 - 12000 = 1 字省略
+
+    def test_long_text_preserves_head(self) -> None:
+        """长文本抽样后保留开头内容。"""
+        text = "HEAD_START" + "中" * 30000 + "TAIL_END"
+        sampled = sandwich_sample(text)
+        assert sampled.startswith("HEAD_START")
+
+    def test_long_text_preserves_tail(self) -> None:
+        """长文本抽样后保留结尾内容。"""
+        text = "HEAD_START" + "中" * 30000 + "TAIL_END"
+        sampled = sandwich_sample(text)
+        assert sampled.endswith("TAIL_END")
+
+    def test_long_text_includes_middle_window(self) -> None:
+        """长文本抽样后中间窗口保留(50000 → 中间 4000 字窗口)。"""
+        # 中间放唯一标识符,验证中间窗口确实取到了那一段
+        middle_marker = "中" * 1000 + "MIDDLE_UNIQUE_MARKER_XYZ" + "中" * 1000
+        text = "HEAD" + "中" * 15000 + middle_marker + "中" * 15000 + "TAIL"
+        sampled = sandwich_sample(text)
+        assert "MIDDLE_UNIQUE_MARKER_XYZ" in sampled
+
+    def test_long_text_total_chars_under_budget(self) -> None:
+        """抽样后总长(head + mid + tail + 2 个 separator) < 13000。"""
+        text = "中" * 50000
+        sampled = sandwich_sample(text)
+        # head(4000) + mid(4000) + tail(4000) + 2 个 separator(~50)
+        assert len(sampled) < 12100  # 实际 < 12050
+
+    def test_separator_includes_omitted_count(self) -> None:
+        """省略标记里带"省略 N 字"字样,帮 LLM 知道原文多长。"""
+        text = "中" * 20000  # 省略 20000 - 4000 - 4000 - 4000 = 8000 字
+        sampled = sandwich_sample(text)
+        assert "省略 8000 字" in sampled
+
+    def test_empty_string_unchanged(self) -> None:
+        """空串 → 空串(不抛错)。"""
+        assert sandwich_sample("") == ""
+
+    def test_real_spike_text_35513_chars(self) -> None:
+        """复现 spike 真实场景:35513 字 bill-jc transcript → 抽样后 < 12100。"""
+        # 真实长度的烟雾测试
+        text = (
+            "这一节我们讲用户管理模块的实现,"
+            "那么实现了主要包括了一些注册登录啊,编辑用户信息界面啊,"
+        ) * 1000  # ≈ 35500 字
+        sampled = sandwich_sample(text)
+        assert len(sampled) < 12100
+        # 抽样应包含至少一段完整原文(sandwich mid 窗口 4000 字足以容下)
+        assert "用户管理模块" in sampled
 
 
 class TestFailureModes:

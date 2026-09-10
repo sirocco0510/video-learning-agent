@@ -4,7 +4,8 @@
 - 接 cleaned_text(Refiner 输出后) → 调云端 LLM 生成 200-300 字摘要
 - 触发条件:len(cleaned_text) > config.quality_check.refine_max_chars(默认 6000)
   短视频(< 6000)直接返回空 SummaryResult,不浪费 token
-- 超长输入(> ~12000 字)送 LLM 前截断,避免 prompt 爆 token
+- 超长输入(> ~12000 字)送 LLM 前**三明治抽样**(头/中/尾各 4000 字),
+  避免纯截断丢后半段,同时覆盖视频开场 / 主体 / 收尾关键位置
 - 输出 SummaryResult;失败 fallback(不抛错,主流程不中断)
 - 落盘 helper:`<id>.summary.txt`(与 cleaned.txt 平级)
 
@@ -72,7 +73,47 @@ _USER_PROMPT_TEMPLATE = """【视频标题】
 # 送 LLM 前的最大 prompt chars(粗估)。
 # 12000 字是 ~3000-4000 tokens,加上 system + user prompt 模板约 ~5000 tokens,
 # 留出余量给 200-300 字输出。低于 refine_max_chars=6000 时不触发,不涉及。
-_PROMPT_MAX_CHARS = 12000
+#
+# 三明治抽样常量(SSOT: 2026-09-10):头/中/尾各 4000 字,总预算 12000。
+# 视频字幕信息密度不均:开头导入 / 中间口水话 + 代码演示 / 结尾结论。
+# 三明治覆盖关键位置,一次 LLM call,避免纯截断丢失后半段内容。
+_SANDWICH_HEAD = 4000
+_SANDWICH_MID = 4000
+_SANDWICH_TAIL = 4000
+_PROMPT_MAX_CHARS = _SANDWICH_HEAD + _SANDWICH_MID + _SANDWICH_TAIL  # = 12000
+
+
+def sandwich_sample(text: str) -> str:
+    """三明治抽样:头 + 中 + 尾,覆盖关键位置,丢掉中间冗余口水话。
+
+    短文本(≤ _PROMPT_MAX_CHARS)→ 原样返回,不切。
+    长文本 → 取头 4000 + 中 4000 + 尾 4000,中间用省略标记连接。
+
+    为什么不用 Map-Reduce:
+    - 切片独立摘要再合并 → 3-5x token 成本,失去段落间上下文连贯
+    - 视频字幕中间常是"那我们看一下代码啊"等口水话,独立摘要反而稀释
+    - 三明治抽样对单视频总摘要性价比最高(2026-09-10 设计决定)
+
+    Args:
+        text: 原始文本(中文视频字幕)
+
+    Returns:
+        抽样后的文本(总长 ≈ head + mid + tail + 2 个省略标记)
+    """
+    if len(text) <= _PROMPT_MAX_CHARS:
+        return text
+
+    head = text[:_SANDWICH_HEAD]
+    n = len(text)
+    mid_start = n // 2 - _SANDWICH_MID // 2
+    mid_end = mid_start + _SANDWICH_MID
+    mid = text[mid_start:mid_end]
+    tail = text[-_SANDWICH_TAIL:]
+
+    omitted = n - _SANDWICH_HEAD - _SANDWICH_MID - _SANDWICH_TAIL
+    separator = f"\n\n[...中间省略 {omitted} 字...]\n\n"
+
+    return f"{head}{separator}{mid}{separator}{tail}"
 
 
 # ---------------- 主类 ----------------
@@ -124,7 +165,7 @@ class VideoSummarizer:
 
         流程:
         1. 长度检查:≤ refine_max_chars → 返回空 SummaryResult(短视频不调 LLM)
-        2. 超长输入截断到 _PROMPT_MAX_CHARS
+        2. 超长输入走三明治抽样(头 4000 + 中 4000 + 尾 4000),覆盖关键位置
         3. 调 LLM(system + user prompt)
         4. 解析 JSON → SummaryResult
         5. 任何环节失败 → 返回空 SummaryResult + notes 记录
@@ -148,21 +189,20 @@ class VideoSummarizer:
                 "请先 set_llm() 或构造时注入"
             )
 
-        # 超长输入截断 — 保留前 _PROMPT_MAX_CHARS 字,后续内容标记截断
-        truncated = False
-        input_text = text
-        if len(text) > _PROMPT_MAX_CHARS:
-            input_text = text[:_PROMPT_MAX_CHARS]
-            truncated = True
+        # 超长输入走三明治抽样(头/中/尾),避免纯截断丢后半段(SSOT: 2026-09-10)
+        input_text = sandwich_sample(text)
+        truncated = input_text != text
+
+        if truncated:
             logger.info(
-                "📏 transcript %d 字符 > _PROMPT_MAX_CHARS %d,截断后送 LLM",
+                "📏 transcript %d 字符 > _PROMPT_MAX_CHARS %d,三明治抽样后送 LLM",
                 len(text), _PROMPT_MAX_CHARS,
             )
 
         user_prompt = _USER_PROMPT_TEMPLATE.format(
             title=title or "(无标题)",
             char_count=len(text),  # 报告原始长度(让 LLM 知道全文多长)
-            text=input_text + ("\n\n(后续内容已截断)" if truncated else ""),
+            text=input_text,  # sandwich 已自带"[...中间省略 N 字...]"标记
         )
         full_prompt = f"{_SYSTEM_PROMPT}\n\n{user_prompt}"
 
