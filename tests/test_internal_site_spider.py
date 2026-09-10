@@ -468,10 +468,12 @@ async def test_list_tasks_rejects_both_root_label_and_catalog_id(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fetch_metadata_returns_dict_with_m3u8_url(monkeypatch):
-    """fetch_metadata 返回 dict, 含 m3u8_url(从 fetch_m3u8 同源逻辑拿)。
+async def test_fetch_metadata_returns_dict_with_playback_info(monkeypatch):
+    """fetch_metadata 返回 dict, 含 m3u8_url / fileId / subtitles_flag / all_resolutions。
 
-    关键差异:fetch_metadata 复用 fetch_m3u8 路径但额外返回 title / duration_sec / college_id。
+    2026-09-10 真账号探勘结论:kngPlay 顶层响应不包含业务元数据
+    (title / duration / college_id),只返播放配置。所以这三个字段固定 None,
+    metadata 只覆盖"播放就绪"信息。
     """
     spider = InternalSiteSpider(
         cdp_url="http://localhost:9222", college_id="cid", resolution="720p"
@@ -484,12 +486,13 @@ async def test_fetch_metadata_returns_dict_with_m3u8_url(monkeypatch):
 
     kngplay_payload = {
         "playDetails": [
+            {"url": "https://video.bill-jc.com/a_1080p.m3u8", "desc": "1080p"},
             {"url": "https://video.bill-jc.com/a_720p.m3u8", "desc": "720p"},
+            {"url": "https://video.bill-jc.com/a_480p.m3u8", "desc": "480p"},
+            {"url": "https://video.bill-jc.com/a_360p.m3u8", "desc": "360p"},
         ],
-        "fileId": "uuid-1",
-        "title": "Python 入门教程",
-        "videoLongTime": 1800,
-        "collegeId": "cid-from-kngplay",
+        "fileId": "uuid-real-file",
+        "subtitlesFlag": 0,
     }
     responses = [
         MagicMock(status_code=200, json=lambda: {"code": 0}),
@@ -505,17 +508,21 @@ async def test_fetch_metadata_returns_dict_with_m3u8_url(monkeypatch):
         meta = await spider.fetch_metadata("kng-id-abc")
 
     assert isinstance(meta, dict)
-    assert meta["m3u8_url"] == "https://video.bill-jc.com/a_720p.m3u8"
-    assert meta["title"] == "Python 入门教程"
-    assert meta["duration_sec"] == 1800
-    assert meta["college_id"] == "cid-from-kngplay"
     assert meta["kng_id"] == "kng-id-abc"
+    assert meta["m3u8_url"] == "https://video.bill-jc.com/a_720p.m3u8"  # resolution=720p
     assert meta["resolution"] == "720p"
+    assert meta["fileId"] == "uuid-real-file"
+    assert meta["subtitles_flag"] == 0  # 无官方字幕,需抽音转写
+    assert meta["all_resolutions"] == ["1080p", "720p", "480p", "360p"]
+    # 业务字段固定 None(kngPlay 不返)
+    assert meta["title"] is None
+    assert meta["duration_sec"] is None
+    assert meta["college_id"] is None
 
 
 @pytest.mark.asyncio
-async def test_fetch_metadata_handles_missing_optional_fields(monkeypatch):
-    """kngPlay 响应缺 title / duration_sec / collegeId 时返回 None, 不抛错。"""
+async def test_fetch_metadata_subtitles_flag_one_means_official_available(monkeypatch):
+    """subtitlesFlag=1 表示服务端有官方字幕(无需抽音)。"""
     spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
 
     async def fake_borrow():
@@ -523,9 +530,9 @@ async def test_fetch_metadata_handles_missing_optional_fields(monkeypatch):
 
     monkeypatch.setattr(spider, "_fetch_cookies_and_token", fake_borrow)
 
-    # 模拟服务端只返 playDetails
     kngplay_payload = {
-        "playDetails": [{"url": "https://video.bill-jc.com/a_480p.m3u8", "desc": "480p"}],
+        "playDetails": [{"url": "https://video.bill-jc.com/a_720p.m3u8", "desc": "720p"}],
+        "subtitlesFlag": 1,
     }
     responses = [
         MagicMock(status_code=200, json=lambda: {"code": 0}),
@@ -538,13 +545,9 @@ async def test_fetch_metadata_handles_missing_optional_fields(monkeypatch):
     with patch(
         "vla.subtitle.internal_site_spider.httpx.AsyncClient", return_value=_fake_client(fake_post)
     ):
-        meta = await spider.fetch_metadata("kng-id-xyz")
+        meta = await spider.fetch_metadata("kng-with-cc")
 
-    assert meta["m3u8_url"] == "https://video.bill-jc.com/a_480p.m3u8"
-    assert meta["title"] is None
-    assert meta["duration_sec"] is None
-    assert meta["college_id"] is None
-    assert meta["kng_id"] == "kng-id-xyz"
+    assert meta["subtitles_flag"] == 1
 
 
 @pytest.mark.asyncio
@@ -563,3 +566,39 @@ async def test_fetch_metadata_propagates_fetch_m3u8_errors(monkeypatch):
     ):
         with pytest.raises(RuntimeError, match="preinit 失败"):
             await spider.fetch_metadata("kng-x")
+
+
+@pytest.mark.asyncio
+async def test_fetch_metadata_resolves_requested_resolution(monkeypatch):
+    """resolution=480p 时选 desc==480p, 不是第一档。"""
+    spider = InternalSiteSpider(
+        cdp_url="http://localhost:9222", college_id="cid", resolution="480p"
+    )
+
+    async def fake_borrow():
+        return [{"name": "tk", "value": "tv", "domain": ".yunxuetang.cn"}], "fake-jwt"
+
+    monkeypatch.setattr(spider, "_fetch_cookies_and_token", fake_borrow)
+
+    kngplay_payload = {
+        "playDetails": [
+            {"url": "https://video.bill-jc.com/a_720p.m3u8", "desc": "720p"},
+            {"url": "https://video.bill-jc.com/a_480p.m3u8", "desc": "480p"},
+        ],
+        "fileId": "uuid-2",
+    }
+    responses = [
+        MagicMock(status_code=200, json=lambda: {"code": 0}),
+        MagicMock(status_code=200, json=lambda: kngplay_payload),
+    ]
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        return responses[0 if "preinit" in url else 1]
+
+    with patch(
+        "vla.subtitle.internal_site_spider.httpx.AsyncClient", return_value=_fake_client(fake_post)
+    ):
+        meta = await spider.fetch_metadata("kng-480p")
+
+    assert meta["m3u8_url"] == "https://video.bill-jc.com/a_480p.m3u8"
+    assert meta["resolution"] == "480p"

@@ -306,18 +306,31 @@ class InternalSiteSpider:
         return url
 
     async def fetch_metadata(self, kng_id: str) -> dict[str, Any]:
-        """走 preinit + kngPlay, 返回 dict(含 m3u8_url + title + duration_sec + college_id)。
+        """走 preinit + kngPlay, 返回 dict(含 m3u8_url + fileId + resolution 等)。
 
-        与 fetch_m3u8 共享 preinit + kngPlay HTTP 调用, 但额外提取 yunxuetang
-        返回的元数据(title / duration / collegeId)供 --parse-only 模式用。
+        2026-09-10 真账号探勘结论:yunxuetang kngPlay API 顶层响应**不包含**
+        视频业务元数据(title / duration / college_id),只返播放配置:
+          - playDetails    — 多档 m3u8 URL(720p / 1080p / 480p / 360p)
+          - fileId         — 服务端文件 ID
+          - watermarkConfig — 水印
+          - subtitlesFlag  — 是否有官方字幕(0 = 无,需走抽音)
+          - timeCompleteStandard — 学习时长阈值
 
-        字段语义(均为 None 表示服务端未返):
-          - m3u8_url    str   resolution 匹配的播放地址
-          - title       str   视频标题(yunxuetang data.title)
-          - duration_sec int  视频时长秒(yunxuetang data.videoLongTime 或 studyTime)
-          - college_id  str   collegeId(yunxuetang data.collegeId)
+        因此 metadata 只覆盖"播放就绪"信息,**业务元数据需从其他途径拿**:
+          - title: 从 list_tasks(pagelist)拿,但需要 college_id + catalog_id
+          - duration_sec: 只能 ffprobe 抽音后拿(端到端路径覆盖)
+          - college_id: 只能由用户告知
+
+        返回字段语义:
           - kng_id      str   入参透传
-          - resolution  str   选中的分辨率档
+          - m3u8_url    str   resolution 匹配的播放地址
+          - resolution  str   选中的分辨率档(默认 720p)
+          - fileId      str   服务端文件 ID(诊断用)
+          - subtitles_flag int 0 = 服务端无字幕(需抽音转写);1 = 有官方字幕
+          - all_resolutions list[str] 服务端提供的全部档位
+          - title       None  kngPlay 不返业务字段,固定 None(用户从 URL 上下文补)
+          - duration_sec None 同上
+          - college_id  None 同上
 
         Raises:
             RuntimeError: cookie 借取失败, preinit/kngPlay HTTP 非 200,
@@ -345,7 +358,7 @@ class InternalSiteSpider:
                     f"{preinit_resp.text[:300]}"
                 )
 
-            # 第 2 步:kngPlay(拿 m3u8 URL + 元数据)
+            # 第 2 步:kngPlay(拿 m3u8 URL + 播放配置)
             kngplay_payload = {**base_payload, "fullname": "", "lang": ""}
             kngplay_resp = await client.post(_KNGPLAY_URL, json=kngplay_payload, headers=headers)
             if kngplay_resp.status_code != 200:
@@ -362,35 +375,23 @@ class InternalSiteSpider:
         # 选 desc == self.resolution;找不到 fallback 到第一档
         match = next((p for p in play_details if p.get("desc") == self.resolution), None)
         m3u8_url = match["url"] if match else play_details[0]["url"]
-
-        # 提取元数据(服务端字段命名取多种可能, 容错取 None)
-        # yunxuetang 真实字段名待真账号验证 — 兜底 data.get(key) 全部返 None 不抛错
-        # 注意:college_id 不 fallback 到 self.college_id — self 是 spider 构造参数,
-        # 可能传错或留空;只有 kngPlay 真实返回的字段才可信。
-        title = data.get("title") or data.get("name") or data.get("knwTitle")
-        duration_raw = (
-            data.get("videoLongTime")
-            or data.get("duration")
-            or data.get("studyTime")
-            or data.get("length")
-        )
-        try:
-            duration_sec: int | None = int(duration_raw) if duration_raw is not None else None
-        except (TypeError, ValueError):
-            duration_sec = None
-        college_id = data.get("collegeId") or data.get("collegeID") or None
+        all_resolutions = [p.get("desc") for p in play_details if p.get("desc")]
 
         logger.info(
-            "fetch_metadata kng=%s resolution=%s title=%r duration=%s college=%s",
-            kng_id, self.resolution, title, duration_sec, college_id,
+            "fetch_metadata kng=%s resolution=%s m3u8=%s fileId=%s subtitles=%s all=%s",
+            kng_id, self.resolution, m3u8_url[:80],
+            data.get("fileId"), data.get("subtitlesFlag"), all_resolutions,
         )
         return {
             "kng_id": kng_id,
             "m3u8_url": m3u8_url,
-            "title": title,
-            "duration_sec": duration_sec,
-            "college_id": college_id,
             "resolution": self.resolution,
+            "fileId": data.get("fileId"),
+            "subtitles_flag": data.get("subtitlesFlag"),
+            "all_resolutions": all_resolutions,
+            "title": None,
+            "duration_sec": None,
+            "college_id": None,
         }
 
 
