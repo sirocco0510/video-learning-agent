@@ -16,6 +16,8 @@ def _make_provider(strategy=None, source_factory=None, save_dir=None, today_dir=
     p.refiner = None
     p.log = MagicMock()
     p.plugin_status = MagicMock()
+    p.cfg = MagicMock()
+    p.cfg.audio.max_extract_sec = 1800
     p._save_dir = save_dir or Path("/tmp/save")
     p._today_dir = today_dir or Path("/tmp/today")
     p._save_dir.mkdir(parents=True, exist_ok=True)
@@ -59,7 +61,7 @@ async def test_fetch_asset_internal_spider_m3u8_to_wav(tmp_path):
     fake_wav.parent.mkdir(parents=True, exist_ok=True)
     with patch("vla.main_provider.extract_m3u8_audio") as mex:
         # 模拟 extract_m3u8_audio 写出 wav
-        def fake_extract(url, dst):
+        def fake_extract(url, dst, max_sec=None):
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(b"\x00")
         mex.side_effect = fake_extract
@@ -145,12 +147,15 @@ async def test_fetch_asset_scan_not_called_when_strategy_text_hits():
 
 
 @pytest.mark.asyncio
-async def test_fetch_asset_internal_spider_uses_browser_capture_by_default(tmp_path):
-    """Phase 9.6.4+ (2026-09-10):bill-jc 长视频默认走浏览器 4x MediaRecorder 抽音
-    (已验证,更快), extract_m3u8_audio 留作 fallback。
-    fetch_asset path ② 默认调 extract_browser_audio。"""
+async def test_fetch_asset_internal_spider_uses_m3u8_direct_by_default(tmp_path):
+    """FR-2.30 (2026-09-10 反转):bill-jc 路径 ② 默认走 extract_m3u8_audio 直抽,
+    extract_browser_audio 降 fallback。
+
+    反转依据:同视频四组对照,m3u8 直抽 score 92(通过)/ 浏览器 4x score 35
+    (未通过);4x 抓取把"国家统计局"转成"规判统计"、"PhantomJS"转成"翻腾架子"。"""
     p = RealTextProvider.__new__(RealTextProvider)
     p.cfg = MagicMock()
+    p.cfg.audio.max_extract_sec = 1800
     p.strategy = MagicMock()
     p.transcriber = MagicMock()
     p.source_factory = MagicMock()
@@ -170,21 +175,22 @@ async def test_fetch_asset_internal_spider_uses_browser_capture_by_default(tmp_p
 
     fake_wav = tmp_path / "audio_raw" / "BV1xx.wav"
 
-    async def fake_browser(video_url, wav_path):
+    def fake_m3u8(video_url, wav_path, max_sec=None):
         wav_path.parent.mkdir(parents=True, exist_ok=True)
         wav_path.write_bytes(b"RIFF")
-        return wav_path
 
-    with patch("vla.main_provider.extract_browser_audio", side_effect=fake_browser) as m_browser, \
-         patch("vla.main_provider.extract_m3u8_audio") as m_m3u8:
+    with patch("vla.main_provider.extract_m3u8_audio", side_effect=fake_m3u8) as m_m3u8, \
+         patch("vla.main_provider.extract_browser_audio") as m_browser:
         task = VideoTask(id="BV1xx", title="t", url="https://b-learning.bill-jc.com/x", expected_duration=3600)
         asset = await p.fetch_asset(task)
 
-    # 默认走 browser(快路径,4x)
-    m_browser.assert_called_once()
-    assert m_browser.call_args[0][0] == "https://video.bill-jc.com/foo.m3u8"
-    # m3u8 不应被调(browser 已成功)
-    m_m3u8.assert_not_called()
+    # 默认走 m3u8 直抽
+    m_m3u8.assert_called_once()
+    assert m_m3u8.call_args[0][0] == "https://video.bill-jc.com/foo.m3u8"
+    # FR-2.30.1:audio.max_extract_sec 透传下去(1800 = 只抽前 30 分钟)
+    assert m_m3u8.call_args[0][2] == 1800
+    # browser 不应被调(m3u8 已成功)
+    m_browser.assert_not_called()
     assert asset is not None
     assert asset.source == "whisper_internal_download"
     assert asset.audio_path == fake_wav
@@ -192,12 +198,13 @@ async def test_fetch_asset_internal_spider_uses_browser_capture_by_default(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_fetch_asset_internal_spider_falls_back_to_ffmpeg_when_browser_fails(tmp_path):
-    """Phase 9.6.4+ (2026-09-10):browser capture 失败(Chrome 未启 / SPA 无 <video>) →
-    fallback 到 extract_m3u8_audio;成功 → fetch_asset 走 ② 返回
+async def test_fetch_asset_internal_spider_falls_back_to_browser_when_m3u8_fails(tmp_path):
+    """FR-2.30 (2026-09-10 反转):m3u8 直抽失败(m3u8 过期签名 / 解密失败 / 网络)→
+    fallback 到 extract_browser_audio;成功 → fetch_asset 走 ② 返回
     Asset(source='whisper_internal_download')。"""
     p = RealTextProvider.__new__(RealTextProvider)
     p.cfg = MagicMock()
+    p.cfg.audio.max_extract_sec = 1800
     p.strategy = MagicMock()
     p.transcriber = MagicMock()
     p.source_factory = MagicMock()
@@ -217,25 +224,27 @@ async def test_fetch_asset_internal_spider_falls_back_to_ffmpeg_when_browser_fai
 
     fake_wav = tmp_path / "audio_raw" / "BV1xx.wav"
 
-    def fake_ffmpeg(url, dst):
+    async def fake_browser(url, dst, max_duration_sec=None):
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_bytes(b"RIFF")
 
     with patch(
-        "vla.main_provider.extract_browser_audio",
-        side_effect=RuntimeError("Chrome 9222 unreachable"),
-    ) as m_browser, patch(
         "vla.main_provider.extract_m3u8_audio",
-        side_effect=fake_ffmpeg,
-    ) as m_m3u8:
+        side_effect=RuntimeError("m3u8 签名过期"),
+    ) as m_m3u8, patch(
+        "vla.main_provider.extract_browser_audio",
+        side_effect=fake_browser,
+    ) as m_browser:
         task = VideoTask(id="BV1xx", title="t", url="https://b-learning.bill-jc.com/x", expected_duration=3600)
         asset = await p.fetch_asset(task)
 
-    # browser 先被试(默认路径),失败
-    m_browser.assert_called_once()
-    # 然后 m3u8 fallback 成功
+    # m3u8 先被试(默认路径),失败
     m_m3u8.assert_called_once()
-    assert m_m3u8.call_args[0][0] == "https://video.bill-jc.com/foo.m3u8"
+    # 然后 browser fallback 成功
+    m_browser.assert_called_once()
+    assert m_browser.call_args[0][0] == "https://video.bill-jc.com/foo.m3u8"
+    # FR-2.30.1:上限同样传给 browser 兜底路径
+    assert m_browser.call_args[1]["max_duration_sec"] == 1800
     assert asset is not None
     assert asset.source == "whisper_internal_download"
     assert asset.audio_path == fake_wav
@@ -244,10 +253,81 @@ async def test_fetch_asset_internal_spider_falls_back_to_ffmpeg_when_browser_fai
 
 
 @pytest.mark.asyncio
-async def test_fetch_asset_internal_spider_returns_none_when_both_extract_fail(tmp_path):
-    """Phase 9.6.4+ (2026-09-10):browser + ffmpeg 双双失败 → 返回 None(用户决定)。"""
+async def test_fetch_asset_missing_audio_config_falls_back_to_default_cap(tmp_path):
+    """cfg.audio 是 Optional —— 配置里没 audio 块时不能用 AttributeError 崩掉,
+    应退回 FR-2.30.1 的常量默认上限(1800)。"""
     p = RealTextProvider.__new__(RealTextProvider)
     p.cfg = MagicMock()
+    p.cfg.audio = None
+    p.strategy = MagicMock()
+    p.transcriber = MagicMock()
+    p.source_factory = MagicMock()
+    p.notifier = MagicMock()
+    p.plugin_status = MagicMock()
+    p._save_dir = tmp_path
+    p.log = MagicMock()
+    p.checker = MagicMock()
+    p.refiner = None
+    p._today_dir = tmp_path
+
+    p.strategy.get_subtitle = AsyncMock(return_value=SubtitleResult(
+        text=None, source="internal_spider",
+        metadata={"video_url": "https://video.bill-jc.com/foo.m3u8"},
+    ))
+    p.source_factory.get = MagicMock(return_value=None)
+
+    def fake_m3u8(url, dst, max_sec=None):
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(b"RIFF")
+
+    with patch("vla.main_provider.extract_m3u8_audio", side_effect=fake_m3u8) as m_m3u8:
+        task = VideoTask(id="BV1xx", title="t", url="https://b-learning.bill-jc.com/x", expected_duration=3600)
+        asset = await p.fetch_asset(task)
+
+    assert m_m3u8.call_args[0][2] == 1800
+    assert asset is not None
+
+
+@pytest.mark.asyncio
+async def test_fetch_asset_explicit_null_cap_disables_truncation(tmp_path):
+    """audio.max_extract_sec 显式配 null → 两条路径都不截断(全量抽取)。"""
+    p = RealTextProvider.__new__(RealTextProvider)
+    p.cfg = MagicMock()
+    p.cfg.audio.max_extract_sec = None
+    p.strategy = MagicMock()
+    p.transcriber = MagicMock()
+    p.source_factory = MagicMock()
+    p.notifier = MagicMock()
+    p.plugin_status = MagicMock()
+    p._save_dir = tmp_path
+    p.log = MagicMock()
+    p.checker = MagicMock()
+    p.refiner = None
+    p._today_dir = tmp_path
+
+    p.strategy.get_subtitle = AsyncMock(return_value=SubtitleResult(
+        text=None, source="internal_spider",
+        metadata={"video_url": "https://video.bill-jc.com/foo.m3u8"},
+    ))
+    p.source_factory.get = MagicMock(return_value=None)
+
+    def fake_m3u8(url, dst, max_sec=None):
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(b"RIFF")
+
+    with patch("vla.main_provider.extract_m3u8_audio", side_effect=fake_m3u8) as m_m3u8:
+        task = VideoTask(id="BV1xx", title="t", url="https://b-learning.bill-jc.com/x", expected_duration=3600)
+        await p.fetch_asset(task)
+
+    assert m_m3u8.call_args[0][2] is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_asset_internal_spider_returns_none_when_both_extract_fail(tmp_path):
+    """FR-2.30:m3u8 直抽 + browser 双双失败 → 返回 None(用户决定)。"""
+    p = RealTextProvider.__new__(RealTextProvider)
+    p.cfg = MagicMock()
+    p.cfg.audio.max_extract_sec = 1800
     p.strategy = MagicMock()
     p.transcriber = MagicMock()
     p.source_factory = MagicMock()

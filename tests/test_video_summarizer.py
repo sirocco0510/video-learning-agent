@@ -1,15 +1,15 @@
 """VideoSummarizer(SSOT: requirements.md FR-2.15d,2026-09-10)。
 
-长视频 Refiner 长度超限跳过云端清理时,调 VideoSummarizer 生成
-200-300 字单视频摘要,落盘 <id>.summary.txt。
+为**每条**通过质量门控的视频生成 200-300 字摘要,落盘 <id>.summary.txt。
 
-触发条件:cleaned_text 长度 > config.quality_check.refine_max_chars(默认 6000)。
-低于阈值 → 不调 LLM,返回空 SummaryResult(便于调用方判断要不要落盘)。
+触发条件(2026-09-10 修正):**无条件** —— 摘要是关键路径,不设长度门控。
+旧行为是 `len(text) > refine_max_chars(6000)` 才触发,已删除:该长度会被
+Refiner 压缩影响,导致摘要静默不产出。
 
 为什么不在 Refiner 里做:
 - Refiner 是"清理"(preserve original + 修正),与"压缩"语义不同
 - Refiner 输入是 transcript,摘要输入是 cleaned_text(更干净,压缩效果更好)
-- 长视频同时保留 cleaned.txt(全文本)+ .summary.txt(摘要),职责清晰
+- 长视频同时保留 refined.txt(全文本)+ .summary.txt(摘要),职责清晰
 """
 
 from __future__ import annotations
@@ -89,7 +89,7 @@ def cfg(tmp_path: Path) -> VLAConfig:
 
 @pytest.fixture
 def long_text() -> str:
-    """7000 字 > refine_max_chars=6000 → 触发摘要。"""
+    """7000 字(长视频样本)。"""
     # 用真实感的句子循环,模拟长视频
     base = (
         "这一节我们详细讨论了命令行参数的概念,包括如何定义参数、如何在程序中"
@@ -107,7 +107,7 @@ def long_text() -> str:
 
 @pytest.fixture
 def short_text() -> str:
-    """1000 字 < refine_max_chars=6000 → 不触发摘要。"""
+    """约 720 字(短视频样本)。"""
     return "大家好,这一节我们讲解命令行参数。" * 30  # ~720 字
 
 
@@ -115,52 +115,59 @@ def short_text() -> str:
 
 
 class TestTrigger:
-    """触发条件:cleaned_text 长度 vs refine_max_chars。"""
+    """FR-2.15d 2026-09-10:摘要是关键路径 —— **不看长度,一律触发**。"""
 
     def test_long_text_triggers_summary(self, cfg: VLAConfig, long_text: str) -> None:
-        """7000 字 > 6000 → 调 LLM,生成 SummaryResult。"""
+        """长视频照样触发。"""
         llm = FakeLLM(response='{"summary_text": "本节讲解了命令行参数的使用方法。"}')
         summarizer = VideoSummarizer(cfg, llm)
 
         result = summarizer.summarize_one(long_text, title="命令行参数")
 
         assert isinstance(result, SummaryResult)
-        assert result.summary_text != ""  # 有内容
-        assert len(llm.calls) == 1  # 调了 LLM
+        assert result.summary_text != ""
+        assert len(llm.calls) == 1
 
-    def test_short_text_skips_llm(self, cfg: VLAConfig, short_text: str) -> None:
-        """1000 字 < 6000 → 不调 LLM,返回空 SummaryResult。"""
-        llm = FakeLLM()
+    def test_short_text_also_triggers_summary(self, cfg: VLAConfig, short_text: str) -> None:
+        """短视频**同样**必须出摘要(旧行为是跳过)。"""
+        llm = FakeLLM(response='{"summary_text": "短视频摘要。"}')
         summarizer = VideoSummarizer(cfg, llm)
 
         result = summarizer.summarize_one(short_text, title="短视频")
 
-        assert isinstance(result, SummaryResult)
-        assert result.summary_text == ""  # 空文本 = 没生成
-        assert result.notes == ""  # 没调 LLM 也没 notes
-        assert len(llm.calls) == 0  # 没调 LLM
+        assert result.summary_text == "短视频摘要。"
+        assert len(llm.calls) == 1
 
-    def test_at_threshold_skips_llm(self, cfg: VLAConfig) -> None:
-        """恰好 = refine_max_chars(6000)→ 不调 LLM(> 不包含 =)。"""
-        text = "中" * 6000
-        llm = FakeLLM()
-        summarizer = VideoSummarizer(cfg, llm)
-
-        result = summarizer.summarize_one(text, title="边界")
-
-        assert result.summary_text == ""
-        assert len(llm.calls) == 0
-
-    def test_just_over_threshold_triggers(self, cfg: VLAConfig) -> None:
-        """6001 字 > 6000 → 调 LLM。"""
-        text = "中" * 6001
+    def test_at_old_threshold_still_triggers(self, cfg: VLAConfig) -> None:
+        """恰好 6000 字 —— 旧门控在这里返回空,现在必须触发。"""
         llm = FakeLLM(response='{"summary_text": "摘要。"}')
         summarizer = VideoSummarizer(cfg, llm)
 
-        result = summarizer.summarize_one(text, title="刚好超")
+        result = summarizer.summarize_one("中" * 6000, title="边界")
 
-        assert result.summary_text != ""
+        assert result.summary_text == "摘要。"
         assert len(llm.calls) == 1
+
+    def test_single_char_also_triggers(self, cfg: VLAConfig) -> None:
+        """极短文本也触发 —— 长度不再参与判断。"""
+        llm = FakeLLM(response='{"summary_text": "摘要。"}')
+        summarizer = VideoSummarizer(cfg, llm)
+
+        result = summarizer.summarize_one("嗯", title="极短")
+
+        assert result.summary_text == "摘要。"
+        assert len(llm.calls) == 1
+
+    def test_short_text_sent_whole_not_sampled(self, cfg: VLAConfig, short_text: str) -> None:
+        """短文本整段送 LLM —— 去掉门控不等于把抽样也套上去。"""
+        llm = FakeLLM(response='{"summary_text": "x"}')
+        summarizer = VideoSummarizer(cfg, llm)
+
+        summarizer.summarize_one(short_text, title="t")
+
+        prompt = llm.calls[0]["prompt"]
+        assert "中间省略" not in prompt
+        assert short_text in prompt
 
 
 class TestPrompt:
@@ -312,12 +319,71 @@ class TestFailureModes:
 
         assert result.summary_text == ""
 
-    def test_no_llm_injected_raises(self, cfg: VLAConfig, long_text: str) -> None:
-        """没注入 LLM + 长文本 → RuntimeError(同 QualityChecker 风格)。"""
+    def test_lazy_constructs_llm_when_not_injected(
+        self, cfg: VLAConfig, long_text: str, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """没注入 LLM → 按 cfg **惰性构造**一个(不再抛错)。
+
+        2026-09-10:旧契约是"没注入就抛 RuntimeError",但那个异常会被
+        process_asset 的宽 except 吞成 warning → 摘要静默不产出。
+        自给自足才能保证 FR-2.15d 落地。
+        """
+        built: list[tuple[Any, str]] = []
+        llm = FakeLLM(response='{"summary_text": "惰性构造的摘要。"}')
+
+        def fake_llm_client(client_cfg: Any, model: str) -> FakeLLM:
+            built.append((client_cfg, model))
+            return llm
+
+        monkeypatch.setattr(
+            "vla.summary.video_summarizer.LLMClient", fake_llm_client,
+        )
         summarizer = VideoSummarizer(cfg, llm=None)
 
-        with pytest.raises(RuntimeError, match="LLM"):
-            summarizer.summarize_one(long_text, title="t")
+        result = summarizer.summarize_one(long_text, title="t")
+
+        assert result.summary_text == "惰性构造的摘要。"
+        assert len(built) == 1, "应恰好惰性构造一次 LLMClient"
+        assert built[0][0] is cfg.llm_client, "应传 cfg.llm_client"
+        assert built[0][1] == summarizer.model, "model 应与 self.model 一致"
+
+    def test_lazy_construction_happens_once(
+        self, cfg: VLAConfig, long_text: str, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """惰性构造只做一次 —— 第二次 summarize_one 复用已建的客户端。"""
+        calls = {"n": 0}
+        llm = FakeLLM(response='{"summary_text": "摘要。"}')
+
+        def fake_llm_client(client_cfg: Any, model: str) -> FakeLLM:
+            calls["n"] += 1
+            return llm
+
+        monkeypatch.setattr(
+            "vla.summary.video_summarizer.LLMClient", fake_llm_client,
+        )
+        summarizer = VideoSummarizer(cfg, llm=None)
+
+        summarizer.summarize_one(long_text, title="t")
+        summarizer.summarize_one(long_text, title="t")
+
+        assert calls["n"] == 1
+        assert len(llm.calls) == 2, "两次调用都该打到同一个客户端"
+
+    def test_injected_llm_wins_over_lazy(
+        self, cfg: VLAConfig, long_text: str, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """显式注入优先 —— 注入了就不该再惰性构造。"""
+
+        def boom(client_cfg: Any, model: str) -> Any:
+            raise AssertionError("注入了 LLM 却仍去构造新的")
+
+        monkeypatch.setattr("vla.summary.video_summarizer.LLMClient", boom)
+        llm = FakeLLM(response='{"summary_text": "注入的摘要。"}')
+        summarizer = VideoSummarizer(cfg, llm)
+
+        result = summarizer.summarize_one(long_text, title="t")
+
+        assert result.summary_text == "注入的摘要。"
 
 
 class TestWriteToFile:

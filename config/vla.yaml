@@ -36,8 +36,9 @@ quality_check:
   # 2026-09-02 Level 4:LLM 语义清理(faster-whisper 输出整理)
   # refine_enabled=true 才调 LLM
   # refine_max_chars=6000 是粗估的输入 token 上限(超出跳过 LLM,只用本地清理)
-  # refine_max_output_tokens=4000 是 LLM 输出上限 — reasoning model (MiniMax M2 / DeepSeek R1)
-  # 还要算上 <think>...</think> 块,实际可能到 ~6000 tokens
+  # refine_max_output_tokens=4000 是 LLM 输出上限。
+  # 2026-09-10 切 deepseek-flash 后:推理走独立 reasoning_content 字段(不内联 <think>),
+  # 但 reasoning_tokens 计入 completion_tokens → 4000 须同时覆盖 推理 + 正文。
   refine_enabled: true
   refine_max_chars: 6000
   refine_max_output_tokens: 4000
@@ -71,20 +72,45 @@ logging:
 # 用户把 Tab Audio Recorder 录完的 webm 拖到 <downloads_dir>/YYYY-MM-DD/
 audio:
   downloads_dir: "./tmp/audio_downloads"
+  # 2026-09-10 FR-2.30.1:路径 ② 抽音上限(秒)。1800 = 只留视频前 30 分钟,
+  # 超出部分直接丢弃(用户裁定)。理由:30 分钟语音 ≈ 8700 字,再长会顶到
+  # LLM 预算(refine_max_chars / max_tokens);顺带省磁盘与时间。
+  # 设 null → 不截断。
+  max_extract_sec: 1800
 
 llm_client:
-  provider: "minimax"     # openai | qwen | deepseek | minimax
+  provider: "deepseek"    # openai | qwen | deepseek | minimax
   api_key_env: "OPENAI_API_KEY"
   base_url_env: "OPENAI_BASE_URL"
+  # 2026-09-10:关掉 reasoning model 的推理链。
+  # deepseek-flash 默认推理极啰嗦 —— 实测一个 2507 字的 refiner 任务烧掉
+  # 16232 reasoning tokens,而这些 token **计入 max_tokens**,把 refiner 的
+  # 4000 预算吃光 → content 返回空 → Refiner 静默回退原文。
+  # 本项目三个云端 LLM 用途(质量检查 / 字幕清理 / 批量总结)都是机械任务,
+  # 不需要推理链。实测 "none" 让 reasoning_tokens 归零,refiner 12.4s 跑通,
+  # 输出 2617 字(与开着推理的 deepseek-chat 的 2619 字基本一致)。
+  # 可选值:"none"(关)| "minimal" | "low" | "high" | 删掉本行(走端点默认,需自行拉大 max_tokens)
+  reasoning_effort: "none"
 
 # R-10(2026-09-03):LLM 模型选择统一在这里 — 旧 quality_check.model / refine_model /
 # summary.model 字段已删除,通过 VLAConfig._migrate_legacy_llm_keys 自动迁移。
-# 2026-09-02 修正:用 MiniMax endpoint 实际支持的模型名(M2.7 / M2.5 是 reasoning model,
-# 响应会带 <think>...</think> 块;QualityChecker / Refiner 的 _parse_json 已能剥掉)
+# 2026-09-10:从 MiniMax-M2.7-highspeed 切到 deepseek-flash。
+# 原因:MiniMax Token Plan 用量耗尽 —— spike 跑 Refiner 时 429
+#   "已达到 Token Plan 用量上限:请升级 Token Plan 套餐或购买积分补充用量。 (2056)"
+# 导致质量门控拿不到 LLM 分数。DeepSeek 端点同 key 另有 deepseek-v4-pro(更强,未启用)。
+#
+# deepseek-flash 实测行为(2026-09-10,与 MiniMax 不同,注意):
+#   - 推理走**独立字段** `reasoning_content`,**不**内联 <think>...</think> 块
+#     → LLMClient.complete 的 message.content 直接拿到干净正文;
+#       QualityChecker / Refiner 的 _parse_json 剥壳逻辑仍兼容,不冲突。
+#   - `reasoning_tokens` **计入** `completion_tokens`(实测 52 总 / 50 推理)
+#     → max_tokens 必须同时覆盖 推理 + 正文,否则 content 返回空串,
+#       而 LLMClient 的 `content or ""` 会把空串静默吞掉(不抛错)。
+#       轻量任务实测推理只吃 ~134 tokens,4000 余量充足。
 llm:
-  refine_model: "MiniMax-M2.7-highspeed"
-  quality_model: "MiniMax-M2.7-highspeed"
-  summary_model: "MiniMax-M2.7-highspeed"
+  refine_model: "deepseek-flash"
+  quality_model: "deepseek-flash"
+  summary_model: "deepseek-flash"
 
 puppeteer:                                 # Phase 3.1+ Puppeteer CDP 配置
   debugging_port: 9222                    # Chrome --remote-debugging-port

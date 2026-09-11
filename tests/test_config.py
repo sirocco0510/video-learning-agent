@@ -59,9 +59,21 @@ class TestFromYaml:
         # 2026-09-10 轻量化:browser_plugin 字段已删除,不再断言。
 
         # llm_client 配置字段名(不是值)
-        assert cfg.llm_client.provider == "minimax"
+        # 2026-09-10:provider 从 minimax 切到 deepseek
+        # (MiniMax Token Plan 用量耗尽,Refiner 429 → 质量门控拿不到分数)
+        assert cfg.llm_client.provider == "deepseek"
         assert cfg.llm_client.api_key_env == "OPENAI_API_KEY"
         assert cfg.llm_client.base_url_env == "OPENAI_BASE_URL"
+        # 2026-09-10 回归护栏:必须关推理。deepseek-flash 默认推理极啰嗦
+        # (实测 16232 reasoning tokens / 2507 字任务),这些 token 计入
+        # max_tokens,会把 Refiner 预算吃光 → content 空 → 静默回退原文。
+        # 删掉这行配置会让 Refiner 重新坏掉,别删。
+        assert cfg.llm_client.reasoning_effort == "none"
+
+        # 2026-09-10 FR-2.30.1 回归护栏:路径 ② 抽音上限 = 30 分钟。
+        # 30 分钟语音 ≈ 8700 字,再长会顶到 refine_max_chars / max_tokens 预算。
+        # 删掉这行配置 → 长视频又变成全量抽音,LLM 侧被截断。
+        assert cfg.audio.max_extract_sec == 1800
 
     def test_from_yaml_returns_vlaconfig(self):
         """返回类型必须是 VLAConfig。"""

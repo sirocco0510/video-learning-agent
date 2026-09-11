@@ -10,15 +10,18 @@
 
 ---
 
-## 项目铁三角(SSOT 锚定)
+## 项目 SSOT 锚定
 
 | 文档 | 角色 | 修改时机 |
 |---|---|---|
 | `README.md` | 项目门户 + 快速上手 | 入口介绍变更 |
 | `requirements.md` | 需求 SSOT(FR-1 ~ FR-10) | **任何需求变更先改这里** |
-| `implementation-plan.md` | 9 个 Phase 实施计划 + 验收代码 | 需求变更后同步;每 Phase 完成后打勾 |
 
-**改流程**:改 `requirements.md` → 同步 `implementation-plan.md` → 改代码 → 跑该 Phase 验收代码。
+**改流程**:改 `requirements.md` → 改代码 → 跑受影响测试。
+
+**`implementation-plan.md` 已弃用**(2026-09-10 用户裁定):不再同步、不再参考。
+文件仍留在仓库里作历史存档,但其中的 Phase 划分 / "验收代码"块**不再有权威性** ——
+不要拿它当 SSOT,也不要因为"它没同步"而向用户报告缺口。
 
 ---
 
@@ -36,10 +39,11 @@
 
 ```text
 src/vla/
-├── cli.py             # typer 入口(vla doctor / process / batch)
+├── cli.py             # typer 入口(vla doctor / process / batch / learn / summarize)
 ├── config.py          # 配置加载(.env + config/vla.yaml)
 ├── models.py          # pydantic 数据模型
 ├── main.py            # 主调度(Phase 8)
+├── learn.py           # 课程目录批量入口(FR-11:翻页 + 时长回填,不改单条链路)
 ├── llm/               # 统一 LLM 客户端(Phase 1)
 ├── source/            # 视频源工厂(yt-dlp / ffmpeg 录屏,Phase 2)
 ├── subtitle/          # 三级字幕策略(Phase 3)
@@ -55,19 +59,18 @@ src/vla/
 
 - 位置:`tests/`,文件名 `test_*.py`
 - fixture 放 `tests/fixtures/`,需要时建子目录
-- 单元测试:每个 Phase 至少 1 个 happy path + 1 个失败 path
-- 验收:`implementation-plan.md` 每个 Phase 末尾的"验收代码"块 = 唯一真相
+- 单元测试:每个模块至少 1 个 happy path + 1 个失败 path
+- 验收:`requirements.md` 对应 FR 的验收标准 + 本次改动新增/受影响的测试 = 唯一真相
 
 ---
 
 ## 开发流程(强制)
 
-1. **TDD**:每个模块先写 test,再写实现,跑测试 → 跑验收代码
-2. **环境检查**:`uv run vla doctor` 全 OK 才能开始 Phase 1+
-3. **完成 Phase**:在 `implementation-plan.md` 进度跟踪处打勾(单选 `[x]`)
-4. **失败处理**:任何 bug 先走 `superpowers:systematic-debugging`,不直接试错
-5. **写代码前**:`superpowers:brainstorming`(除非用户明确说"直接干")
-6. **commit 前**:`superpowers:verification-before-completion`(跑 doctor + 受影响测试)
+1. **TDD**:每个模块先写 test,再写实现,跑测试
+2. **环境检查**:`uv run vla doctor` 全 OK 才能开工
+3. **失败处理**:任何 bug 先走 `superpowers:systematic-debugging`,不直接试错
+4. **写代码前**:`superpowers:brainstorming`(除非用户明确说"直接干")
+5. **commit 前**:`superpowers:verification-before-completion`(跑 doctor + 受影响测试)
 
 ---
 
@@ -77,7 +80,7 @@ src/vla/
 |---|---|
 | **字幕永远本地** | 只用 faster-whisper / B站官方 CC / VideoTrans;**禁止引入云端转写** |
 | **云端 LLM 限定两件事** | ① 字幕质量检查(读 `pass` + `score`)② 6h 批量总结(500–800 字) |
-| **磁盘友好** | 256 GB 机器,峰值 < 1 GB;转写完才能删源文件,质量过了才能删 |
+| **磁盘友好** | 256 GB 机器,峰值 < 1 GB;**转写成功后即可删音频**(2026-09-10 起不再等质量门控,见 FR-3.7);源视频转写完立即删 |
 | **macOS 权限** | 屏幕录制(录屏路径)、通知(B 级)、辅助功能(A 级弹窗)首次需用户授权 |
 
 ---

@@ -32,7 +32,7 @@ tags:
 
 ### FR-0 变更日志(CHANGELOG)
 
-> **用途**:记录需求/设计的**改动点 + 删减点**,便于审计与回溯。SSOT 锚定:`requirements.md` 改 → 同步 `implementation-plan.md` → 改代码 → 跑验收。每次重大重构追加一段,旧段不删除(保留历史)。
+> **用途**:记录需求/设计的**改动点 + 删减点**,便于审计与回溯。SSOT 锚定:`requirements.md` 改 → 改代码 → 跑测试。(`implementation-plan.md` 已于 2026-09-10 弃用,不再同步。)每次重大重构追加一段,旧段不删除(保留历史)。
 
 #### 2026-09-03 重构 v3 — 方案 A + 方案 C 落地
 
@@ -121,6 +121,10 @@ tags:
 
 #### 2026-09-07 重构 v3.2 — 截图优先 + 质量前置于 refine + Free Tab Audio Recorder 全名
 
+> ⚠️ **本节部分条目已作废(2026-09-10 核实)**:下述「Quality 前置于 Refine」(改动点 #5 / #8 / #10 / #11、删减点 #1 / #2、新增点 #5)以及"检查维度新增文本长度合理性"(#6)、"总字数下界启发式"(#7)**均未在代码中生效**。
+> 证据:`git log -S"_maybe_refine" -- src/vla/transcribe/streaming.py` 显示该方法自 `9988db1`(2026-09-07,**与本说明同一天**)引入后**再无变更** —— 即"Refine 从 `streaming.py` 内移到 `main.py`"这条设计从未落地;实际顺序一直是 **Refine 在门控之前**。
+> 本节保留为历史记录,**不代表当前行为**;当前行为以 FR-2.15c / FR-3.8 / FR-3.9 / FR-4.* 各行为准(已于 2026-09-10 订正)。
+
 **背景**:用户复盘 2026-09-07 F2-5 spike 实测后给出 4 项重要调整:
 1. **截图是关键路径,优先于字幕转写** — Chrome 页面必须跳转,Phase A 开头 + Phase C 末尾截图必须执行(不再仅限策略 ③ Whisper 视频)
 2. **质量门控放在转写调优(refine)前面** — 避免 L4 云端 polish 在 garbage 文本上浪费 token;refine 只在 passed 文本上跑,作为 summary 前置工作
@@ -170,7 +174,7 @@ tags:
 1. **Whisper 永不接收视频信号** — 只接收音频(`.wav` 来自 ffmpeg 解封装,`.webm` 来自 `chrome.tabCapture`)
 2. **Whisper 永不经过麦克风 ADC**(2026-09-03 新增) — `getUserMedia({audio:true})` 在普通页面 JS 只能拿麦克风,**禁止**作为音频源
 3. **Tab Audio Recorder 扩展 ID 不硬编码** — 运行时从 `chrome.management.getAll()` 动态解析
-4. **不再持续录屏**(2026-09-03 修正,允许单帧截图) — 旧红线"不录屏"修正为:不再持续录屏(只抽音频);**允许截单帧 PNG**(FR-2.28)用于视频证据;`audio_raw/` 文件在 Whisper 转写 + 质量通过后立即 unlink
+4. **不再持续录屏**(2026-09-03 修正,允许单帧截图) — 旧红线"不录屏"修正为:不再持续录屏(只抽音频);**允许截单帧 PNG**(FR-2.28)用于视频证据;`audio_raw/` 文件在 Whisper 转写**成功后**立即 unlink(2026-09-10 修正:不再等质量门控)
 5. **失败兜底路径降级语义不变** — 任何路径失败 → 写 `quality_skip.csv` 或 `transcribe_fail.csv`,**不阻塞 session**,继续下一条
 6. **截图必须截到系统级时间戳**(2026-09-03 强需求) — 必须用系统级 `screencapture`(macOS)/ PowerShell(Windows),**禁止**用浏览器截图扩展或 `Page.captureScreenshot`(无法截到菜单栏/任务栏)
 7. **截图必须前置在录制之前**(2026-09-03 强需求) — PHASE A 开头截图 → 才启动音频录制;末尾截图与录制并发进行(不需要前置)
@@ -178,6 +182,325 @@ tags:
 9. **禁用 macOS 原生全屏**(2026-09-03 新增) — 必须用 `element.requestFullscreen()`(在当前 Space 内全屏,不切 Space),避免 Mission Control 切换 Space 后 `screencapture` 截不到
 
 ---
+
+#### 2026-09-10 长视频链路三改 — m3u8 直抽优先 / 抽音 30min 上限 / 转写成功即删音频
+
+**背景**:bill-jc 内部站长视频端到端跑通后,暴露四类问题(质量、成本、磁盘、启动耗时)。同日多次反转,以下为定稿。
+
+**改动点**
+
+| # | 位置 | 改动 | 依据 |
+|---|---|---|---|
+| 1 | FR-2.30(新增) | 路径 ② 抽音**反转为 m3u8 直抽优先**,浏览器 4x 捕获降为 fallback | 四向受控对比(同一 177.59s 视频):浏览器 4x + atempo=0.5 → **35 分**;m3u8 直抽 → 62/65;m3u8 + Refiner → **92**。逐词对比显示 4x 有损可懂度(`国家统计局`→`规判统计`、`PhantomJS`→`翻腾架子`)。音高已排除(F0 比 0.97)。**关键结论:异常驱动的 fallback 抓不到质量回退——浏览器路径不会因音质差而抛异常,主备顺序必须由实测质量裁定** |
+| 2 | FR-2.30.1(新增) | 路径 ② 抽音上限 **30 分钟**(`audio.max_extract_sec`,默认 1800),超出丢弃 | 30min 语音 ≈ 8700 字,再长顶到 LLM 预算;输出侧 `-t`(位于 `-i` 之后)限制时长且停止拉后续 HLS 分片。截断不算失败 |
+| 3 | FR-2.15c(修正) | 超 `refine_max_chars` 由「跳过 LLM」改为「**截断精修前段 + 尾部逐字保留**」 | 旧语义同时丢 canonical 转写 + 触发 FR-2.15d 静默失效 |
+| 4 | FR-2.15d(新增/修正) | 单视频摘要改为**无条件触发**,并修掉「从来没产出过」的生产 bug | 见下 |
+| 5 | FR-3.7 / FR-2.22 / FR-2.26(修正) | 音频清理由「质量过了才删」改为「**转写成功即删**」 | 用户 2026-09-10 裁定。重跑 refine / summary 只需文本,只有重转写需要 wav,而重抽成本被 #2 的 30min 上限约束。**红线「质量过了才能删」同步作废** |
+| 6 | FR-3.8(修正) | **不再落盘 `cleaned.txt`** | 只写不读的中间产物(全仓无读取方);Level 1 结果留内存即可 |
+| 7 | FR-3.2(修正) | Whisper 加载**必须先 `local_files_only=True`** | HF 联网 metadata 校验在网络不可达时干等 150s(冷加载 150.6s → 本地 0.5s),是转写本身的 6 倍 |
+
+**FR-2.15d「从来没产出过」根因**(记录以便回溯):
+`build_text_provider` 此前装配 `VideoSummarizer(cfg)`(**不带 LLM**),`summarize_one` 抛 `RuntimeError` → 被 `process_asset` 的宽 `except Exception` 吞成一条 warning;而 CLI 与 spike **两条装配路径都传 `summarizer=None`**(唯一构造 `LLMSummarizer` 的地方是 6h 批量总结,那是另一个类,没有 `summarize_one`)。旧的长度门控(短文本先返回空)把它盖住了,门控一撤即现形。
+**定稿形态**:构造期零依赖(同 `QualityChecker` / `SubtitleRefiner`)+ 类内**惰性构造** LLM。中间版本曾在 build 期 eager 建 `LLMClient`,导致构造期就要凭据 → `build_text_provider` 的单测全炸 `Missing credentials`。**教训:装配路径不该决定摘要产不产出。**
+
+**已知且暂时接受的事实**:`SubtitleRefiner` 被调用了**两次**每条视频 —— `StreamingTranscriber._maybe_refine` 与 `process_asset` Step 4 各一次(实测日志:867→901 字符 8 条修正,紧接 901→901 字符 3 条修正,第二次精修的是已精修文本)。
+
+**裁定(2026-09-10):暂时允许二次精修。** 代价是每条视频多一次云端 LLM 调用(计入配额 ① 字幕质量检查);收益是幂等 —— 第二次跑在已精修文本上通常收敛(实测 901→901,仅 3 条修正),不会持续改写。**不视为 bug,不再单独修**;若日后要收敛,方向是让 `_maybe_refine` 与 Step 4 只留一处,而不是在 `SubtitleRefiner` 内部加去重。
+
+**验证**:全量 `18 failed / 709 passed`。这 18 项(16 `test_e2e` + 2 `test_quality_checker`)为**既有失败** —— 已用 `git stash` 把工作树退回干净的 HEAD(72b269a)复跑同两个文件,得 `18 failed / 18 passed`,逐项一致,本次改动新增 0 个失败;`vla doctor` 全 OK;端到端 spike 质量分 88,m3u8 直抽 5.7MB/177s,315 字摘要落盘。
+
+#### 2026-09-10 课程目录批量入口 — `vla learn`(FR-11 新增)
+
+**背景**:bill-jc 课程目录动辄几十上百条视频,原来只能一条条粘 URL 跑
+`vla-learn-bill-jc` skill(单视频 scope)。需要批量入口,且**不影响单条转写逻辑**。
+
+**改动点**
+
+| # | 位置 | 改动 | 依据 |
+|---|---|---|---|
+| 1 | FR-11(新增) | 新子命令 `vla learn --college-id <cid> --catalog-id <catalogId>`,自己翻页取任务 | 用户 2026-09-10 裁定入口形态 |
+| 2 | `internal_site_spider.list_tasks` | 加 `offset` 参数;**修掉页大小写死 16 的分页 bug** | 见下 |
+| 3 | `audio/source_factory` | `probe_duration` 从 `AudioSourceFactory` 方法抽成**模块级函数** | learn 拿到 wav 后要回填真实时长,那条路径不经过 `AudioSourceFactory`,但需同一份 ffprobe 逻辑与失败语义。方法保留为一行委托 |
+| 4 | `learn.py`(新增) | `iter_course_tasks`(翻页代数唯一定义处)+ `with_duration_resolution`(时长回填包装器) | 见下 |
+| 5 | `cli.py` | `learn` 子命令 + `_build_learn_provider`(**自建 refiner + transcriber**) | 见下 |
+
+**页大小写死 16 的分页 bug(本次修复)**:
+旧 `list_tasks` 把 `"limit": 16` 硬编码进 pagelist params,而本地只收 `limit` 条 ——
+`--limit 10` 时每页静默丢弃 6 条,100 条视频的目录会漏掉 60 条且**无任何报错**。
+定稿:**页大小 == 翻页步长 == `--limit`**,两者由同一个变量驱动。
+
+**"不影响单条转写逻辑"如何做到**:`fetch_asset` / `process_asset` /
+`VideoLearningAgent.run` **一行未改**。时长回填靠**包装器**在 asset 到手后、
+`process_asset` 看到它之前改 `task.expected_duration`(依赖 `main.py:_process_one`
+Step 1 → Step 2 的调用顺序)。免费:bill-jc 路径必须先抽音才有得转写,
+包装器运行时 wav 一定已在磁盘上,ffprobe 是纯读。
+
+**探测失败不覆盖占位值**:`probe_duration` 返 0(ffprobe 缺失/超时/解析失败)时
+保留原值 3600。覆盖成 0 会让 `char_per_second = chars / 0` → inf,踩爆
+`max_char_per_second` 上限,把正常视频误判成幻觉。
+
+**Refiner 必须早于质量门控(装配注意)**:`build_text_provider` 的 auto-construct
+会建 `StreamingTranscriber(cfg)` **不带 refiner**,Level 4 云端清理被
+`_maybe_refine` 静默跳过,未清理文本直接进质量门控。2026-09-10 实测:未注入
+score **45(不过)** vs 注入后 **88(过)**。`learn` 因此像 spike 一样自建
+refiner(with LLM)+ transcriber 再注入。(`process_asset` Step 4 也 refine,
+但那在门控**之后**,救不回 fail。)
+
+**不传 browser_driver**:批量路径不需要截图,且 `main.py:_stop_chrome_session`
+会无条件对已注入的 driver 调 `disconnect()`(`ctx.close` + `browser.close`)
+—— `run()` 每页调一次,可能关掉**下一页还要借 cookie** 的那个 Chrome 会话。
+当前 `chrome_session.enabled` 默认 False,该风险未激活;`learn` 主动规避。
+
+**去重的实际前提(2026-09-10 实测发现)**:
+`logs/transcribed_history.jsonl` 由 `agent.run` 在每条成功后写入,而
+**`scripts/spike_bill_jc_full.py` 从不写它**(spike 直接调 fetch/process,不经过
+agent)。所以既往用 spike 跑过的 bill-jc 视频**不在** history 里,FR-9.6 去重对
+它们无效 —— `vla learn` 会重跑。`--dry-run` 的"已转写 N 条"反映的正是 history
+的真实内容,不是磁盘上 transcript 的数量。
+
+**验证**:全量 `18 failed / 739 passed`。18 项(16 `test_e2e` + 2 `test_quality_checker`)
+为**既有失败**(与 72b269a 基线逐项一致),本次新增 0 个失败;`739 = 709 + 30`,
+新增测试 = 7(spider 分页)+ 7(`probe_duration`)+ 16(`learn`)。
+
+**真机验证(2026-09-10)**:对用户给定的课程目录页跑 `vla learn --dry-run`,
+从真实 API 翻出 `目录共 5250 条 / 已转写 0 条`(525 页 × 10 条,offset 0→5250
+逐页递增,空页终止)。这同时验证了 FR-11.3(页大小==步长,无跳号)与
+FR-11.5(只认空页)。
+
+#### 2026-09-10 批量真跑暴露的三处缺陷 — kngId 解析 / 弹窗误触发 / 签名不匹配
+
+**背景**:上一条 `vla learn` 交付后真机批量首跑(`--limit 10`,目录 277 条),
+**42 条视频全挂**,每条都打 `策略 ③ 失败(计入 transcribe_fail)`。三个缺陷串成一条链。
+
+| # | 位置 | 缺陷 | 性质 |
+|---|---|---|---|
+| 1 | `internal_site_adapter._BILL_JC_LEARN_RE` | 按 `/learn/<kng_id>` **path** 解析 kng_id,而真 URL 的 kngId 在**查询参数**里 → 静默 miss | 根因 |
+| 2 | `strategy._try_browser` | adapter miss 后无条件弹 A 级窗问"是否开启字幕插件" | 缺陷 1 的后果 |
+| 3 | `InternalSiteAdapter.fetch_via_recording` | override 收窄了基类 signature,缺 `audio_factory` / `transcriber` → TypeError | 缺陷 1 的后果,被记录成"转写失败" |
+
+**缺陷 1(根因)**:`list_tasks`(`internal_site_spider.py:266`)生成的 URL 是
+SPA 详情页 `…/kng/#/video/play?kngId=<uuid>&projectId=&btid=&gwnlUrl=`,
+`kngId` 在查询参数里。而 adapter 的正则 `re.compile(r"/learn/([^/?#]+)")` 只认
+path 形式 —— `/learn/<kng_id>` 是 **2026-09-09 设计文档里的凭空假设,真机不存在**
+(2026-09-10 用户裁定)。miss 走 `logger.debug`,默认日志级别下**完全不可见**。
+修:改按查询参数 `[?&]kngId=([^&#\s]+)` 解析,`&` 锚定保证 kngId 不必是首个参数。
+
+**为什么测试没拦住**:`tests/test_internal_site_adapter.py` 全部用 `/learn/kng-001`
+这类 URL,其中一条还写着 *"URL 不含 `/learn/<id>` → 返回 None(spider 不该被打扰)"*
+—— **SPA 形式被测试明确判成 miss**。测试与实现的假设一致地错,所以 739 个测试全绿。
+另:spike 直接调 spider,不经 strategy / adapter,所以"spike 端到端跑通"从未覆盖这条路。
+
+**缺陷 2(弹窗)**:策略 ② 的 A 级窗问的是"是否已开启字幕插件" —— 内部站没有插件可开,
+用户无法给出有意义的回答。真跑时每条视频弹一次(30s 超时)。修:基类加类属性
+`plugin_popup_enabled: bool = True`,`InternalSiteAdapter` 置 **False**,
+`strategy._try_browser` 在字幕探测**之后**、弹窗**之前**检查该闸门。探测照跑
+(未来内部站若有 DOM 字幕仍能命中),只是不再弹窗。
+
+**缺陷 3(签名)**:`strategy.get_subtitle` 策略 ③ 固定传
+`audio_factory=` / `transcriber=`(基类 `PlatformAdapter.fetch_via_recording` 是
+keyword-only 契约),而 `InternalSiteAdapter` 的 override 只写
+`(self, driver, url, duration_sec)`。后果不只是抛错 —— 它被 `except` 记成
+**`策略 ③ 失败(计入 transcribe_fail)`**,把"自己签名不匹配"错记成"视频转写失败",
+污染失败统计与 FR-6.6 计数。修:override 补齐 keyword-only 参数。
+
+**未修但已知的行为**:配额只在视频**通过**时累加(FR-9.4),所以整批全失败时
+`quota.add()` 永不触发 → `run_course_batch` 的 `should_continue()` 恒为 True →
+**会一路翻完整个目录**。本次即如此(60s 内翻了 4 页多)。是否加"连续失败 N 条即停"
+的熔断,留给后续裁定。
+
+**本次运行的副作用**:`logs/transcribe_fail.csv` 被写入 **43 行**垃圾记录
+(`stage=fetch_asset`,`error=all paths exhausted`,全部为 `b-learning.bill-jc.com`
+域名,时间戳落在 2026-09-10 22:05–22:16 的失败窗口内),不是真实转写失败。
+**用户 2026-09-10 裁定:已清理**(逐行解析后剔除这 43 行;保留 29 行 bilibili
+yt-dlp 真实失败 + 1 行 bill-jc `transcribe` 失败,共 30 行)。注意该文件含
+带内嵌换行的 quoted 字段(ffmpeg stderr),`wc -l` 数的是**行**不是**行数** ——
+清理必须走 `csv` 模块,按行过滤会切断合法记录。清理后 FR-6.6 的
+`FailureAlert` 计数基数同步下降(原被垃圾行虚增)。
+
+**验证**:全量 `18 failed / 744 passed`。18 项(16 `test_e2e` + 2 `test_quality_checker`)
+为**既有失败**(与 72b269a 基线逐项一致),新增 0 个失败;`744 = 739 + 5`。
+新增测试 5 条:SPA URL 解析 / kngId 非首参 / 无 kngId 返 None /
+`fetch_via_recording` 接受基类 kwargs / `plugin_popup_enabled=False` 时不弹窗。
+另修正 2 条**因错误原因通过**的既有测试(`_without_spider` 与 `_handles_spider_exception`
+原先用无 kngId 的 URL,会在到达被测分支前就返回 None)。
+
+#### 2026-09-10 质量链路两处「没注入 LLM 就崩」— QualityChecker / SubtitleRefiner 统一惰性构造
+
+**背景**:上一条修完三处缺陷后重跑批量,链路首次推进到质量门控,随即崩在
+`QualityChecker.check()`。**不是 fail 一条视频,是把整个 `vla learn` 批量带走**。
+
+**根因**:`build_text_provider` 的 T13 兜底只做了一半 ——
+
+```python
+if checker is None:
+    checker = QualityChecker(cfg)   # 建了对象,但没注入 LLM
+```
+
+该兜底的注释自称修的是"`cli._build_real_provider` 不传 checker 时
+`self.checker.check(...)` 处 AttributeError 的生产路径 bug" —— 结果是
+`AttributeError` 换成了 `RuntimeError`,**路径依然不通**。异常从
+`QualityChecker.check` 一路上抛(`main_provider.py:258` → `main.py:287` →
+`main.py:210` → `learn.py:169` → `cli.py:589`),批量整体终止。
+
+**同一缺陷已修过一次,只修了一半**:2026-09-10 给 `VideoSummarizer` 加
+`_resolve_llm` 时,本文档已把「构造期零依赖(同 `QualityChecker` / `SubtitleRefiner`)
++ 类内**惰性构造** LLM」写成定稿形态,并留下「**装配路径不该决定摘要产不产出**」
+的教训 —— 但 `QualityChecker` / `SubtitleRefiner` 当时并未一起改,SSOT 描述的
+契约与代码不符。本次补齐。
+
+| # | 位置 | 缺陷 | 后果 |
+|---|---|---|---|
+| 1 | `quality/checker.py:130` | 未注入 LLM 抛 `RuntimeError` | **整个批量终止**(异常上抛,非 fail 单条) |
+| 2 | `quality/refiner.py:144` | 同上 | `vla process --real-provider` 必崩(`refine_enabled: true` 时 `build_text_provider` 自动建裸 refiner) |
+
+**修法**:两者都补 `_resolve_llm()`(与 `VideoSummarizer` 同一契约)——
+`set_llm()` 显式注入优先,没注入则首次调用时按 cfg 惰性构造并缓存。
+`QualityChecker` 取 `cfg.quality_check.model`(与 spike 一致),
+`SubtitleRefiner` 取 `cfg.llm.refine_model`。
+
+**为什么兜底而不是「没注入就报错」**:装配方(`build_text_provider` / cli / spike)
+只保证 `Xxx(cfg)`,不保证 `set_llm`。组件自给自足,「忘注入」才不再等于「功能消失」。
+**但构造失败仍照常上抛** —— 惰性构造放在各自主流程的 `try` **之外**,凭据真缺失时
+报错可见,不重蹈 FR-2.15d 那次「异常被宽 `except` 吞成静默不产出」。
+
+**契约变更(测试)**:`tests/test_refiner.py::TestRefine::test_missing_llm_raises`
+原断言「未注入 → `RuntimeError`」,**本次删除**并改为惰性构造契约(3 条新测试)。
+`QualityChecker` 侧原先**没有**测试锁住该行为,故只增不改(4 条新测试)。
+
+**验证**:全量 `18 failed / 750 passed`。18 项(16 `test_e2e` + 2 `test_quality_checker`)
+为**既有失败** —— 已用 `git stash` 把工作树退回 HEAD 复跑证实逐项一致,本次新增
+0 个失败;`750 = 744 + 7 新增 − 1 删除`。
+
+#### 2026-09-10 落盘路径统一 — 音频归 `tmp/`、转写归 `logs/transcribed/<date>/`
+
+**背景**:批量真跑时发现三处写入方各用一套路径约定,产物散成三棵树:
+
+| 写入方 | 旧路径 | 问题 |
+|---|---|---|
+| `audio/source_factory.py` `DEFAULT_SAVE_DIR` | `./logs/audio_raw` | 与生产装配路径(`main_provider` 传 `save_dir/"audio_raw"` → `tmp/audio_raw`)**不一致**;用默认值构造时 wav 落进 `logs/`,而 `logs/` 是被读盘扫描的目录,不该混入二进制 |
+| `transcribe/streaming.py:165` | `<log_dir>/transcripts/`(**扁平**) | 与正式产物分家 —— 原始/精修产物一棵树,`<id>_<title>.txt` 另一棵 |
+| `log/transcription_log.py` | `<log_dir>/transcribed/<date>/transcripts|summaries` | 本次定为基准 |
+
+**定稿约定**:
+- **音频**一律 `<cwd>/tmp/audio_raw/`(CWD 相对,**不**重新锚定到仓库根 —— 与既有 `tmp/` 语义一致)
+- **转写**一律 `<cwd>/logs/transcribed/<YYYY-MM-DD>/{transcripts,summaries}/`
+
+**修法**:日期分组逻辑收敛为 `log/transcription_log.py` 的**唯一来源**
+`dated_root_for()` / `transcripts_dir_for()` / `summaries_dir_for()`,
+`TranscriptionLog.__init__` 与 `streaming.py` 都改为引用(不再各算各的日期;
+`__init__` 内 transcripts/summaries 由**同一个 `when`** 派生,顺带消除跨零点分家)。
+`DEFAULT_SAVE_DIR` 改 `Path("./tmp/audio_raw")`。
+
+**连带缺陷(本次一并修)** —— 中间产物并进 `transcripts/` 后,`LLMSummarizer._load_items`
+对该目录是无条件 `glob("*.txt")`,会**把一条视频当成三条重复内容**喂进 6h 总结
+(标题/正文重复堆叠)。故同时加 `_DERIVED_SUFFIXES = (".transcript.txt", ".refined.txt")`
+过滤,在三条 glob 分支合流后统一排除。
+
+**遗留**:`logs/transcripts/`(旧扁平目录)在途进程仍会写,存量文件**不擅自删除**
+(含 `test.transcript.txt` 与一次真跑的 `8790fab3-*`),待人工处置。
+`scripts/spike_bill_jc_full.py` 的 `tmp/transcripts/` **保持现状**(spike 自带约定,本次不动)。
+
+**验证**:全量 `18 failed / 752 passed`。18 项与前一条完全一致(既有失败);
+`752 = 750 + 2 新增`。RED→GREEN 逐项证实:先见 `ImportError: cannot import name
+'transcripts_dir_for'`(streaming),再把 `source_factory.py` / `llm_summarizer.py`
+两文件 `git stash` 复跑 → `2 failed`(`assert PosixPath('logs/audio_raw') ==
+PosixPath('tmp/audio_raw')` + 中间产物被计入),`stash pop` 后转 GREEN。
+
+#### 2026-09-10 质量通过即丢弃转写中间产物(磁盘友好)
+
+**背景**:上一条把 `.transcript.txt` / `.refined.txt` 并进了 `logs/transcribed/<date>/
+transcripts/`。它们与正式产物 `<id>_<title>.txt` 内容重叠,通过质量后纯冗余。
+
+**裁定(用户 2026-09-10)**:**质量通过 → 丢弃;质量未通过 → 两个都留**。
+
+留的理由不是习惯,是证据不可替代:`.refined.txt` 可能带 Refiner 降级的
+`# notes: <原因>`(`streaming.py:227`),而 `failed_texts/<id>.txt` 只有最终文本 ——
+失败时留原始/精修产物,才答得上「是转写烂还是 Refiner 烂」(如 `8790fab3` 那次
+score=55 的失败,LLM 的指控全是「公司名/术语转写错」,正需要原始产物对照)。
+
+**实现**:
+- `TranscriptionLog.discard_transcribe_intermediates(stem)` —— 只删精确的
+  `<stem>.transcript.txt` / `<stem>.refined.txt`,**幂等**(文件不存在返回 `[]`,不抛)
+- 路径用 `transcripts_dir_for(self.log_dir)` **当场算**,不用 `self.transcribed_dir`
+  (`__init__` 快照)—— 批量跨零点时快照指向昨天,而 transcriber 是转写那刻现算的,
+  不一致就删不中
+- 调用点:`main_provider.process_asset` **Step 6**,位置在 Step 5 `save_transcribed`
+  **成功之后**。时序是刻意的:若写盘失败,中间产物就是唯一幸存的副本,不能先删
+- 失败分支在 Step 3 已 `return None`,天然走不到;`audio_path is None`(api/browser
+  路径,没转写)则跳过
+- 清理失败只 warning,不影响主流程(字幕已通过质量并落盘)
+
+**连带更正**:`summary/video_summarizer.py:23` 原写「长视频同时保留 refined.txt(全文
+本)+ .summary.txt」,与本次策略相抵。已证实**无任何读取方从盘上读它**(摘要吃的是
+内存里的 text),故改准确 —— 否则修完 FR-2.15d 后有人会误以为摘要依赖该文件存在。
+
+**不动**:`llm_summarizer._DERIVED_SUFFIXES` 过滤**仍然必要** —— 失败时文件还在,
+存量文件也在。
+
+**验证**:`tests/test_transcription_log.py` + `tests/test_process_asset.py` = `34 passed`。
+新增 6 条测试中 **5 条 RED→GREEN**,第 6 条
+(`test_process_asset_quality_fail_keeps_intermediates`)**本来就是绿的** ——
+它锁的是「失败时别删」这条现状契约,是防回归栅栏,不是红→绿测试(如实记录,不充数)。
+
+#### 2026-09-10 FR-2.15d 摘要槽位被 6h 批量 summarizer 顶掉 —— 静默不产出
+
+**症状**(真机 `vla learn` 批量,5 条视频):一条摘要都没产出,日志里只有
+`'LLMSummarizer' object has no attribute 'summarize_one'` 的一行 warning。
+
+**根因**:两个**同名不同物**的 summarizer:
+
+| 类 | 归属 FR | 方法 | 装配点 |
+|---|---|---|---|
+| `LLMSummarizer` | FR-5 / FR-9(6h 批量总结) | `summarize_batch` / `write_to_notes` | `VideoLearningAgent(summarizer=…)` |
+| `VideoSummarizer` | FR-2.15d(单视频 200-300 字) | `summarize_one` / `write_summary` | `build_text_provider(…)` |
+
+`cli._build_learn_provider` 把 `comps["summarizer"]`(**前者**)注进了**后者**的槽位。
+注入优先于兜底 ⇒ `RealTextProvider.video_summarizer` 拿着没有 `summarize_one` 的对象
+⇒ `AttributeError` 被 `process_asset` Step 4.5 的宽 `except Exception`
+(`main_provider.py:304`)吞成一行 warning ⇒ **整批一条摘要都没有,而退出码是 0**。
+
+**修法(用户裁定 A+B)**:
+
+| # | 改动 | 目的 |
+|---|---|---|
+| A | 删 `cli._build_learn_provider` 里的 `summarizer=comps["summarizer"]` | 停掉误注入,摘要槽位回归 `build_text_provider` 兜底 |
+| B | `build_text_provider` / `RealTextProvider.__init__` 形参 + 属性 `summarizer` → **`video_summarizer`** | 让这类误传**当场 `TypeError: unexpected keyword argument`**,而不是被宽 except 吞成 warning |
+
+**不动**:`VideoLearningAgent.summarizer`(`main.py:121/321/329`)**保持原名** ——
+那个槽位合法持有 `LLMSummarizer`,改名会破坏 6h 批量总结。
+
+**兜底契约**(与 T13 的 checker / refiner 一致):不传 `video_summarizer` ⇒
+自动构造 `VideoSummarizer(cfg)`;**构造期零凭据**,LLM 在首次 `summarize_one` 时
+按 `cfg.llm_client` 惰性构造(见 `summary/video_summarizer.py:_resolve_llm`)。
+
+**验证**:`tests/test_main_provider.py` 新增 4 条,**4 条 RED→GREEN**
+(改前 `4 failed, 8 deselected`;改后 `12 passed`)。全量套件在本工作区
+`18 failed / 762 passed`,把全部未提交改动 stash 掉后在 HEAD 上是
+`18 failed / 739 passed` —— **同 18 条失败**,均为既存问题
+(16 × `test_e2e.py` sync/async 混用 + 2 × `test_quality_checker.py` 文案断言),
+本次改动**零新增失败**。
+
+**真配置装配复验**(2026-09-10,不删的一次性脚本):用真实 `config/vla.yaml` +
+`.env` 调 `cli._build_learn_provider(cfg, spider=…, comps={"summarizer": LLMSummarizer})`
+—— 即复现真机的误注入输入 —— 断言结果:
+
+```
+comps['summarizer']        = LLMSummarizer | has summarize_one? False
+provider.video_summarizer  = VideoSummarizer
+  has summarize_one?         True
+  has summarize_batch?       False   ← 6h 批量对象未越位
+  LLM 构造期已建?            False   ← 零凭据构造
+```
+
+全程**不发起 LLM 请求**(`LLMClient` 构造离线,只存凭据),不消耗 quota。
+这条证明的是**装配**:若要证明"摘要真的落盘",仍需一次完整真机转写。
+
+其中 `test_learn_provider_does_not_inject_batch_summarizer` 是**根因测试**:
+monkeypatch `build_text_provider` 截住 `_build_learn_provider` 传的关键字实参,
+断言 `"summarizer" not in captured`。首轮写法(comps 里不放 `"summarizer"` 键)
+虽然也红,但红在测试自身的 `KeyError`,不是断言 —— 属**假红**,已改成
+喂一个 `LLMSummarizer` 形状的 stand-in(有 `summarize_batch`,无 `summarize_one`),
+让红灯落在真正的断言上。
 
 ### FR-1 视频源管理
 
@@ -226,17 +549,18 @@ tags:
 | FR-2.15  | **Free Tab Audio Recorder 触发 + 编辑器 URL**(2026-09-07 v3.2 改全名,2026-09-03 重构 v2):扩展 ID **不固定**,运行时 `TabAudioRecorder._resolve_ext_id()`(FR-2.24)从 `chrome.management.getAll()` 遍历 chrome-extension 列表,匹配规则:`name.toLowerCase().includes("free tab audio recorder")` OR `description.toLowerCase().includes("free tab audio recorder")`(2026-09-07 v3.2 改为全名匹配,旧 `"tab audio"` 子串仍兼容);匹配不到 → 抛 `ExtensionNotFoundError`,`SubtitleStrategy` 捕获后写 `quality_skip.csv`。配置在 `config/vla.yaml` 的 `extension.tab_audio_recorder.match_keyword`(默认 `"free tab audio recorder"`,可改),用户也可在 `vla doctor` 命令里指定其他关键词(防止扩展改名)。**触发方式**:在动态解析到的 background page 上跑 evaluate JS 启动录制(`FR-2.24 触发器` 实现),**不依赖 hotkey**(Free Tab Audio Recorder 无 `chrome.commands`、macOS TCC 拦截 `Input.dispatchKeyEvent`、CDP 键盘事件对扩展 chrome.commands 无效)。**音频 ID 获取**:扩展内部启动录制后,通过 background page evaluate 读 `window.__last_audio_id` 或解析 `<ext_url>/editor.html?id=<audio_id>` URL(扩展跳转到此页面作为录制完成标志),用正则 `id=(\d+)` 提取 audio_id。**录制时长**:`duration_sec` 由调用方传入,后台 service worker 自己计时 stop;Agent 端用 `asyncio.sleep(duration_sec + post_buffer_sec=30)` 轮询 editor.html 是否就绪。**关键设计**:audio_id 是本地文件命名 + 转写队列 key(FR-2.26/2.27),全程不依赖视频画面 | P0  |
 | FR-2.16  | **策略 ③ 音频输入**(2026-09-03 重构 v3,方案 A):二级降级路径详见 FR-2.14;路径 ① yt-dlp 输出 `.wav`、路径 ② Tab Audio Recorder 输出 `.webm`(opus 编码),两者均直接送 `faster-whisper` 转写(无需 ffmpeg 重抽);**Whisper 永不接收视频信号,永不经过麦克风 ADC**(2026-09-03 砍掉 Puppeteer 流式路径后的新不变量);`AudioTranscriber` Protocol 是注入点,Phase 4 接 `WhisperTranscriber`,FR-2.27 worker 池并发处理 | P0  |
 | FR-2.17  | **BilibiliAdapter**:实现 FR-2.1/2.2/2.4,`match` 域名匹配 `bilibili.com` / `b23.tv`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | P0  |
-| FR-2.18  | **InternalSiteAdapter**(占位):接口留 stub,等公司下发账号后实现 `match` 域名 + fetch 方法;当前抛 `NotImplementedError`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | P1  |
+| FR-2.18  | **InternalSiteAdapter**(2026-09-09 Phase 9.6 实装,原文"占位 stub / 抛 `NotImplementedError`"已过时):`match` 命中 `b-learning.bill-jc.com` 等内部域;`fetch_via_spider` 从 URL 的 **`kngId` 查询参数**取 id → `InternalSiteSpider.fetch_m3u8` → `(None, {"video_url": m3u8, "via": "internal_spider"})`,交 `fetch_asset` 路径 ② 抽音;`fetch_api_subtitle` / `fetch_browser_subtitle` 如期返 `None`;`plugin_popup_enabled = False`(见 FR-11.12) | P0  |
 | FR-2.19  | **通用 fallback adapter**:未知 URL 域名时(非 B 站、非 internal site),跳过策略 ①,直接走 ② Tab Audio Recorder(FR-2.14/2.21);yt-dlp 对未知站点大概率 simulate 失败,直接进入降级链                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | P1  |
 | FR-2.20  | **降级路径**:任一策略失败都降级到下一级,不跳过当前视频;仅 ③ 失败才算"字幕提取失败"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | P0  |
 | FR-2.21  | **策略 ③ 自动探测 + 通知兜底(方案 C,2026-09-07 v3.2 改名,2026-09-03 重构 v2)**:路径 ① yt-dlp miss 后,**不再弹 A 级阻塞 dialog**(方案 C)。新流程:`TabAudioRecorder.probe_status(browser) -> Literal["enabled", "disabled", "not_installed"]`(FR-2.24a)→ 三态分支处理:**`enabled`** → 直接调 `TabAudioRecorder.start_recording(driver, url, duration_sec)` 拿 audio_id(FR-2.24),无需用户响应;**`disabled`**(扩展装了但被关,2026-09-07 v3.2 改全名) → `MacOSNotifier.info("需要启用 Free Tab Audio Recorder", "Free Tab Audio Recorder 已安装但未启用 → 请在 chrome://extensions/ 启用 → 下次运行自动生效")` B 级通知 + 写 `quality_skip.csv`(不阻塞,继续下一个视频);**`not_installed`**(扩展未找到) → `MacOSNotifier.warning("Free Tab Audio Recorder 未安装", "请从 Chrome Web Store 搜索 'Free Tab Audio Recorder' 安装并启用")` B 级通知 + 写 `quality_skip.csv`。**无状态设计(每次即时探测)**:与旧版 `PluginStatus` 单例不同,每次调用都重新探测(扩展状态可在 Chrome 设置里随时改);探测耗时 ~100ms(一次 `chrome.management.getAll()` 调用),可接受。**降级语义**:Tab Audio Recorder 路径本身失败时(扩展无响应 / audio_id 拿不到 / 文件超时未落地)→ 写 `quality_skip.csv` + log warning,**不记 transcribe_fail**(whisper 还没启动)。**Session 行为**:不阻塞 session,优雅降级,用户后续可在 Chrome 启用扩展后下次自动生效                                                                                                                                                  | P0  |
-| FR-2.22  | **音频文件清理**(2026-09-03 重构 v3,方案 A):路径 ① yt-dlp `.wav`、路径 ② Tab Audio Recorder `.webm` 二者**统一管理**(2026-09-03 砍掉 Puppeteer 流式路径后)。**主路径**:Whisper 转写完成且通过质量门控(FR-4)后由 `StreamingTranscriber` 立即 `audio_path.unlink()`,**绝不保留**;**Whisper 失败 / 质量不过关**:`logs/audio_raw/<audio_id>.webm` 或 `<bvid>.wav` 文件保留 24h 后由 `log/failure_alert.py` 后台清理线程删除(`max_fail_keep_hours=24`,可配置);**全路径 `transcribe_fail` 时**:文件进 `logs/audio_failed/` 永久保留供排查。**禁用录屏文件路径**:旧 `BrowserRecorder` 的 mp4 视频源清理逻辑整段删除;新增 `audio_raw/` + `audio_failed/` 目录结构。**并发 worker 池**:Whisper 转写 worker 池(FR-2.27)处理多条音频,每条独立 `audio_path`,由 worker 各自 unlink                                                                                                                                                                                                                                                                                                                                                                                          | P0  |
-| FR-2.15c | **字幕语义清理**(2026-09-02 新增,可选):faster-whisper 转写输出常见 4 类质量问题:① 繁简混排(台湾口音→繁体,大陆→简体)② 同音字错字(如"Deep Sake"应为"Deep Seek",需视频标题辅助)③ 短碎片(单字"了"、"呢")④ 语序错位(Whisper 时序问题)。**两级清理策略**:**Level 1(必启用,本地)** — `transcribe/postprocess.py` 提供 `clean_transcript()`: ① `merge_short_lines()` 把 < `whisper.postprocess_min_line_chars`(默认 8)的行并入上一行;② `dedupe_repeated_segments()` 用 LCS-style 公共子串检测(LCS 长度长度 ≥ `whisper.postprocess_min_overlap_chars`,默认 6)去重 B站自动 CC 叠音段;阈值由 `whisper.postprocess_min/max_line_chars / min_overlap_chars` 配置。**Level 4(可选,云端 LLM)** — `quality/refiner.py` 提供 `SubtitleRefiner`: 仅当 `quality_check.refine_enabled=true` 才调云端 LLM(默认 False,因为云端 API 花钱),用 `quality_check.refine_model`(None 时 fallback `quality_check.model`)做语义整理:繁简统一 + 同音字修正 + 碎片合并 + 段落切分(用 `\n\n` 分隔)。输入 token 上限 `quality_check.refine_max_chars`(默认 **6000**,超出跳过 LLM 只用本地清理),LLM 返回 `{cleaned_text, corrections[], notes}`。**失败 fallback**: LLL 抛错 / / 解析失败 / / 空响应 → 返回 `RefinementResult(cleaned_text=原始text, corrections=[], notes=失败原因)`,不抛错(主流程不中断)。**落盘**: 写到 `<stem>.cleaned.txt`(与 `.transcript.txt` 同目录),头部加 `cleaned_at / model / notes / corrections` 元数据,不覆盖原文(用户/审计可对比)。**配额归类**:归入"字幕质量检查"云端配额(NFR-5 第 ③) | P1  |
+| FR-2.22  | **音频文件清理**(2026-09-03 重构 v3,方案 A):路径 ① yt-dlp `.wav`、路径 ② Tab Audio Recorder `.webm` 二者**统一管理**(2026-09-03 砍掉 Puppeteer 流式路径后)。**主路径**:Whisper 转写**成功后**由调用方立即 `audio_path.unlink()`(2026-09-10 修正:不再等质量门控),**绝不保留**;**Whisper 转写本身失败**(质量不过关**不再**保留 wav,见 FR-3.7):`logs/audio_raw/<audio_id>.webm` 或 `<bvid>.wav` 文件保留 24h 后由 `log/failure_alert.py` 后台清理线程删除(`max_fail_keep_hours=24`,可配置);**全路径 `transcribe_fail` 时**:文件进 `logs/audio_failed/` 永久保留供排查。**禁用录屏文件路径**:旧 `BrowserRecorder` 的 mp4 视频源清理逻辑整段删除;新增 `audio_raw/` + `audio_failed/` 目录结构。**并发 worker 池**:Whisper 转写 worker 池(FR-2.27)处理多条音频,每条独立 `audio_path`,由 worker 各自 unlink                                                                                                                                                                                                                                                                                                                                                                                          | P0  |
+| FR-2.15c | **字幕语义清理**(2026-09-02 新增,可选):faster-whisper 转写输出常见 4 类质量问题:① 繁简混排(台湾口音→繁体,大陆→简体)② 同音字错字(如"Deep Sake"应为"Deep Seek",需视频标题辅助)③ 短碎片(单字"了"、"呢")④ 语序错位(Whisper 时序问题)。**两级清理策略**:**Level 1(必启用,本地)** — `transcribe/postprocess.py` 提供 `clean_transcript()`: ① `merge_short_lines()` 把 < `whisper.postprocess_min_line_chars`(默认 8)的行并入上一行;② `dedupe_repeated_segments()` 用 LCS-style 公共子串检测(LCS 长度长度 ≥ `whisper.postprocess_min_overlap_chars`,默认 6)去重 B站自动 CC 叠音段;阈值由 `whisper.postprocess_min/max_line_chars / min_overlap_chars` 配置。**Level 4(可选,云端 LLM)** — `quality/refiner.py` 提供 `SubtitleRefiner`: 仅当 `quality_check.refine_enabled=true` 才调云端 LLM(默认 False,因为云端 API 花钱),用 `quality_check.refine_model`(None 时 fallback `quality_check.model`)做语义整理:繁简统一 + 同音字修正 + 碎片合并 + 段落切分(用 `\n\n` 分隔)。输入字符上限 `quality_check.refine_max_chars`(默认 **6000**;**2026-09-10 改为分块精修**,见下),LLM 返回 `{cleaned_text, corrections[], notes}`。**超限语义(2026-09-10 二次修正)**:**分块精修** —— `len(text) > refine_max_chars` 时按**行边界**切成 ≤`refine_max_chars` 的块,逐块送 LLM 精修后**顺序拼回**,`notes` 汇总各块说明;护栏 `_MAX_CHUNKS = 6`。**历史沿革**:原为"超出直接跳过 LLM" → 2026-09-10 改为"截断后精修前段 + 尾部原文接回" → 同日再改为分块。**中间那版必须回退**:它让头部被繁简统一、尾部保持 Whisper 原生繁体,质量 LLM 据此报"后半段繁简混杂"而 fail —— **那个混杂是精修自己制造的**(真机 30 分钟 Python 课事故根因)。详见下方 CHANGELOG「长文本精修分块 + 强制简体 + 门控放宽」。**为什么不能丢尾**:`process_asset` 用返回文本覆盖 canonical 转写(`save_transcribed`),丢尾会让尾部内容从正式产物**静默消失**。分块同样保住了这一条 —— 每一块都进 LLM,但**没有任何一块被丢弃**。补充:`refine_max_chars` 与 FR-2.15d 的摘要触发**已完全解耦**(摘要自 2026-09-10 起无条件触发,不再看长度),所以"截到正好等于阈值会让摘要静默失效"这条旧约束**已作废**。**失败 fallback**: LLL 抛错 / / 解析失败 / / 空响应 → 返回 `RefinementResult(cleaned_text=原始text, corrections=[], notes=失败原因)`,不抛错(主流程不中断)。**落盘**: 写到 `<stem>.cleaned.txt`(与 `.transcript.txt` 同目录),头部加 `cleaned_at / model / notes / corrections` 元数据,不覆盖原文(用户/审计可对比)。**配额归类**:归入"字幕质量检查"云端配额(NFR-5 第 ③) | P1  |
+| FR-2.15d | **单视频摘要(关键路径,无条件触发)**(2026-09-10 新增,**2026-09-10 修正为无条件**):`VideoSummarizer.summarize_one(text, title)` 为**每条**通过质量门控的视频生成 200–300 字摘要,落盘 `<id>_<safe_title>.summary.txt`。**触发条件(2026-09-10 用户裁定,替代原 `len(text) > refine_max_chars` 长度门控)**:**只看"该视频是否通过质量门控",不看字符长度** —— 摘要被定义为**关键路径**,短视频同样必须产出摘要。**为什么去掉长度门控**:① 原门控让摘要是否产出取决于文本长度,而长度又受 Refiner 压缩影响(Refiner 精修后文本可能缩到阈值以下)→ **静默不产出**;② 用户原话"摘要是关键路径,不管字符长度超没超都需要走摘要"。**实现**:门控在 `VideoSummarizer.summarize_one` 内部(旧 `len(text) <= refine_max_chars → 返回空`),`process_asset` Step 4.5 无条件调用。`refine_max_chars` 自此与摘要**完全解耦**(sandwich 抽样阈值是独立的 `_PROMPT_MAX_CHARS`)。**输入预处理**:超长文本走三明治抽样(头/中/尾各 4000 字,带 `[...中间省略 N 字...]` 标记),避免纯截断丢后半段。**失败 fallback**:LLM 抛错 / 解析失败 / 空 `summary_text` → 返回空 `SummaryResult` + notes 记原因,**不抛错**(主流程不中断)。**配额归类**:归入"字幕质量检查"云端配额(NFR-5 第 ③) | P0  |
 | FR-2.24a | **Tab Audio Recorder 状态探测 `probe_status()`**(2026-09-03 新增):Python 函数,封装在 `src/vla/subtitle/tab_audio_recorder.py`。**签名**:`async def probe_status(browser: Browser) -> Literal["enabled", "disabled", "not_installed"]`。**实现**:`async def probe_status`:① 在 browser 上 evaluate `chrome.management.getAll(extensions => resolve(extensions))`;② 遍历结果,匹配 `ext.name.toLowerCase().includes(match_keyword)` 或 `ext.description.toLowerCase().includes(match_keyword)`(`match_keyword` 来自 `config/vla.yaml:extension.tab_audio_recorder.match_keyword`,默认 `"tab audio"`);③ 找到:`enabled = ext.enabled`(chrome.management 字段),返回 `"enabled"` 或 `"disabled"`;④ 没找到:返回 `"not_installed"`。**性能**:`chrome.management.getAll` 是浏览器级 API,不依赖页面焦点,~50ms 内完成;探测失败(timeout / permission denied) → 返回 `"not_installed"`。**关键设计**:探测调用在每次策略 ③ 触发时执行(频率极低,仅 5-15% 视频走路径 ③),不做缓存避免扩展状态变更后探测失真                                                                                                                                                                                                                 | P0  |
 | FR-2.24  | **Tab Audio Recorder 触发器 `TabAudioRecorder`**(2026-09-03 重构 v2):Python 类,封装在 `src/vla/subtitle/tab_audio_recorder.py`。**核心方法**:`start_recording(driver, url, duration_sec) -> str` 返回 audio_id;`_resolve_ext_id(browser) -> str`(动态从 `chrome.management.getAll()` 匹配,**不硬编码**)。**实现**:`async def start_recording`:① `_resolve_ext_id` → 拿到 ext_id;② 找到扩展 background page(`browser.targets()` 遍历 `chrome-extension://<ext_id>/_generated_background_page.html`,如未打开则 `ctx.new_page().goto()`);③ 在 bg page 上 evaluate `startTabRecording()` 或等价函数(扩展内部暴露的全局函数名,可通过 DOM 探针反查);④ 轮询 `bg_page.url` 直到变成 `chrome-extension://<ext_id>/editor.html?id=(\d+)`(扩展跳转到此页 = 录制完成);⑤ 用正则提取 `id=(\d+)`,返回 audio_id。**`_resolve_ext_id` 实现**:`async def _resolve_ext_id` 调 `probe_status` 拿到 enabled 状态的扩展 ID(扩展对象自带 `id` 字段);找不到抛 `ExtensionNotFoundError`。**异常**:扩展无响应 / 跳转失败 → 抛 `RecorderTriggerError`,`SubtitleStrategy` 捕获后降级到 `quality_skip`。**关键设计**:Tab Audio Recorder 自身完成 stop + 跳转到 editor.html,所以**不需要 Agent 主动 stop**(避免抢焦)                                                                | P0  |
 | FR-2.25  | **编辑器页面下载按钮 `DownloadButtonClicker`**(2026-09-03 重构 v2):Python 类,封装在 `src/vla/subtitle/tab_audio_recorder.py`。**核心方法**:`click_download(driver, audio_id, ext_id, save_dir, timeout_sec=180) -> Path`。**实现**:`async def click_download`:① `ctx.new_page().goto(f"chrome-extension://{ext_id}/editor.html?id={audio_id}")`(直接打开,跳过扩展自动跳转的等待);② 用 Playwright CDP 监听 `Browser.download` 事件(`context.on("download", ...)`);③ 在 editor.html 内 evaluate 找下载按钮(候选 selector:`button:has-text("Download")`, `button:has-text("保存")`, `#download-btn`, `[data-action="download"]`),点击;④ 等 download 事件触发,`download.save_as(save_dir / f"{audio_id}.webm")`(FR-2.26 命名规范);⑤ 超时 → 抛 `DownloadTimeoutError`,文件留 `audio_failed/`。**关键**:必须 `page.on("download")` **先注册再点按钮**,否则事件丢失。**调用顺序**:由 `TabAudioRecorder.start_recording` 返回 audio_id 后,主调度拿到 ext_id + audio_id 调 `click_download`(不需要再解析一次 ID)                                                                                                                                                                                                   | P0  |
 | FR-2.27  | **异步音频队列 + Whisper worker 池**(2026-09-03 新增):多视频并行处理时,每条独立分配 audio_id,各自的下载 → 转写 → 质量门控链路**异步并发**。**核心组件**:`src/vla/audio/queue.py` 的 `AudioQueue`(asyncio.Queue,容量 10,满则阻塞避免内存爆);`src/vla/audio/worker_pool.py` 的 `WhisperWorkerPool`,默认 2 个 worker(`whisper.concurrent_workers`,Apple Silicon GPU 单卡上限,可配置)。**流程**:① 主调度把 `(audio_id, audio_path, video_meta)` 入队;② worker 从队列拿 → 调 `StreamingTranscriber.transcribe(audio_path)`;③ 转写完 → 质量门控 → 成功删源文件 + 累计时长(FR-9);失败 → 留 `audio_failed/` + 记 fail 日志。**并发安全**:同一 audio_id 不会被两个 worker 同时处理(queue 自身保证);`Quota` 累计原子操作(`asyncio.Lock`);`probe_status` 无状态(每次调用即时探测,无单例、无锁)。**降级**:worker 池满 → 主调度 await queue.put,自动限流不爆内存                                                                                                                                                                                                                                                                                                                                                                              | P0  |
-| FR-2.26  | **音频文件命名 + 本地路径规范**(2026-09-03 重构 v3,方案 A):`logs/audio_raw/<audio_id>.webm`(Tab Audio Recorder 路径);`logs/audio_raw/<bvid>.wav`(yt-dlp 路径)。audio_id 是 Tab Audio Recorder 分配的纯数字字符串(来自 editor.html URL 的 `?id=` 参数),bvid 是 B站视频 ID(BV1xxx)。**目录生命周期**:`audio_raw/` 文件在 Whisper 转写 + 质量通过后立即删(FR-2.22);`audio_failed/` 是失败文件的永久归档,按 `audio_id/bvid` 分目录,每周归档一次(避免单目录文件过多)。**2026-09-03 砍掉**:`<bvid>_<timestamp>.webm` Puppeteer 流式命名(已不适用)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | P0  |
+| FR-2.26  | **音频文件命名 + 本地路径规范**(2026-09-03 重构 v3,方案 A):`logs/audio_raw/<audio_id>.webm`(Tab Audio Recorder 路径);`logs/audio_raw/<bvid>.wav`(yt-dlp 路径)。audio_id 是 Tab Audio Recorder 分配的纯数字字符串(来自 editor.html URL 的 `?id=` 参数),bvid 是 B站视频 ID(BV1xxx)。**目录生命周期**:`audio_raw/` 文件在 Whisper 转写**成功后**立即删(FR-2.22;2026-09-10 修正);`audio_failed/` 是失败文件的永久归档,按 `audio_id/bvid` 分目录,每周归档一次(避免单目录文件过多)。**2026-09-03 砍掉**:`<bvid>_<timestamp>.webm` Puppeteer 流式命名(已不适用)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | P0  |
 | FR-2.28  | **视频开头 + 末尾双截图(关键路径,2026-09-07 v3.2 升级为强需求 + 必走)**:**每条走 agent 的视频**都必须执行 Phase A 开头截图 + Phase C 末尾截图,截 2 张 PNG,**必须截到 macOS 菜单栏时间 / Windows 任务栏时间**(FR-2.28 沿用,不变量)。**触发条件(2026-09-07 v3.2 改)**:`screenshot.enabled=true`(**不再限策略 ③**;有 CC / 走 API 命中的视频也截图,作为"用户曾观看"的视觉证据)。**Session 级 Chrome 复用 page 槽(2026-09-07 v3.2 新设计)**:与旧版"每条视频独立启 Chrome"不同,`VideoLearningAgent.run` 入口 `BrowserDriver.connect_over_cdp()` 启1 次(失败 → 整 session 降级无截图模式 + 沿用 fail-safe log);`ctx.new_page()` 创建**唯一** page 槽 `self._page`(session 级);每条视频处理时 `page.goto(url)` 切换 B站 URL(避免每条都 new page 堆积标签);末尾截图触发 FR-2.28.2g `reestablish_video_page()`(用户切走时恢复)。**PHASE A 开头截图(关键路径前置,2026-09-07 v3.2 升级)**:在 `strategy.get_subtitle(url)` **之前**执行,流程:`page.goto(url, wait_until="domcontentloaded")` → `await sleep(3)` 等 video 元素 ready → `evaluate(video.currentTime=0, video.pause(), video.requestFullscreen())` → `await sleep(2)` 等全屏动画 → `prepare_for_screenshot(page)`(FR-2.28.2a 抢焦点)→ 同步系统截图 `screencapture -x`(macOS)/ PowerShell(Windows)→ 文件名 `<bvid>__start__t<TIMESTAMP>.png`。**PHASE B 后台监听**:asyncio task 每 1s poll `video.currentTime`(沿用)。**PHASE C 末尾截图(同步,与音频录制并发)**:到达 `currentTime ≥ duration_sec - 33`(留 3s buffer)→ `reestablish_video_page()`(FR-2.28.2g)→ `prepare_for_screenshot(page)` → `evaluate(video.pause(), video.currentTime=duration_sec-30)` → `await sleep(0.5)` → 同步系统截图 → `evaluate(video.play())` 恢复;多帧模式沿用 FR-2.28.2i(7 帧)。**平台适配**:沿用 `src/vla/capture/screen_capture.py::capture_full_screen(save_path)`(macOS screencapture / Windows PowerShell)。**关键不变量(2026-09-07 v3.2 调整)**:截图系统是主调度**同步串行步骤**,**不与音频录制并发**;Phase A 是关键路径,失败 → **跳过该视频**(不进入字幕策略 / 转写);Phase C 末尾截图失败 → log warning + 跳过末尾截图(仍继续总结步骤)。**Session 失败模式**:`connect_over_cdp` 失败 → 整 session 降级无截图(后续视频仅 Phase A/C 跳过,字幕 / 转写 / 质量门控照跑);`page.goto` 失败 → 单条视频跳过(`FR-2.28.2f find_bilibili_page` 找不到对应 bvid → skip + debug log)。**接入点**:`VideoLearningAgent._process_one` Step 0(Phase A)+ Step 末(Phase C);`ScreenshotPhaseController` 接受外部注入的 `page` 参数(替代内部创建) | P0  |
 | FR-2.28.2a | **截图前准备 `prepare_for_screenshot(page)`**(FR-2.28 子项,2026-09-03 新增):**强需求**。截图前必须抢焦点 + 窗口归位,否则 `screencapture` 会截到前台 APP 画面而非视频。**实现**:`async def prepare_for_screenshot(page)`:① `await page.bring_to_front()`(Puppeteer 拉 tab 到前台);② `await page.evaluate("window.focus()")`(JS 端保险 focus);③ `await page.evaluate("window.moveTo(0, 0); window.resizeTo(screen.width, screen.height);")`(防多显示器 / 窗口最小化,强制主显示器全屏);④ `await asyncio.sleep(0.3)`(等窗口切换动画稳定)。**关键**:**禁用 macOS 原生全屏**(F11 / 绿点按钮),必须用 `element.requestFullscreen()`(JS API,在当前 Space 内全屏,不切 Space,避免 Mission Control 切换 Space 后截不到)。**失败兜底**:抢焦点失败 → 仍尝试截图,标记 `partial=menu_bar_only`(只截到菜单栏时间,无视频画面) | P0  |
 | FR-2.28.2b | **截图后行为**:截图完成后**不主动切回原前台 APP**(避免记录原前台状态的 race condition + 不需要新 TCC 权限);用户可手动 alt+tab 回到原 APP;音频录制在后台继续,不影响用户操作 | P0  |
@@ -248,6 +572,8 @@ tags:
 | FR-2.28.2h | **通知可点 → 打开 Finder 目录**(2026-09-07 spike v4 沉淀):FR-2.28.2d 的"准备截图"通知只能告知,不能导航。**升级为"完成通知"**:点击 → 打开截图所在 Finder 目录。**技术**:`terminal-notifier -title X -subtitle Y -message Z -open "file:///<dir>"`(brew 装的 macOS 通知 CLI,支持 click 打开 URL)。**首次使用**:`vla doctor` 检测 terminal-notifier + 触发一次测试通知,macOS 弹"允许通知"提示,用户授权。**fallback**:`terminal-notifier` 缺失 / 未授权 → 用 osascript 不可点通知,消息体附 `open "<dir>"` 命令供复制。**配置**:`screenshot.notify_clickable: true`(默认 true;`false` 时强制走 osascript)。**降级**:`terminal-notifier -remove <group>` 在 screencapture 前 0.3s 调用,避免通知横幅被截进图(经验证:macOS 通知会渲染在 screen buffer,需给屏幕刷新时间) | P1  |
 | FR-2.28.2i | **多帧模式**(2026-09-07 spike v4 沉淀,**3 start + 3 end-window + 1 end-final**):FR-2.28 单帧(start + end)在长视频可能错过关键画面(B站 首帧黑屏 / 末尾 paused 在 0:00)。**新流程**:**start 阶段** 3 帧(目标 cur≈0.0 / 0.6 / 1.5s,允许 ±0.5s 误差);**end-window 阶段** 3 帧(目标 cur≈duration-10 / duration-7 / duration-4,允许 ±2s 误差,等 currentTime 轮询到目标值才截图);**end-final 阶段** 1 帧(等 `ended` 事件后,cur = duration)。共 7 帧/视频。**文件名**:`<bvid>__start__t<TIMESTAMP>.png` / `<bvid>__end__t<TIMESTAMP>.png` / `<bvid>__end_final__t<TIMESTAMP>.png`(<TIMESTAMP> 用 `video.currentTime` 实际值,不是目标值)。**index.jsonl**:每张一记录(沿用 FR-2.28.2e,加 `frame_role: "start" | "end" | "end_final"` 字段区分)。**短视频兼容**:duration < 13s 时,end-window 退到 [duration*0.5, duration-1] 区间(3 帧);start 仍 3 帧。**配置**:`screenshot.multi_frame: true`(默认 true;`false` 走老 single-frame 路径)。**失败降级**:任一帧失败 → log warning + 跳过该帧,继续后续帧 | P1  |
 | FR-2.29  | **截图嵌入笔记**(2026-09-03 新增,**P1 可选**):质量门控通过的截图(FR-4 + FR-2.28)→ 在生成 `notes.md` 时插入 Obsidian 嵌入引用 `![[screenshots/<bvid>_<ts>_start.png]]` + `![[screenshots/<bvid>_<ts>_end.png]]`(用户可点击打开)。**实现**:在 `LLMSummarizer.summarize_batch` 输出 Markdown 头部插入截图引用块(在总结内容之前)。**失败语义**:截图缺失(FR-2.28 降级后无文件)→ 跳过嵌入,不报错。**配置**:`screenshot.embed_in_notes: true`(默认 false,P1 可选) | P1  |
+| FR-2.30  | **内部站(bill-jc)音频获取 —— m3u8 直抽优先**(2026-09-10 新增):`InternalSiteSpider` 拿到 m3u8 后,路径 ② 的抽音顺序为 **① `extract_m3u8_audio`(ffmpeg HLS 流式,`-vn -ac 1 -ar 16000`)→ ② `extract_browser_audio`(Chrome 已加载页面内 MediaRecorder `playbackRate=4` + ffmpeg `atempo=0.5`,兜底)**;两条都失败 → `fetch_asset` 返回 `None`。**为什么反转(2026-09-10 四组对照实测,同一视频真时长 177.59s)**:浏览器 4x 抓取路径 score **35**(未通过),m3u8 直抽 score **62~92**(通过);逐词对比显示 4x 路径把 `国家统计局` 转成 `规判统计`、`PhantomJS` 转成 `翻腾架子`、`Beautiful Soup/LXML` 转成 `UFOSOS/MILO` —— **4x 抓取毁可懂度**。整条 pipeline 耗时 m3u8 直抽也更快(30s vs 87s,含抽取步骤)。**技术原因**:Chromium `preservesPitch` + ffmpeg `atempo` **双重时间拉伸**叠加 opus 重编码 + 16kHz 降采样,共振峰被抹平(音高 F0 实测未被抬高,比值 0.97 —— 不是音高问题)。**例外**:`extract_browser_audio` 仍**不删**(保留作 fallback,Chrome 未启 / m3u8 解密失败时仍有价值),`_BROWSER_CAPTURE_*` 常量一并保留。**注意**:异常驱动 fallback **抓不到质量回退**(浏览器路径不会因音质差抛错),所以顺序必须在**质量实测**基础上确定,不能靠运行时自动选择 | P0  |
+| FR-2.30.1 | **长视频抽音上限 30 分钟**(2026-09-10 新增):路径 ② 的两条抽音路径都受 `audio.max_extract_sec`(默认 **1800**)约束,**只保留视频前 30 分钟音频,超出部分直接丢弃**(用户 2026-09-10 裁定)。**实现**:`extract_m3u8_audio` 加 ffmpeg 输出侧 `-t <max_sec>`(置于 `-i` 之后;到点后 ffmpeg 停止拉取后续 HLS 切片,**顺带省带宽**);`extract_browser_audio` 沿用既有 `max_duration_sec` 参数(video-time,内部按 `playbackRate` 换算 wall-clock)。**为什么**:① 长视频转写文本超过 LLM 预算(30 分钟语音 ≈ 8700 字,已触及 `refine_max_chars` 与 max_tokens 边界);② 磁盘 / 时间友好(256GB 机器红线)。**范围**:**仅路径 ②**;路径 ③/④ 的 `extract_audio`(yt-dlp MP4)不加同款上限。**失败语义**:截断**不算失败**,不记 `transcribe_fail.csv` | P0  |
 
 **架构图**:
 
@@ -350,29 +676,117 @@ class PlatformAdapter(Protocol):
 - 新增 `audio/queue.py`:AudioQueue(asyncio.Queue,容量 10)
 - 新增 `audio/worker_pool.py`:WhisperWorkerPool(默认 2 worker)
 
+#### 2026-09-10 长文本精修分块 + 强制简体 + 门控放宽(只判「能不能用」)
+
+**背景**(真机 `vla learn` 一条 30 分钟 Python 课,质量 55 分失败):根因**不是转写崩了**,
+是**精修自己制造的不一致**:
+
+- `SubtitleRefiner.refine` 在 `len(text) > refine_max_chars`(6000)时只送 `text[:6000]`
+  给 LLM,尾部 2911 字**原文接回**
+- 而系统提示第 1 条是「繁简统一:根据【视频标题】判断用简体还是繁体,全文统一」,
+  标题 `章 Python入门导学` 含大陆用语 ⇒ **前 6000 字被转成简体**,后 2911 字仍是
+  Whisper 原生的繁体
+- 质量 LLM 于是报「后半段出现大量繁体字与简体字混杂」—— 那个「混杂」**是精修制造的**,
+  原文尾部只是繁体,并不"混杂"
+- 另有一层:`prompt` 同时要 `pass`(bool)和 `score`(0-100),但**从未定义二者关系**。
+  该次 LLM 返回 `score=55` + `pass=false`,而 `passed = llm_pass AND score >= 阈值`
+  里那记 `pass=false` 一票否决 —— 分数够了也过不了
+
+**改动点**:
+
+| # | 位置 | 改动描述 |
+|---|------|----------|
+| 1 | FR-2.15c / FR-3.9 | 精修**分块**:按**行边界**切 ≤`refine_max_chars` 的块,逐块精修后顺序拼回。**不再**「截断精修前段 + 尾部原文接回」 |
+| 2 | FR-3.10(新增) | Whisper `initial_prompt` 强制简体输出,从源头压掉繁体漂移 |
+| 3 | FR-4.2 | 检查维度重写为**两类**:「转写失败」(→ fail)与「可读但需校对」(→ 记 issues、pass) |
+| 4 | FR-4.4 | `pass` 定义**锚定到 `min_score_to_pass`**,并在 prompt 里注入同一个数,消除 `pass` 与 `score` 互相矛盾 |
+
+**设计要点**:
+
+1. **分块策略**:切点取 `text[:max_chars]` 里**最后一个换行**处 —— 转写产物是段落行结构
+   (实测 252 行 / 平均 36 字每行),按行切**不会切断句子**;单行超长找不到换行才硬切
+2. **单块时与旧实现逐字节等价**(同样一次调用、同一 prompt)⇒ 既有测试不变绿
+3. **块失败策略**:某块 LLM 失败 → **该块保留原文,其余块用精修结果**,`notes` 记明
+   哪几块未精修,**不抛错**。理由:门控看到混杂会 fail,而这个 fail 是**真的**
+   (该块确实没清理过);若改成「任一块失败即整体回退原文」,会白丢已付费的成功块。
+   与「失败 fallback 不中断主流程」的既有契约一致
+4. **护栏 `_MAX_CHUNKS = 6`**(≈36000 字):超出则只精修前 6 块、其余保原文,
+   **打 warning + 记 notes** —— 明确退化,不静默
+5. **`fail` 只留给「转写失败」**:大面积乱码 / 重复死循环 / 覆盖面 < 50% /
+   语速远超正常范围。**错别字、繁简混杂、口语化、个别语序混乱属「可读但需校对」**,
+   记入 `issues` 且 `pass=true`,只在 `score` 上扣分
+6. **启发式硬 fail 三条不动**(语速过低 / 过高 / 重复死循环)—— 它们本来就是
+   「转写失败」探测器,与第 5 条同向
+7. **`AND` 保留**:`passed = llm_pass AND score >= 阈值` 不删。第 4 条锚定后两者
+   **按构造一致**,`AND` 退化为安全网(只在 LLM 仍返回自相矛盾结果时才咬),不再是双重否决
+
+**被接受的代价**(用户 2026-09-10 明确确认):门控放宽后,`PASS`/`加碼` 这类
+**错别字仍在**的转写会被判**通过**,进而产出摘要 + 落正式产物。即「转写质量问题」
+从「被门控挡下」变为「进入知识库」。配套地,**这些视频会以成功写入
+`transcribed_history.jsonl` 而不再被重试**(见 FR-9.6 待办)。
+
+**顺带订正**:
+
+- `quality/refiner.py:183` 原注释称「VideoSummarizer 的触发条件是
+  `len(text) > refine_max_chars`」—— 该门控已随 FR-2.15d 改为**无条件**而失效,注释删除
+- `tests/test_quality_checker.py` 两条**过期断言**修正:`test_short_text_fails_without_llm`
+  (「文本过短」启发式在更早提交已移除,现走「语速过低」score=20 而非 5)、
+  `test_prompt_contains_length_dimension`(该维度已移除)。这两条正是全量套件 18 条
+  既存失败中的 2 条
+
+**验证**(2026-09-10 实现完成后实测):
+
+TDD 红→绿(RED 证据均为真实失败,非"设置错误导致的假红"):
+
+| 模块 | RED | GREEN |
+|---|---|---|
+| `tests/test_refiner.py` | `ImportError: cannot import name '_MAX_CHUNKS'`(收集期即失败) | **49 passed** |
+| `tests/test_streaming.py` | `ValueError: "WhisperConfig" object has no field "initial_prompt"` + `KeyError: 'initial_prompt'`(3 failed) | **31 passed** |
+| `tests/test_quality_checker.py` | prompt 里搜不到 `转写失败` / `42` / `70` / `33`(4 failed) | **26 passed** |
+
+全量套件对照(同一工作树):
+
+| | failed | passed |
+|---|---|---|
+| 本次改动前 | 18 | 762 |
+| 本次改动后 | **16** | **777** |
+
+- 失败的 **16** 条**全部**是 `tests/test_e2e.py` 的既存 sync/async 问题(`cannot unpack non-iterable coroutine object` / `VideoLearningAgent.__init__() got an unexpected keyword argument`),与本次改动无关,改动前后**逐条相同**
+- 少掉的 **2** 条正是上文「顺带订正」里那两条**过期断言** —— 修断言后转绿,符合预期
+- 新增测试净 **+13**(`+7` refiner / `+3` streaming / `+3` checker)
+
+`uv run vla doctor`:除既存的 `[WARN] audio_source_factory: yt-dlp MISSING`(与上方 `[OK] yt_dlp: 已安装` 矛盾,实为 >10s 探测超时导致的**误报**,见下方待办)外全 OK。
+
+**未做 / 未验证**:
+
+- `ruff` 未安装(`uv run ruff` → `Failed to spawn: ruff`),故本次**未跑 lint**;改动遵循既有行宽/风格
+- `_MAX_CHUNKS` 护栏、分块失败策略均只有**单测覆盖**,未在真机上触发过(真机 30 分钟课 ≈ 8700 字 ÷ 6000 ≈ 2 块,离护栏很远)
+
 ### FR-3 流式转写与磁盘管理
 
 | ID     | 描述                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | 优先级 |
 | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --- |
 | FR-3.1 | Whisper 引擎使用 **faster-whisper**(开源本地)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | P0  |
-| FR-3.2 | 模型可选 `tiny/base/small/medium/large-v3`,默认 `small`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | P0  |
+| FR-3.2 | 模型可选 `tiny/base/small/medium/large-v3`,默认 `small`。**2026-09-10:加载必须先 `local_files_only=True`** —— 实测 `huggingface_hub` 会向 huggingface.co 发一次 metadata 校验请求,网络不可达时在超时重试里干等 **150s**(`small` 冷加载 150.6s → 本地 0.5s,300×),而实际转写只要 24s;抛异常(模型真未缓存)才回落到允许下载。与红线「字幕永远本地」同向,顺带去掉对 HF 的网络依赖                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | P0  |
 | FR-3.3 | 边转写边清理:音频就绪后立即删除视频源(.webm/.mp4),`.wav` 音频文件保留(由 FR-3.7 控制何时清理)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | P0  |
 | FR-3.4 | 磁盘峰值占用 ≤ 1 GB(远低于 256 GB 总容量)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | P0  |
 | FR-3.5 | 转写失败必须记录到 `transcribe_fail.csv`,**不删除**视频源                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | P0  |
-| FR-3.7 | **音频清理策略**(2026-09 定,**2026-09-07 v3.2 显式化**):`StreamingTranscriber.transcribe()` 只删视频源(FR-3.3);音频 `.wav` 保留到 `save_dir`,由调用方按质量结果决定 — **质量通过**(FR-4.5)→ `VideoLearningAgent._process_one` 在 `if quality.passed:` 分支显式 `audio_path.unlink()` + log `🗑️ 质量通过 → 删音频`(2026-09-07 v3.2 从 `streaming.py` 内部挪到 `main.py` 显式删除,日志更准);**质量失败**(FR-4.6)→ 保留 `.wav` 供重转写。理由:audio 是唯一可重转写的源,失败时不能丢 | P0  |
-| FR-3.8 | **Level 1 本地字幕语义清理**(2026-09-03 新增,必启用,**2026-09-07 v3.2 输入端微调**):faster-whisper 转写输出常见 4 类问题(繁简混排 / 同音字错字 / 短碎片 / 语序错位),`transcribe/postprocess.py` 提供 `clean_transcript()`(**注意**:详细规格见 FR-2.15c,**FR-3.8 仅声明必须在转写 → 质量门控之间调用**)— `merge_short_lines()` 把 < `whisper.postprocess_min_line_chars`(默认 8)的行并入上一行 + `dedupe_repeated_segments()` 用 LCS 检测去重 B站自动 CC 叠音段。**输出文件**:`logs/transcripts/<bvid>.transcript.txt`(Whisper 原始,保留)+ `logs/transcripts/<bvid>.cleaned.txt`(Level 1 清理后,**质量门控的输入是这份;若 refine 跳过或失败,总结也用这份**)。**触发**:`StreamingTranscriber.transcribe()` 完成后**自动调用** `clean_transcript()`,无需主调度介入                                                                                                                                                                                                                                                                          | P0  |
-| FR-3.9 | **Level 4 云端 LLM 字幕语义调整**(2026-09-03 新增,可选,**2026-09-07 v3.2 顺序对调**):当 `quality_check.refine_enabled=true` 且**质量门控通过**(`quality.passed=True`)时,由 `VideoLearningAgent._process_one` 显式调 `SubtitleRefiner.refine(passed_text=cleaned_text, title) -> RefinementResult`(注意:**不是**在 `StreamingTranscriber` 内调,不在 Whisper 完成后立即调)。**位置**:Whisper → Level 1 → **Quality Check** → **Level 4 Refine**(仅 passed 文本)→ 总结输入。**目的**:作为 **summary 前置工作**(用户原话:"转写调优用于做总结的前置工作"),把 cleaned_text 加工成更适合 LLM 总结的高质量文本(繁简统一 + 同音字修正 + 碎片合并 + 段落切分 + 保留关键概念/术语/数字/人名)。**模块**:`quality/refiner.py` 的 `SubtitleRefiner.refine(passed_text, title) -> RefinementResult`。**模型**:用 `quality_check.refine_model`(None 时 fallback `quality_check.model`)。**输入上限**:`quality_check.refine_max_chars`(默认 **6000**,超出跳过 LLM 只用 Level 1)。**输出文件**:`logs/transcripts/<bvid>.refined.txt`(LLM 调整后,**总结用这份而非 `.cleaned.txt`**)+ `<bvid>.cleaned.txt` 保留供审计对比。**失败 fallback**:LLM 抛错 / 解析失败 / 空响应 → 返回 `RefinementResult(cleaned_text=原 cleaned_text, corrections=[], notes=失败原因)`,**不抛错**(主流程不中断),退化用 `.cleaned.txt` 做总结输入。**配额归类**:归入"字幕质量检查"云端配额(NFR-5 第 ③)。**关键设计(2026-09-07 v3.2 调整)**:**只在质量门控通过后跑**(避免 L4 在 garbage 文本上浪费 token);调用入口从 `StreamingTranscriber.__init__` 注入挪到 `VideoLearningAgent.__init__` 注入;`StreamingTranscriber.transcribe()` 返回 `TranscribeResult(text=L1_cleaned, audio_path=...)`,**不含 refined** | P1  |
+| FR-3.7 | **音频清理策略**(2026-09 定,**2026-09-07 v3.2 显式化**,**2026-09-10 修正为「转写成功即删」**):`StreamingTranscriber.transcribe()` 只删视频源(FR-3.3);音频 `.wav` 由调用方在**转写成功后立即删除**,不再等质量结果 — **转写成功即删**(2026-09-10 修正):`RealTextProvider.process_asset` 在 `transcriber.transcribe()` 返回后立即 `audio_path.unlink()` + log `🗑️ 质量通过 → 删音频`(2026-09-07 v3.2 从 `streaming.py` 内部挪到 `main.py` 显式删除,日志更准);**质量失败**(FR-4.6)→ **不再保留 `.wav`**。新理由:重跑 refine / summary 只需**文本**(`transcript.txt` 已落盘,Refiner 吃的是文本不是音频),只有重**转写**才需要 wav;而 bill-jc 走 m3u8 直抽(FR-2.30)+ 30 分钟上限(FR-2.30.1),重抽成本有界。旧理由「audio 是唯一可重转写的源,失败时不能丢」作废 | P0  |
+| FR-3.8 | **Level 1 本地字幕语义清理**(2026-09-03 新增,必启用,**2026-09-07 v3.2 输入端微调**):faster-whisper 转写输出常见 4 类问题(繁简混排 / 同音字错字 / 短碎片 / 语序错位),`transcribe/postprocess.py` 提供 `clean_transcript()`(**注意**:详细规格见 FR-2.15c,**FR-3.8 仅声明必须在转写 → 质量门控之间调用**)— `merge_short_lines()` 把 < `whisper.postprocess_min_line_chars`(默认 8)的行并入上一行 + `dedupe_repeated_segments()` 用 LCS 检测去重 B站自动 CC 叠音段。**输出文件**:`logs/transcribed/<YYYY-MM-DD>/transcripts/<stem>.transcript.txt`(Whisper 原始,保留)。**2026-09-10 起不再落盘 `<bvid>.cleaned.txt`** —— 它是只写不读的中间产物(全仓无任何读取方);Level 1 清理结果仍在内存中,作为质量门控输入与 refine 输入(若 refine 跳过或失败,总结也用这份内存文本)。**触发**:`StreamingTranscriber.transcribe()` 完成后**自动调用** `clean_transcript()`,无需主调度介入                                                                                                                                                                                                                                                                          | P0  |
+| FR-3.9 | **Level 4 云端 LLM 字幕语义调整**(2026-09-03 新增,可选,**2026-09-07 v3.2 顺序对调**):当 `quality_check.refine_enabled=true` 且**质量门控通过**(`quality.passed=True`)时,由 `StreamingTranscriber._maybe_refine` 在转写流程内调 `SubtitleRefiner.refine(text, title) -> RefinementResult`。**位置(2026-09-10 订正)**:Whisper → Level 1 → **Level 4 Refine** → **质量门控** → 总结输入 —— 旧文档写"质量门控通过后才精修"且归因到 `VideoLearningAgent._process_one`,**与代码不符**;实际是**先精修再送门控**,门控永远看精修后的文本。代价是 garbage 文本也烧一次 refine token,换来的是"门控判的就是将要落盘的那份文本"。**目的**:作为 **summary 前置工作**(用户原话:"转写调优用于做总结的前置工作"),把 cleaned_text 加工成更适合 LLM 总结的高质量文本(繁简统一 + 同音字修正 + 碎片合并 + 段落切分 + 保留关键概念/术语/数字/人名)。**模块**:`quality/refiner.py` 的 `SubtitleRefiner.refine(passed_text, title) -> RefinementResult`。**模型**:用 `quality_check.refine_model`(None 时 fallback `quality_check.model`)。**输入上限 / 分块(2026-09-10 修正,替代"截断精修前段 + 尾部原文接回")**:`quality_check.refine_max_chars`(默认 **6000**);超限时按**行边界**切成 ≤`refine_max_chars` 的块,**逐块精修后顺序拼回**;单行超长找不到换行才硬切。护栏 `_MAX_CHUNKS = 6`(≈36000 字):超出则只精修前 6 块、其余保原文,打 warning + 记 notes。**块失败策略**:某块 LLM 失败 → 该块保原文、其余块用精修结果,`notes` 记明哪几块未精修,**不抛错**。旧做法会让**头部被繁简统一、尾部仍是 Whisper 原生繁体**,质量 LLM 据此报"后半段繁简混杂"而 fail —— 那个"混杂"是精修自己制造的(2026-09-10 真机事故根因)。**输出文件**:`logs/transcribed/<YYYY-MM-DD>/transcripts/<stem>.refined.txt`(含 `# notes:` 尾注);**2026-09-10 起不再落盘 `<stem>.cleaned.txt`**。**失败 fallback**:LLM 抛错 / 解析失败 / 空响应 → 返回 `RefinementResult(cleaned_text=原 cleaned_text, corrections=[], notes=失败原因)`,**不抛错**(主流程不中断),退化用 `.cleaned.txt` 做总结输入。**配额归类**:归入"字幕质量检查"云端配额(NFR-5 第 ③)。**关键设计(2026-09-07 v3.2 调整,2026-09-10 部分作废)**:refiner 经 `StreamingTranscriber.__init__(refiner=...)` 注入;"只在质量门控通过后跑"一条**已作废**(见上"位置");`transcribe()` 返回 **refined 优先的字符串**(fallback 链 refined > 内存 cleaned > transcript),不返回 `TranscribeResult` | P1  |
+
+| FR-3.10 | **Whisper 强制简体输出**(2026-09-10 新增):`faster_whisper` 的 `initial_prompt` 传入 `whisper.initial_prompt`(默认 `"以下是普通话的句子,请使用简体中文。"`),从**源头**压掉繁体漂移。**为什么需要**:Whisper 对中文的简繁选择不可控 —— 同一段普通话,模型可能前段出简体、后段出繁体(真机 30 分钟 Python 课即如此:头部简体、尾部繁体)。这既直接损害可读性,也是 FR-4.2 判定的"繁简混杂"的**真实来源之一**(另一个来源是精修本身,见 FR-2.15c)。**为什么放在转写侧**:LLM 精修(FR-2.15c)是**可选**的(`refine_enabled` 默认 False),而简体统一是**基础可读性要求**;只靠精修兜底会在精修关闭时失效。两侧同时做 —— 源头压制 + 精修兜底。**实现**:`WhisperConfig.initial_prompt`(带默认值,`config/vla.yaml` 无需改动);传 `initial_prompt=... or None`(空串等价于不传)。**不影响**:`language` 仍按 `whisper.language` 传(默认 `zh`);`initial_prompt` 只影响输出风格,不改变模型选择 / VAD / beam | P1 |
 
 ### FR-4 质量门控
 
 | ID     | 描述                                               | 优先级 |
 | ------ | ------------------------------------------------ | --- |
-| FR-4.1 | 转写后调 **云端订阅模型**做质量检查;**输入文本**(2026-09-07 v3.2 改)= Level 1 本地清理后的 `cleaned.txt`(**不再**是 refined,因为 refine 还没跑) | P0  |
-| FR-4.2 | 检查项:**通顺度**、**完整性**、**准确性**、**重复异常** + **(2026-09-07 v3.2 新增)文本长度合理性**:基于视频时长判断总字数(中文正常 4-7 字/秒;短于 1 分钟视频 ≥ 100 字,长于 30 分钟视频 ≥ 3000 字);明显偏离 → fail | P0  |
-| FR-4.3 | 启发式预筛:语速 < 1 字/秒 或 > **20 字/秒**(2026-09-07 v3.2.1 由 15 调宽到 20,容 tiny 模型中文 19-25 cps 假阳)直接判失败;**(2026-09-07 v3.2 新增)总字数下界** `total_chars < duration_sec * min_char_per_second * 0.8` → fail score 25(防 Whisper 半路崩 / 静音假过) | P0  |
-| FR-4.4 | 质量分 ≥ 70 才算通过                                    | P0  |
-| FR-4.5 | **通过**(2026-09 收敛)→ 视频源已删(FR-3.3)+ **保存原文**到 `logs/transcribed/<id>_<title短>.txt`(FR-7.7)+ **清理音频 .wav**(FR-3.7)+ 进入总结队列(Phase 7) | P0 |
-| FR-4.6 | **未通过**(2026-09 收敛)→ 保留音频 .wav(FR-3.7,虽然视频源 FR-3.3 已删,音频是唯一可重转写的源)+ 记录到 `logs/quality_fail.csv`(FR-7.2)+ **单独存文本**到 `logs/failed_texts/<id>_<title短>.txt`(FR-7.3) | P0 |
+| FR-4.1 | 转写后调 **云端订阅模型**做质量检查;**输入文本**(**2026-09-10 订正**)= `transcriber.transcribe()` 的返回值 —— refine 启用时那是 **Level 4 refined 文本**(`streaming.py` 返回链 refined > 内存 cleaned > transcript),refine 未启用/失败时是 Level 1 内存文本。旧文档写"Level 1 `cleaned.txt`"**既过时**(该文件已不落盘,见 FR-3.8)**也不符实际顺序**(refine 在门控之前跑,见 FR-3.9) | P0  |
+| FR-4.2 | **检查维度(2026-09-10 重写为两类判定)**:① **转写失败** → `pass=false`:大面积乱码 / 重复死循环 / 覆盖面 < 50% / 语速远超正常范围;② **可读但需校对** → `pass=true` + 记入 `issues` + 在 `score` 上扣分:错别字、繁简混杂、口语化、个别语序混乱、专有名词拼写。**为什么改**:旧 prompt 让 LLM 对"有错别字但完全可读"也判 fail,把**可修复的瑕疵**当成**不可用的转写**挡在门外 —— 2026-09-10 真机那条 Python 课(score 55)就是这么被挡下的。**(2026-09-10 订正)**旧文档列的"文本长度合理性"维度在 `checker.py` 的 prompt 中**已不存在** | P0  |
+| FR-4.3 | 启发式预筛(**先于 LLM 跑,命中即直接 fail、不调 LLM**):① 语速过低 `cps < quality_check.min_char_per_second` → fail score 20;② 语速过高 `cps > quality_check.max_char_per_second` → fail score 30(Whisper 幻觉典型);③ 重复异常:同一 ≥5 字句子重复 ≥3 次 → fail score 10。三者都是**"转写失败"特征**探测器,与 FR-4.2 的两类划分同向。**(2026-09-10 订正)**:旧文档写死的"语速 < 1 字/秒"与"总字数下界 `total_chars < duration_sec * min_char_per_second * 0.8` → score 25"两条在 `checker.py` 中**均不存在** —— 前者已改为读配置项,后者从未落地 | P0  |
+| FR-4.4 | **通过判定**:`passed = llm_pass AND score >= quality_check.min_score_to_pass`。**(2026-09-10 订正)**:旧文档写死 "≥ 70",实际阈值来自配置项,70 不再是当前值。**(2026-09-10 锚定)**:prompt 内**注入同一个 `min_score_to_pass`**,并明确要求 `pass` 与 `score` 一致(`pass = score >= 阈值`)—— 两个判据按构造一致后,`AND` 退化为安全网,修掉旧 prompt "同时索要 `pass` 和 `score` 却从不定义二者关系"导致的自相矛盾(真机实例:`score=55` + `pass=false`,分数够了仍被 `pass=false` 一票否决) | P0  |
+| FR-4.5 | **通过**(2026-09 收敛)→ 视频源已删(FR-3.3)+ **保存原文**到 `logs/transcribed/<date>/transcripts/<id>_<title短>.txt`(FR-7.7)+ 音频 .wav 已在转写成功后删除(FR-3.7)+ 进入总结队列(Phase 7 / FR-2.15d / FR-9) | P0 |
+| FR-4.6 | **未通过**(2026-09 收敛,**2026-09-10 订正**)→ **不保留音频 .wav**(音频已在转写成功后立即删除,见 FR-3.7)+ 记录到 `logs/quality_fail.csv`(FR-7.2)+ **单独存文本**到 `logs/failed_texts/<id>_<title短>.txt`(FR-7.3)。旧文档写"保留音频 .wav,音频是唯一可重转写的源"与 FR-3.7 的"转写成功即删"**直接矛盾**,已删去 | P0 |
 
 ### FR-5 LLM 总结
 
@@ -577,6 +991,57 @@ accumulated_duration_sec = 0
 - 用户当前没有明确的视频组字段(FR-10.3)
 - 实际场景下,**同一 B站视频组里的视频**才会被批量观看
 - 用 group_id(暂时 = 视频组名字)作为配额累计单位,跨组可以独立累计
+
+---
+
+### FR-11 课程目录批量转写(2026-09-10 新增)
+
+**背景**:bill-jc 课程目录动辄几十上百条视频,原来只能一条条粘 URL 跑 skill
+(单视频 scope,见 `.claude/skills/vla-learn-bill-jc/SKILL.md`)。需要一个入口:
+给出**目录页 URL 的两个参数**,自动翻页取任务并复用既有单条转写链路。
+
+| ID       | 描述                                                                                     | 优先级 |
+| -------- | -------------------------------------------------------------------------------------- | --- |
+| FR-11.1  | 新增子命令 `vla learn --college-id <cid> --catalog-id <catalogId>`                          | P0  |
+| FR-11.2  | 两个参数取自课程目录页 URL:`/kng/#/list?catalogId=<X>&cid=<Y>`,其中 **`cid` 就是 collegeId**    | P0  |
+| FR-11.3  | 翻页:`list_tasks(offset=N)` 循环取任务,**页大小 == 翻页步长 == `--limit`(默认 10)**                | P0  |
+| FR-11.4  | 停法只有两条:① 目录翻完(空页)② 累计配额到且 `on_exhausted=stop_session`(FR-9.4)                | P0  |
+| FR-11.5  | **页内条数 < limit 不当作翻完** —— 服务端若压低页大小上限,"不满页=最后一页"会静默截断整个课程                    | P0  |
+| FR-11.6  | 整页都已转写(FR-9.6 去重后 `processed=0`)→ **照常翻页**,不是停                                        | P0  |
+| FR-11.7  | 每条任务转为 VideoTask 时 `expected_duration` 由 ffprobe 实测**回填**(替换 3600 占位)                  | P0  |
+| FR-11.8  | 探测失败(ffprobe 缺失/超时/解析失败)时**保留占位值,不覆盖为 0** —— 覆盖会让 cps = chars/0 踩爆上限误判幻觉 | P0  |
+| FR-11.9  | **单条转写链路零改动**:`fetch_asset` / `process_asset` / `VideoLearningAgent.run` 语义不变,回填靠包装器    | P0  |
+| FR-11.10 | `--dry-run` 只翻页列任务,不装配 transcriber / refiner / LLM(零凭据零副作用)                          | P1  |
+| FR-11.11 | **bill-jc 视频 URL 只有 SPA 一种形式,kngId 是查询参数**(2026-09-10 新增):`…/kng/#/video/play?kngId=<uuid>&projectId=&btid=&gwnlUrl=`;`/learn/<kng_id>` 这种 **path 形式不存在**(2026-09-09 设计文档的凭空假设)。`InternalSiteAdapter.fetch_via_spider` 按 `[?&]kngId=([^&#\s]+)` 解析,`&` 锚定保证 kngId 不必是首个查询参数。**单视频与批量共用同一条解析** | P0  |
+| FR-11.12 | **不依赖浏览器插件的平台不弹 A 级窗**(2026-09-10 新增):`PlatformAdapter.plugin_popup_enabled` 类属性(默认 `True`),`InternalSiteAdapter` 置 **`False`**;`strategy._try_browser` 在字幕探测之后、弹窗之前检查。**理由**:弹窗问的是"是否已开启字幕插件",内部站没有插件可开,用户无法给出有意义的回答 —— 只会白等 30s 再降级。**探测不受影响**(未来内部站若有 DOM 字幕仍能命中) | P0  |
+| FR-11.13 | **`fetch_via_recording` override 必须兼容基类 keyword-only 契约**:`strategy.get_subtitle` 策略 ③ 固定传 `audio_factory=` / `transcriber=`;子类收窄 signature 会 TypeError,且会被 `except` 记成 `transcribe_fail`(**把"签名不匹配"错记成"视频转写失败"**) | P0  |
+| FR-11.14 | **已知未修**:整批全失败时 `quota.add()` 永不触发 → `should_continue()` 恒 True → 一路翻完整个目录。是否加"连续失败 N 条熔断"待裁定 | P2  |
+
+**翻页代数定稿(2026-09-10)**:
+
+```text
+offset = 0
+while True:
+    page = list_tasks(catalog_id, limit=limit, offset=offset)
+    if not page: break                    # ① 翻完 —— 唯一终止信号
+    agent.run(page)                       # 去重/配额/6h 全在既有 run 内
+    if not quota.should_continue(): break # ② 配额到 + stop_session
+    offset += limit                       #   页大小与步长必须相等
+```
+
+**页大小写死 16 的坑(本次修复)**:旧 `list_tasks` 把 `limit: 16` 硬编码进
+pagelist params,而本地只收 `limit` 条 —— `--limit 10` 时每页静默丢弃 6 条,
+100 条视频的目录会漏掉 60 条且**无任何报错**。
+
+**为什么时长回填免费**:bill-jc 路径 ② 必须先抽音(m3u8 → wav)才有得转写,
+所以包装器运行时 wav 一定已在磁盘上,ffprobe 是纯读。占位值 3600 会让
+quota 明显高估、cps 明显低估(chars/3600 远小于真实语速),回填是修正而非优化。
+
+**Refiner 必须早于质量门控(装配注意)**:`build_text_provider` 的 auto-construct
+会建 `StreamingTranscriber(cfg)` **不带 refiner**,于是 Level 4 云端清理被
+`_maybe_refine` 静默跳过,未清理文本进质量门控。2026-09-10 实测:未注入
+score 45(不过)vs 注入后 88(过)。`learn` 因此自建 refiner + transcriber 再注入。
+(`process_asset` Step 4 也 refine,但那在门控**之后**,救不回 fail。)
 
 ---
 
@@ -863,7 +1328,7 @@ class StreamingTranscriber:
           1. faster-whisper.transcribe(audio_path) → raw_segments
           2. 写 logs/transcripts/<bvid>.transcript.txt(Whisper 原始 segments)
           3. postprocess.clean_transcript(raw_text, title) → cleaned_text     # FR-3.8 Level 1(本地,必启用)
-          4. 写 logs/transcripts/<bvid>.cleaned.txt(Level 1 清理后,质量门控输入 + 审计用)
+          4. (2026-09-10 删除)不再落盘 cleaned.txt —— Level 1 结果只留在内存,作质量门控输入
           5. **不调 refiner**(2026-09-07 v3.2):Refine 由 main.py 质量门控通过后显式调
           6. **不删音频源**(2026-09-07 v3.2):音频清理挪到 main.py `if quality.passed:` 分支
           7. return TranscribeResult(text=cleaned_text, source="cleaned", audio_path=audio_path)
@@ -1623,6 +2088,10 @@ vla doctor
 | CC 字幕 | B站官方字幕,UP 主上传 |
 | VideoTrans | 开源浏览器插件,本地 Whisper 转写 |
 | faster-whisper | CTranslate2 加速版 Whisper,本地运行 |
-| 策略 B | 本项目录屏方案:录浏览器窗口 + 系统音频 |
+| 策略 B | ~~本项目录屏方案:录浏览器窗口 + 系统音频~~ **已废弃**(2026-09-03 重构 v3,不再录屏) |
 | 启发式预筛 | 不调 LLM,基于字/秒判断字幕可信度 |
 | 质量门控 | 删除视频源前必经的检查环节 |
+| probe_status | Tab Audio Recorder 扩展状态三态探测:enabled / disabled / not_installed(FR-2.24a) |
+| `_resolve_ext_id()` | 动态从 `chrome.management.getAll()` 解析 Tab Audio Recorder 扩展 ID,匹配 `match_keyword`(默认 `"tab audio"`),**不硬编码**(FR-2.24) |
+| `prepare_for_screenshot()` | 截图前抢焦点 + 窗口归位(FR-2.28.2a),确保系统截图截到视频而非前台 APP |
+| Level 1 / Level 4 清理 | Level 1 = 本地 `clean_transcript()`(必启用);Level 4 = 云端 LLM `SubtitleRefiner.refine()`(可选,FR-2.15c + FR-3.8/3.9) |

@@ -245,7 +245,7 @@ async def _run_endtoend(
     from vla.transcribe.streaming import StreamingTranscriber
     from vla.state.plugin_status import PluginStatus
     from vla.ui.notifier import create_notifier
-    from vla.log.transcription_log import TranscriptionLog
+    from vla.log.transcription_log import TranscriptionLog, dated_root_for
     from vla.subtitle.audio_scan import find_today_dir
     from vla.quality.checker import QualityChecker
     from vla.quality.refiner import SubtitleRefiner
@@ -388,13 +388,38 @@ async def _run_endtoend(
 
     logger.info("[OK] Quality score=%d passed=%s", result.qr.score, result.qr.passed)
     logger.info("[OK] Duration: %ds source=%s", result.duration_sec, result.source)
-    # transcript/refined 实际落盘在 cfg.storage.tmp_dir/transcripts/(StreamingTranscriber 写)
-    # 不是 cfg.storage.transcribed_dir(那是 build_text_provider 内部用的另一条路径)
-    transcripts_dir = Path(cfg.storage.tmp_dir) / "transcripts"
-    logger.info(
-        "[DONE] 字幕落盘: %s/%s.{transcript,cleaned,refined}.txt",
-        transcripts_dir, kng_id,
+    # 2026-09-10 修正:原实现报 `cfg.storage.tmp_dir/transcripts/` —— **该目录不存在**
+    # (实测 `ls tmp/transcripts` → No such file or directory),且列了早已删除的
+    # `cleaned.txt`(2026-09-10 起只留内存,不落盘)。spike 的唯一职责就是告诉用户
+    # 产物在哪,报错目录会让人白找。
+    #
+    # 真产物一律由 vla.log.transcription_log 落盘到 <log_dir>/transcribed/<date>/transcripts/:
+    #   正式产物 <id>_<safe_title>.txt  —— save_transcribed 写(总有)
+    #   中间产物 <stem>.transcript.txt  —— StreamingTranscriber 写
+    #            <stem>.refined.txt     —— 仅 refine_enabled;质量**通过**时已被
+    #                                      process_asset Step 6 删掉,只有失败条目残留
+    #                                      (见 discard_transcribe_intermediates)
+    # 内部站路径下 stem == task.id == kng_id,故按 kng_id 前缀直接列盘上实际文件,
+    # 不去重算 _safe_title 的 slug(那是 transcription_log 的私有约定)。
+    #
+    # 扫 `*/transcripts/` 而**不用** `transcripts_dir_for(log_dir)` 单取今天:
+    # 后者按 `datetime.now()` **现算**,跨零点跑完时算到的是**次日**目录,
+    # 而 transcriber 写的是**转写那一刻**的目录 → 会报"没有产物"。
+    # (同一 hazard 见 `discard_transcribe_intermediates` 的注释。)
+    # 这里只做只读回报,多扫几个日期目录没有任何代价。
+    transcribed_root = dated_root_for(cfg.logging.log_dir).parent  # <log_dir>/transcribed
+    produced = (
+        sorted(transcribed_root.glob(f"*/transcripts/{kng_id}*"))
+        if transcribed_root.is_dir() else []
     )
+    if produced:
+        for p in produced:
+            logger.info("[DONE] 字幕落盘: %s", p)
+    else:
+        logger.warning(
+            "[DONE] %s/*/transcripts/ 下没有 %s* 产物 —— 检查 process_asset 是否真的写盘",
+            transcribed_root, kng_id,
+        )
 
 
 if __name__ == "__main__":

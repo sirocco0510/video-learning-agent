@@ -91,6 +91,67 @@ def test_extract_m3u8_audio_success(tmp_path, monkeypatch):
     assert str(out) in captured_cmd
 
 
+def test_extract_m3u8_audio_max_sec_adds_output_t(tmp_path, monkeypatch):
+    """FR-2.30.1:max_sec 给定 → 输出侧 `-t <max_sec>`,且必须在 `-i` 之后。
+
+    位置很关键:`-t` 放 `-i` 之前是**输入侧**选项(含义不同)。输出侧才能做到
+    "产出够 N 秒就停止读取输入",从而顺带省掉后续 HLS 切片的带宽。
+    """
+    out = tmp_path / "audio.wav"
+    fake_proc = MagicMock(returncode=0, stderr="")
+    captured_cmd: list = []
+
+    def fake_run(cmd, **kwargs):
+        captured_cmd.extend(cmd)
+        out.write_bytes(b"RIFF")
+        return fake_proc
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    extract_m3u8_audio("https://video.bill-jc.com/foo.m3u8", out, max_sec=1800)
+
+    assert "-t" in captured_cmd
+    assert captured_cmd[captured_cmd.index("-t") + 1] == "1800"
+    # 输出侧:`-t` 必须排在 `-i <url>` 之后
+    assert captured_cmd.index("-t") > captured_cmd.index("-i")
+
+
+def test_extract_m3u8_audio_without_max_sec_omits_t(tmp_path, monkeypatch):
+    """FR-2.30.1:不传 max_sec → 不加 `-t`,保持全量抽取(旧行为不变)。"""
+    out = tmp_path / "audio.wav"
+    fake_proc = MagicMock(returncode=0, stderr="")
+    captured_cmd: list = []
+
+    def fake_run(cmd, **kwargs):
+        captured_cmd.extend(cmd)
+        out.write_bytes(b"RIFF")
+        return fake_proc
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    extract_m3u8_audio("https://video.bill-jc.com/foo.m3u8", out)
+
+    assert "-t" not in captured_cmd
+
+
+def test_extract_m3u8_audio_max_sec_none_omits_t(tmp_path, monkeypatch):
+    """显式传 max_sec=None(配置里设 null)→ 同样不加 `-t`。"""
+    out = tmp_path / "audio.wav"
+    fake_proc = MagicMock(returncode=0, stderr="")
+    captured_cmd: list = []
+
+    def fake_run(cmd, **kwargs):
+        captured_cmd.extend(cmd)
+        out.write_bytes(b"RIFF")
+        return fake_proc
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    extract_m3u8_audio("https://video.bill-jc.com/foo.m3u8", out, max_sec=None)
+
+    assert "-t" not in captured_cmd
+
+
 def test_extract_m3u8_audio_fails_on_ffmpeg_nonzero(tmp_path, monkeypatch):
     """ffmpeg 返回非 0 → RuntimeError, 半截 wav 清掉。"""
     out = tmp_path / "audio.wav"
@@ -120,30 +181,67 @@ def _make_fake_browser(*, ready_state_ok: bool = True, capture_error: str | None
     capture_error="no_video":page.evaluate 抛 "No <video> element"。
     capture_error="no_audio":page.evaluate 抛 "No audio track"。
 
-    extract_browser_audio 现在调 page.evaluate 2 次(①点"开始学习"按钮 ②跑
-    MediaRecorder 捕获 JS),所以 happy path 的 evaluate 用 side_effect 列表
-    返回:第一调用返回 True(按钮存在),第二调用返回 b64 payload。
+    Phase 9.6.4+ (2026-09-10):默认走 "video 还没出现 → 点 button → video ready" 流程
+    (happy path,模拟没学完的常规视频):
+      - wait_for_selector 第 1 次(video,5s):抛错(video 不在)
+      - wait_for_selector 第 2 次(button,30s):成功(button 出现)
+      - wait_for_selector 第 3 次(video,30s):成功(video 出现)
+      - wait_for_function:成功(readyState>=2)
+      - evaluate 第 1 次(click JS):返 "开始学习"
+      - evaluate 第 2 次(capture JS):返 b64 payload
+
+    学完场景请用 _make_fake_browser_already_loaded()(video 直接就在 DOM)。
     """
     fake_page = MagicMock()
     fake_page.goto = AsyncMock()
-    fake_page.wait_for_selector = AsyncMock()
-    fake_page.wait_for_function = AsyncMock()
-    fake_page.close = AsyncMock()
 
     if not ready_state_ok:
+        # 所有 wait_for_selector 都抛
         fake_page.wait_for_selector = AsyncMock(
             side_effect=Exception("wait_for_selector timeout"),
         )
+        fake_page.wait_for_function = AsyncMock()
     elif capture_error == "no_video":
-        # 第一 evaluate(点开始学习)成功,第二 evaluate(捕获)抛 "No <video>"
-        fake_page.evaluate = AsyncMock(side_effect=[True, Exception("No <video> element")])
+        # video click 后等不到,wait_for_selector 第 3 次抛
+        fake_page.wait_for_selector = AsyncMock(side_effect=[
+            Exception("video not present yet"),  # 第 1 次:video fast-path
+            None,  # 第 2 次:button 命中
+            Exception("video still not there after button click"),  # 第 3 次失败
+        ])
+        fake_page.wait_for_function = AsyncMock()
     elif capture_error == "no_audio":
-        fake_page.evaluate = AsyncMock(side_effect=[True, Exception("No audio track")])
+        # 全部 wait 成功,但 capture 抛 no_audio
+        fake_page.wait_for_selector = AsyncMock(side_effect=[
+            Exception("video not present yet"),  # 第 1 次
+            None,  # 第 2 次:button
+            None,  # 第 3 次:video
+        ])
+        fake_page.wait_for_function = AsyncMock()
     else:
-        # happy path: 第 1 次 evaluate(点开始学习)返 True,第 2 次(捕获)返 b64
-        fake_bytes = b"\x1a\x45\xdf\xa3"  # EBML header
+        # happy path
+        fake_page.wait_for_selector = AsyncMock(side_effect=[
+            Exception("video not present yet (5s fast-path timeout)"),
+            None,  # button 命中
+            None,  # video 命中
+        ])
+        fake_page.wait_for_function = AsyncMock()
+
+    fake_page.close = AsyncMock()
+
+    if capture_error == "no_video":
+        fake_page.evaluate = AsyncMock(side_effect=[
+            "开始学习",
+            Exception("No <video> element"),
+        ])
+    elif capture_error == "no_audio":
+        fake_page.evaluate = AsyncMock(side_effect=[
+            "开始学习",
+            Exception("No audio track"),
+        ])
+    else:
+        fake_bytes = b"\x1a\x45\xdf\xa3"
         payload = {"b64": base64.b64encode(fake_bytes).decode("ascii"), "duration": 12.0}
-        fake_page.evaluate = AsyncMock(side_effect=[True, payload])
+        fake_page.evaluate = AsyncMock(side_effect=["开始学习", payload])
 
     fake_context = MagicMock()
     fake_context.new_page = AsyncMock(return_value=fake_page)
@@ -254,8 +352,9 @@ async def test_extract_browser_audio_returns_runtimeerror_when_capture_stream_em
 async def test_extract_browser_audio_passes_playback_rate_to_js(tmp_path, monkeypatch):
     """验证 playback_rate=4 默认值 + 自定义值都正确传给 page.evaluate。
 
-    3h 视频 @ 4x → 45min wall-clock。MediaRecorder 拿原始采样率音频,
-    faster-whisper 转写对采样率不敏感、对播放速率不敏感。
+    3h 视频 @ 4x → 45min wall-clock。MediaRecorder 拿原始采样率音频 —— 采样率不受
+    影响,但时间轴被压缩 4 倍,whisper 对**时间轴**敏感(所以才有 atempo 后处理,
+    见 test_extract_browser_audio_applies_atempo_stretch_to_ffmpeg)。
     """
     out_wav = tmp_path / "browser.wav"
     fake_browser, fake_page = _make_fake_browser()
@@ -281,23 +380,32 @@ async def test_extract_browser_audio_passes_playback_rate_to_js(tmp_path, monkey
     capture_args = fake_page.evaluate.call_args_list[1]
     capture_payload = capture_args[0][1]  # (_BROWSER_CAPTURE_JS, payload)
     assert capture_payload["playbackRate"] == 4.0
-    assert capture_payload["maxDurationSec"] == 3600
+    # FR-2.30.1:默认上限由 3600 降为 1800(只抽前 30 分钟)
+    assert capture_payload["maxDurationSec"] == 1800
 
     # 自定义值:reset_mock 后重新设置 side_effect(reset 也清掉 side_effect)
     # 注意:helper 里 fake_page.evaluate 的 side_effect[1] 是 helper-local 的 b64 payload,
     # 测试函数不能直接引用,需要重新构造一个等价 dict。
     fake_page.evaluate.reset_mock()
+    # reset_mock 不清 wait_for_selector 的 side_effect,但 list 已耗尽,需要重置
+    fake_page.wait_for_selector = AsyncMock(side_effect=[
+        Exception("video not present yet (5s fast-path)"),
+        None,  # button
+        None,  # video
+    ])
     b64_payload = {
         "b64": base64.b64encode(b"\x1a\x45\xdf\xa3").decode("ascii"),
         "duration": 12.0,
     }
-    fake_page.evaluate = AsyncMock(side_effect=[True, b64_payload])
+    fake_page.evaluate = AsyncMock(side_effect=["开始学习", b64_payload])
     with patch("vla.transcribe.extract.async_playwright", ap):
         await extract_browser_audio(
             "https://x.com/play", out_wav, max_duration_sec=7200, playback_rate=2.0,
         )
     custom_payload = fake_page.evaluate.call_args_list[1][0][1]
     assert custom_payload["playbackRate"] == 2.0
+    # FR-2.30.1:显式传的 max_duration_sec 覆盖默认值
+    assert custom_payload["maxDurationSec"] == 7200
 
 
 @pytest.mark.asyncio
@@ -329,7 +437,7 @@ async def test_extract_browser_audio_resets_spa_before_video_goto(
 
     with patch("vla.transcribe.extract.async_playwright", ap):
         await extract_browser_audio(
-            "https://b-learning.bill-jc.com/learn/abc-123?kngId=abc-123",
+            "https://b-learning.bill-jc.com/kng/#/video/play?kngId=abc-123",
             out_wav,
         )
 
@@ -344,4 +452,249 @@ async def test_extract_browser_audio_resets_spa_before_video_goto(
     )
     # 第二次 goto 必须是传入的视频 URL
     second_goto_url = fake_page.goto.call_args_list[1][0][0]
-    assert second_goto_url == "https://b-learning.bill-jc.com/learn/abc-123?kngId=abc-123"
+    assert second_goto_url == "https://b-learning.bill-jc.com/kng/#/video/play?kngId=abc-123"
+
+
+def _make_fake_browser_already_loaded():
+    """学完状态 video 已经在 DOM 里(readyState=4),无需 click button。
+
+    77c57083 (2026-09-10 spike):bill-jc SPA 对已学完的视频不渲染 "开始学习" 按钮,
+    video 元素已存在且 readyState=4。extract_browser_audio 必须能跳过 button click
+    流程,直接进 capture。
+    """
+    fake_page = MagicMock()
+    fake_page.goto = AsyncMock()
+    # wait_for_selector("video", timeout=5000) 立即命中 — 模拟 video 已存在
+    fake_page.wait_for_selector = AsyncMock()
+    fake_page.wait_for_function = AsyncMock()
+    fake_page.close = AsyncMock()
+
+    # evaluate 只被调 1 次:① 直接跑 capture JS(无 button click)
+    fake_bytes = b"\x1a\x45\xdf\xa3"
+    payload = {"b64": base64.b64encode(fake_bytes).decode("ascii"), "duration": 12.0}
+    fake_page.evaluate = AsyncMock(return_value=payload)
+
+    fake_context = MagicMock()
+    fake_context.new_page = AsyncMock(return_value=fake_page)
+
+    fake_browser = MagicMock()
+    fake_browser.contexts = [fake_context]
+    return fake_browser, fake_page
+
+
+@pytest.mark.asyncio
+async def test_extract_browser_audio_skips_button_click_when_video_already_loaded(
+    tmp_path, monkeypatch,
+):
+    """Phase 9.6.4+ (2026-09-10):bill-jc 学完状态的视频,SPA 不渲染 "开始学习" 按钮,
+    video 元素已在 DOM 且 readyState=4。如果硬等 button.yxtf-button--primary → 30s
+    timeout → RuntimeError → fallback ffmpeg(失去 4x 加速)。
+
+    修复:先 wait_for_selector('video', timeout=5s)— 命中就跳过 button click 流程,
+    直接走 capture JS。evaluate 只调 1 次(只有 capture,没有 button click)。
+    """
+    out_wav = tmp_path / "browser.wav"
+    fake_browser, fake_page = _make_fake_browser_already_loaded()
+
+    ap = MagicMock()
+    ap.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+    ap.return_value.__aenter__.return_value.chromium = MagicMock()
+    ap.return_value.__aenter__.return_value.chromium.connect_over_cdp = AsyncMock(return_value=fake_browser)
+    ap.return_value.__aexit__ = AsyncMock(return_value=None)
+
+    def fake_ffmpeg_run(cmd, **kwargs):
+        wav_arg = cmd[cmd.index("-f") + 2]
+        Path(wav_arg).write_bytes(b"RIFF")
+        return MagicMock(returncode=0, stderr="")
+
+    monkeypatch.setattr("vla.transcribe.extract.subprocess.run", fake_ffmpeg_run)
+
+    with patch("vla.transcribe.extract.async_playwright", ap):
+        await extract_browser_audio(
+            "https://b-learning.bill-jc.com/kng/#/video/play?kngId=abc-123",
+            out_wav,
+        )
+
+    # wait_for_selector 必须被调至少 1 次,且 selector 必须是 "video"
+    # (而不是 "button.yxtf-button--primary")
+    wait_selectors = [
+        c[0][0] for c in fake_page.wait_for_selector.call_args_list
+    ]
+    assert any(sel == "video" for sel in wait_selectors), (
+        f"expected wait_for_selector('video') to be called, got selectors: {wait_selectors}"
+    )
+    # button.yxtf-button--primary 不应被 wait
+    assert not any("yxtf-button--primary" in str(sel) for sel in wait_selectors), (
+        f"button should NOT be waited on when video already loaded, "
+        f"got selectors: {wait_selectors}"
+    )
+    # evaluate 必须只调 1 次(只有 capture,没有 button click)
+    # click button evaluate 文本含 'innerText'
+    # capture evaluate 文本含 'captureStream'
+    click_calls = [
+        c for c in fake_page.evaluate.call_args_list
+        if "innerText" in str(c)
+    ]
+    capture_calls = [
+        c for c in fake_page.evaluate.call_args_list
+        if "captureStream" in str(c)
+    ]
+    assert len(click_calls) == 0, (
+        f"button click JS should be SKIPPED, got {len(click_calls)} click calls"
+    )
+    assert len(capture_calls) == 1, (
+        f"expected 1 capture call, got {len(capture_calls)}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_extract_browser_audio_click_js_matches_multiple_learning_states(
+    tmp_path, monkeypatch,
+):
+    """Phase 9.6.4+ (2026-09-10):bill-jc SPA 根据学习进度显示不同 button text:
+      - 没学过 → "开始学习"
+      - 学过一部分 → "继续学习"
+      - 学完想重看 → "重新学习"
+    extract_browser_audio 的 click JS 必须能匹配这三种,否则学过一部分的视频
+    永远 fallback 到 ffmpeg。
+
+    验证:用真实浏览器逻辑模拟 — wait_for_selector(button) 成功,然后 click JS 真
+    在"继续学习"按钮上跑(只匹配"开始学习"应返 False),如果 click JS 只匹配
+    "开始学习" 那 video 永远等不到 → RuntimeError。
+    """
+    out_wav = tmp_path / "browser.wav"
+    fake_browser, fake_page = _make_fake_browser()  # 默认 happy path(开始学习)
+
+    # 让 click evaluate 内部逻辑真实 — 用一个真实 JS 跑在 nodejs 不可,改方案:
+    # 直接 mock page.evaluate 跑 JS 的结果。如果 click JS 只匹配"开始学习",那
+    # 当 DOM 只有"继续学习" button 时返 False → video 等不到 → RuntimeError
+    # 我们这里用一个 _execute_click_js helper 模拟 click JS 逻辑
+    click_js_calls = []
+
+    async def mock_evaluate(js_str, *args):
+        click_js_calls.append(js_str)
+        if "innerText" in js_str:
+            # 模拟 click JS:只匹配 "开始学习" → "继续学习" 返 False
+            # 修复后:应匹配 "开始学习" / "继续学习" / "重新学习"
+            if "继续学习" in js_str or "重新学习" in js_str:
+                return True  # 修复后行为
+            return False  # 修复前行为(只匹配"开始学习")
+        else:
+            # capture JS 返 b64
+            return {
+                "b64": base64.b64encode(b"\x1a\x45\xdf\xa3").decode("ascii"),
+                "duration": 12.0,
+            }
+
+    fake_page.evaluate = mock_evaluate
+
+    ap = MagicMock()
+    ap.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+    ap.return_value.__aenter__.return_value.chromium = MagicMock()
+    ap.return_value.__aenter__.return_value.chromium.connect_over_cdp = AsyncMock(return_value=fake_browser)
+    ap.return_value.__aexit__ = AsyncMock(return_value=None)
+
+    def fake_ffmpeg_run(cmd, **kwargs):
+        wav_arg = cmd[cmd.index("-f") + 2]
+        Path(wav_arg).write_bytes(b"RIFF")
+        return MagicMock(returncode=0, stderr="")
+
+    monkeypatch.setattr("vla.transcribe.extract.subprocess.run", fake_ffmpeg_run)
+
+    with patch("vla.transcribe.extract.async_playwright", ap):
+        await extract_browser_audio("https://b-learning.bill-jc.com/kng/#/video/play?kngId=x", out_wav)
+
+    # 关键断言:click JS 必须包含 "继续学习" 字符串(修复后)
+    click_js = click_js_calls[0]
+    assert "继续学习" in click_js, (
+        f"click JS must handle '继续学习' button (学过一部分场景), "
+        f"got: {click_js[:200]}"
+    )
+    # wav 应被写入
+    assert out_wav.exists()
+
+
+# -----------------------------------------------------------------------------
+# atempo 后处理(Phase 9.6.6+)— 4x 抓的音拉伸回 2x,消同音字幻觉
+# -----------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_extract_browser_audio_applies_atempo_stretch_to_ffmpeg(
+    tmp_path, monkeypatch,
+):
+    """Phase 9.6.6+ (2026-09-10):browser 4x 抓的 webm 必须经 `-af atempo=0.5` 拉伸
+    2 倍再落 wav。
+
+    Why:4x 抓的音让 whisper 看到"时间轴压缩 4 倍"的语流,快速连读场景产生同音字
+    幻觉 + 数字串乱码,质量门控 fail。793df1f8 实测 4min23s 编程教程:wav 263s→526s,
+    字符 522→2899(5.5x),"资格资格资格" 66 行 → 0 行,识别出真实 if-else 教学内容。
+
+    验证:ffmpeg 命令行必须带 atempo=0.5(4x 抓 → 净 2x 速度)。
+    """
+    out_wav = tmp_path / "browser.wav"
+    fake_browser, _ = _make_fake_browser()
+
+    ap = MagicMock()
+    ap.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+    ap.return_value.__aenter__.return_value.chromium = MagicMock()
+    ap.return_value.__aenter__.return_value.chromium.connect_over_cdp = AsyncMock(return_value=fake_browser)
+    ap.return_value.__aexit__ = AsyncMock(return_value=None)
+
+    captured_ffmpeg_cmds: list = []
+
+    def fake_ffmpeg_run(cmd, **kwargs):
+        captured_ffmpeg_cmds.append(cmd)
+        Path(cmd[cmd.index("-f") + 2]).write_bytes(b"RIFF")
+        return MagicMock(returncode=0, stderr="")
+
+    monkeypatch.setattr("vla.transcribe.extract.subprocess.run", fake_ffmpeg_run)
+
+    with patch("vla.transcribe.extract.async_playwright", ap):
+        await extract_browser_audio("https://b-learning.bill-jc.com/kng/#/video/play?kngId=x", out_wav)
+
+    assert len(captured_ffmpeg_cmds) == 1
+    cmd = captured_ffmpeg_cmds[0]
+    assert "-af" in cmd, f"ffmpeg 必须带 atempo 滤镜,got: {cmd}"
+    filter_arg = cmd[cmd.index("-af") + 1]
+    assert filter_arg == "atempo=0.5", (
+        f"4x 抓的音必须拉伸回 2 倍(atempo=0.5),got: {filter_arg!r}"
+    )
+    # 滤镜必须在输入之后(ffmpeg 语法要求 -af 作用于已声明的输入)
+    assert cmd.index("-af") > cmd.index("-i")
+    assert out_wav.exists()
+
+
+@pytest.mark.asyncio
+async def test_extract_browser_audio_atempo_is_overridable(tmp_path, monkeypatch):
+    """atempo 可显式覆盖:atempo=1.0 = 不拉伸(4x 直出,退回旧行为)。
+
+    atempo 单级合法区间是 [0.5, 100](ffmpeg 硬限制),0.5 正好是下边界 ——
+    想要比 2 倍更慢必须链式(如 ``atempo=0.5,atempo=0.5`` = 4 倍拉伸),本函数
+    只暴露单级因子。
+    """
+    out_wav = tmp_path / "browser.wav"
+    fake_browser, _ = _make_fake_browser()
+
+    ap = MagicMock()
+    ap.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+    ap.return_value.__aenter__.return_value.chromium = MagicMock()
+    ap.return_value.__aenter__.return_value.chromium.connect_over_cdp = AsyncMock(return_value=fake_browser)
+    ap.return_value.__aexit__ = AsyncMock(return_value=None)
+
+    captured_ffmpeg_cmds: list = []
+
+    def fake_ffmpeg_run(cmd, **kwargs):
+        captured_ffmpeg_cmds.append(cmd)
+        Path(cmd[cmd.index("-f") + 2]).write_bytes(b"RIFF")
+        return MagicMock(returncode=0, stderr="")
+
+    monkeypatch.setattr("vla.transcribe.extract.subprocess.run", fake_ffmpeg_run)
+
+    with patch("vla.transcribe.extract.async_playwright", ap):
+        await extract_browser_audio(
+            "https://b-learning.bill-jc.com/kng/#/video/play?kngId=x", out_wav, atempo=1.0,
+        )
+
+    cmd = captured_ffmpeg_cmds[0]
+    assert cmd[cmd.index("-af") + 1] == "atempo=1.0"

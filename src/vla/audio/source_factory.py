@@ -18,11 +18,49 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SAVE_DIR = Path("./logs/audio_raw")
+# 2026-09-10 统一:wav 一律落 tmp/audio_raw(与生产装配路径一致 ——
+# `main_provider` 用 `save_dir / "audio_raw"`)。旧默认 `./logs/audio_raw`
+# 会让"谁用了默认值"把 wav 落到 logs 树里,和"转写产物落 logs、音频落 tmp"
+# 的约定相反,且 logs/ 是被读盘扫描的目录,不该混入二进制。
+DEFAULT_SAVE_DIR = Path("./tmp/audio_raw")
 DEFAULT_AUDIO_FORMAT = "wav"
 DEFAULT_FFMPEG_POSTARGS = "-ac 1 -ar 16000"  # 单声道 + 16kHz(Whisper 期望采样率)
 DEFAULT_SIMULATE_TIMEOUT_SEC = 30
 DEFAULT_EXTRACT_TIMEOUT_SEC = 600  # 10 分钟:60min 长视频 + 弱网络
+
+
+def probe_duration(audio_path: Path) -> int:
+    """用 ffprobe 拿音频时长(秒)。失败 fallback 到 0(主流程不阻塞)。
+
+    失败一律返回 0 而不是抛错,调用方必须自己判断 0 = "不知道"。
+    两条调用路径:
+      - AudioSourceFactory.extract() → AudioExtractionResult.duration_sec
+      - learn 批量入口 → 回填 VideoTask.expected_duration(替换占位值),
+        见 src/vla/learn.py
+    """
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        logger.warning("ffprobe 未安装,duration_sec 退化为 0")
+        return 0
+    try:
+        proc = subprocess.run(
+            [
+                ffprobe,
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "json",
+                str(audio_path),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=10,
+        )
+        data = json.loads(proc.stdout)
+        return int(float(data["format"]["duration"]))
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+            KeyError, ValueError, json.JSONDecodeError) as e:
+        logger.warning("ffprobe 解析时长失败:%s", e)
+        return 0
 
 
 @dataclass(frozen=True)
@@ -38,7 +76,7 @@ class AudioSourceFactory:
     """yt-dlp 抽音频工厂(SSOT: spec §3.2)。
 
     用法:
-        factory = AudioSourceFactory(save_dir=Path("./logs/audio_raw"))
+        factory = AudioSourceFactory(save_dir=Path("./tmp/audio_raw"))
         if factory.is_downloadable(url):
             result = factory.extract(url, stem=bvid)
             transcriber.transcribe(result.audio_path)
@@ -123,27 +161,5 @@ class AudioSourceFactory:
         )
 
     def _probe_duration(self, audio_path: Path) -> int:
-        """用 ffprobe 拿时长(秒)。失败 fallback 到 0(主流程不阻塞)。"""
-        ffprobe = shutil.which("ffprobe")
-        if ffprobe is None:
-            logger.warning("ffprobe 未安装,duration_sec 退化为 0")
-            return 0
-        try:
-            proc = subprocess.run(
-                [
-                    ffprobe,
-                    "-v", "error",
-                    "-show_entries", "format=duration",
-                    "-of", "json",
-                    str(audio_path),
-                ],
-                check=True,
-                capture_output=True,
-                timeout=10,
-            )
-            data = json.loads(proc.stdout)
-            return int(float(data["format"]["duration"]))
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
-                KeyError, ValueError, json.JSONDecodeError) as e:
-            logger.warning("ffprobe 解析时长失败:%s", e)
-            return 0
+        """用 ffprobe 拿时长(秒)—— 委托给模块级 probe_duration(2026-09-10)。"""
+        return probe_duration(audio_path)

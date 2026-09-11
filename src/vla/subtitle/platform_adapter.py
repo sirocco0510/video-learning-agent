@@ -37,7 +37,13 @@ class PlatformAdapter:
     可选 override:
     - `fetch_via_recording`(策略 ③)— base 提供默认实现(F2-10 后只剩
       path ① yt-dlp → Whisper;Tab Audio Recorder 路径已迁到 strategy 层)。
+    - `plugin_popup_enabled`(类属性)— 见下。
     """
+
+    #: 策略 ② miss 时是否弹 A 级窗问用户"是否已开启字幕插件"(FR-2.21)。
+    #: 只有依赖浏览器插件的平台才该弹 —— 内部站(InternalSiteAdapter)置 False,
+    #: 否则每次 spider miss 都白等 30s 弹一个用户无法响应的窗。见 FR-11.11。
+    plugin_popup_enabled: bool = True
 
     @classmethod
     def match(cls, url: str) -> bool:

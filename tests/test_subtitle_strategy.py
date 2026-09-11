@@ -603,7 +603,7 @@ class TestPhase96SpiderDispatch:
         )
 
         result = await spider_strategy.get_subtitle(
-            "https://b-learning.bill-jc.com/learn/kng-001",
+            "https://b-learning.bill-jc.com/kng/#/video/play?kngId=kng-001",
         )
 
         assert result is not None
@@ -622,12 +622,45 @@ class TestPhase96SpiderDispatch:
         # ② browser miss + plugin_status 不 unavailable → 走 enabled 弹窗路径,
         # 弹窗返回 enabled → _try_browser 返 None,然后 ③ 也 miss → 整体 None。
         result = await spider_strategy.get_subtitle(
-            "https://b-learning.bill-jc.com/learn/kng-002",
+            "https://b-learning.bill-jc.com/kng/#/video/play?kngId=kng-002",
         )
 
         assert result is None
         spider_adapter.fetch_via_spider.assert_called_once()
         spider_adapter.fetch_browser_subtitle.assert_called_once()
+
+    async def test_internal_site_adapter_never_pops_up(
+        self, adapter, driver, notifier, plugin_status, log
+    ):
+        """FR-2.21 + 2026-09-10 修复:内部站 adapter 关掉弹窗闸门后,
+        策略 ② miss 不再弹 A 级窗(旧行为 = 白等 30s 再降级,且用户看到的
+        是一个问「是否开启字幕插件」的窗 —— 内部站根本没有插件可开)。
+
+        回归背景:批量跑时 fetch_via_spider 静默 miss,42 条视频逐个弹窗。
+        """
+        adapter.plugin_popup_enabled = False
+        strategy = SubtitleStrategy(
+            registry=StubRegistry(adapter),
+            driver=driver,
+            recorder=None,
+            notifier=notifier,
+            plugin_status=plugin_status,
+            log=log,
+            audio_factory=MagicMock(),
+            transcriber=MagicMock(),
+            screenshot_controller=MagicMock(),
+        )
+
+        result = await strategy.get_subtitle("https://b-learning.bill-jc.com/x")
+
+        assert result is None
+        # ② 的字幕探测照跑(未来内部站有 DOM 字幕仍能命中),只是不弹窗
+        assert adapter.browser_calls == 1
+        notifier.ask_open_browser.assert_not_called()
+        # 没弹窗就不该有"用户跳过/超时"的副作用
+        plugin_status.mark_unavailable.assert_not_called()
+        # ③ 照常降级(内部站 adapter 返 None,不抛)
+        assert adapter.recording_calls == 1
 
     async def test_adapter_without_fetch_via_spider_skips_dispatch(
         self, adapter, driver, notifier, plugin_status, log
@@ -645,7 +678,9 @@ class TestPhase96SpiderDispatch:
                 transcriber=MagicMock(),
             screenshot_controller=MagicMock(),
         )
-        result = await strategy.get_subtitle("https://b-learning.bill-jc.com/learn/x")
+        result = await strategy.get_subtitle(
+            "https://b-learning.bill-jc.com/kng/#/video/play?kngId=x"
+        )
         # 全 miss → None
         assert result is None
         plugin_status.mark_unavailable.assert_not_called()

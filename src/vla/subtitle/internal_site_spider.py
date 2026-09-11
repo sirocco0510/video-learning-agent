@@ -174,6 +174,7 @@ class InternalSiteSpider:
         root_label: str | None = None,
         catalog_id: str | None = None,
         limit: int = 10,
+        offset: int = 0,
     ) -> list[VideoTask]:
         """爬 tree + pagelist → VideoTask list(最多 limit 条)。
 
@@ -182,14 +183,25 @@ class InternalSiteSpider:
                 与 catalog_id 互斥。
             catalog_id: 直接指定 catalogId(从 bill-jc 页面 URL 拿),
                 跳过 tree API 直接 pagelist。当 catalog 树太大或已知目标时用。
-            limit: 最多返回多少条 VideoTask。
+            limit: 最多返回多少条 VideoTask。**同时是 pagelist 的页大小** ——
+                翻页调用方必须用它作 offset 步长,否则每页会漏
+                (page_size - limit) 条(见下)。
+            offset: pagelist 起始偏移(默认 0)。仅 catalog_id 直通模式可用 ——
+                tree 模式下有多个叶子,"offset 从哪儿算"没有明确语义,
+                静默套到每个叶子上只会产出错乱结果(2026-09-10 FR-11)。
 
         Raises:
-            ValueError: root_label 与 catalog_id 同时设置,或 root_label 不存在。
+            ValueError: root_label 与 catalog_id 同时设置;root_label 不存在;
+                offset > 0 但没给 catalog_id。
             RuntimeError: cookie 借取失败 / tree 或 pagelist HTTP 非 200。
         """
         if root_label is not None and catalog_id is not None:
             raise ValueError("root_label 与 catalog_id 互斥,只能设一个")
+        if offset > 0 and catalog_id is None:
+            raise ValueError(
+                f"offset={offset} 只在 catalog_id 直通模式下有意义;"
+                "tree/root_label 模式请用 limit 或改用 catalog_id"
+            )
 
         cookies, token = await self._borrow_auth()
         headers = self._auth_headers(cookies, token)
@@ -223,7 +235,9 @@ class InternalSiteSpider:
                     break
                 page_resp = await client.post(
                     _PAGELIST_URL,
-                    params={"limit": 16, "offset": 0, "orderType": "desc", "orderBy": "createTime"},
+                    # 页大小 == limit:下面按 limit 截断 tasks,若页大小写死 16,
+                    # limit=10 时每页会静默丢弃 6 条。
+                    params={"limit": limit, "offset": offset, "orderType": "desc", "orderBy": "createTime"},
                     json={
                         "collegeId": self.college_id,
                         "catalogId": leaf["id"],

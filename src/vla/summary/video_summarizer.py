@@ -2,17 +2,28 @@
 
 职责:
 - 接 cleaned_text(Refiner 输出后) → 调云端 LLM 生成 200-300 字摘要
-- 触发条件:len(cleaned_text) > config.quality_check.refine_max_chars(默认 6000)
-  短视频(< 6000)直接返回空 SummaryResult,不浪费 token
+- 触发条件(2026-09-10 修正):**无条件** —— 摘要是关键路径,不设长度门控。
+  是否走摘要只看"视频是否通过质量门控",不看字符多少
 - 超长输入(> ~12000 字)送 LLM 前**三明治抽样**(头/中/尾各 4000 字),
   避免纯截断丢后半段,同时覆盖视频开场 / 主体 / 收尾关键位置
 - 输出 SummaryResult;失败 fallback(不抛错,主流程不中断)
-- 落盘 helper:`<id>.summary.txt`(与 cleaned.txt 平级)
+- 落盘 helper:`summaries/<id>_<safe_title>.summary.txt`(与 transcripts/ 分目录)
+
+LLM 注入契约(2026-09-10):
+- `VideoSummarizer(cfg)` 构造期**零依赖**(不需要 api_key),同 QualityChecker /
+  SubtitleRefiner —— 装配方(如 build_text_provider)可以无凭据地建对象
+- LLM 走延迟路径:`set_llm()` 显式注入优先,没注入则首次 summarize_one 时
+  按 `cfg.llm_client` **惰性构造**(见 `_resolve_llm`)
+- 为什么兜底:调用方漏注入时,旧实现抛 RuntimeError → 被 process_asset 的
+  宽 except 吞掉 → 摘要静默不产出。自给自足才能保证 FR-2.15d 真的落地。
 
 为什么不在 Refiner 里做:
 - Refiner 是"清理"(preserve original length),与"压缩"语义不同
 - Refiner 输入是 transcript,摘要输入是 cleaned_text(更干净,压缩效果更好)
-- 长视频同时保留 cleaned.txt(全文本)+ .summary.txt(摘要),职责清晰
+- 本类吃的是**内存里的文本**(`process_asset` Step 4 精修后的 text),**不读盘**;
+  所以质量通过后 `main_provider` 丢弃 `.transcript.txt` / `.refined.txt` 不影响
+  摘要 —— 别让"保留 refined.txt"再被当成摘要的前置依赖(2026-09-10 更正:
+  那句是旧意图陈述,与"质量通过即丢弃中间产物"的新策略相抵)
 
 配额归类:
 - 项目 SSOT:"云端 LLM 限定两件事: ① 字幕质量检查 ② 6h 批量总结"
@@ -31,7 +42,7 @@ from datetime import datetime
 from pathlib import Path
 
 from vla.config import VLAConfig
-from vla.llm.client import LLMClientLike
+from vla.llm.client import LLMClient, LLMClientLike
 from vla.models import SummaryResult
 
 
@@ -72,7 +83,8 @@ _USER_PROMPT_TEMPLATE = """【视频标题】
 
 # 送 LLM 前的最大 prompt chars(粗估)。
 # 12000 字是 ~3000-4000 tokens,加上 system + user prompt 模板约 ~5000 tokens,
-# 留出余量给 200-300 字输出。低于 refine_max_chars=6000 时不触发,不涉及。
+# 留出余量给 200-300 字输出。**每条视频都走摘要** —— 短于 12000 字直接整段送,
+# 超过才抽样(见下)。
 #
 # 三明治抽样常量(SSOT: 2026-09-10):头/中/尾各 4000 字,总预算 12000。
 # 视频字幕信息密度不均:开头导入 / 中间口水话 + 代码演示 / 结尾结论。
@@ -141,9 +153,26 @@ class VideoSummarizer:
         """延迟注入 LLM 客户端(同 QualityChecker / SubtitleRefiner 模式)。"""
         self._llm = llm
 
+    def _resolve_llm(self) -> LLMClientLike:
+        """取 LLM 客户端;没注入就按 config **惰性构造**一个。
+
+        为什么不在 __init__ 里构造(2026-09-10):
+        构造期就要凭据 → `build_text_provider(cfg)` 在没加载 .env 的环境(CI /
+        单测)直接炸 `OpenAIError: Missing credentials`,而装配路径本身与
+        凭据无关(同 QualityChecker / SubtitleRefiner:`Xxx(cfg)` 构造期零依赖)。
+
+        为什么要兜底而不是"没注入就报错"(2026-09-10 修复):
+        调用方 `build_text_provider` 忘注入 → 旧实现抛 RuntimeError →
+        被 `process_asset` 的 `except Exception` 吞成一条 warning →
+        **FR-2.15d 静默不产出摘要**。自给自足才能让"忘注入"不再等于"没摘要"。
+        """
+        if self._llm is None:
+            self._llm = LLMClient(self.config.llm_client, model=self.model)
+        return self._llm
+
     @property
     def enabled(self) -> bool:
-        """是否启用 — 当前永远启用(短文本自动 skip,不需要开关)。"""
+        """是否启用 — 永远启用(FR-2.15d 关键路径,无长度门控,不需要开关)。"""
         return True
 
     @property
@@ -164,30 +193,25 @@ class VideoSummarizer:
         """生成单视频 200-300 字摘要。
 
         流程:
-        1. 长度检查:≤ refine_max_chars → 返回空 SummaryResult(短视频不调 LLM)
+        1. 无条件生成 —— FR-2.15d(2026-09-10):摘要是**关键路径**,不设长度门控,
+           短视频同样必须产出摘要。是否调用本方法由调用方按"质量门控通过"决定。
         2. 超长输入走三明治抽样(头 4000 + 中 4000 + 尾 4000),覆盖关键位置
         3. 调 LLM(system + user prompt)
         4. 解析 JSON → SummaryResult
         5. 任何环节失败 → 返回空 SummaryResult + notes 记录
 
+        历史:2026-09-10 之前这里有一道 `len(text) <= refine_max_chars → 返回空`
+        的门控,已删除。原因:① 摘要产出与否不该取决于字符长度;② 该长度会被
+        Refiner 压缩影响,导致摘要**静默不产出**。
+
         Raises:
-            RuntimeError: 未注入 LLM 客户端(且文本长度 > refine_max_chars 时)
+            Exception: LLM 客户端惰性构造失败(如环境变量缺 api_key)——
+                这是配置错误,故意不吞,让它带明确原因往上抛而非伪装成"摘要为空"。
+                单次 LLM 调用失败仍走 fallback(返回空 SummaryResult + notes)。
         """
-        max_chars = self.config.quality_check.refine_max_chars
-
-        # 短视频 → 不调 LLM(节省 token)
-        if len(text) <= max_chars:
-            logger.debug(
-                "📏 transcript %d 字符 ≤ refine_max_chars %d,跳过摘要",
-                len(text), max_chars,
-            )
-            return SummaryResult(summary_text="", notes="", model=self.model)
-
-        if self._llm is None:
-            raise RuntimeError(
-                "VideoSummarizer 没有 LLM 客户端(长文本需要 LLM 生成摘要),"
-                "请先 set_llm() 或构造时注入"
-            )
+        # 惰性构造(未注入时按 config 自建)——
+        # 放在 try 之外:构造失败是配置错误,不该被下面的"调用失败"fallback 吞掉。
+        llm = self._resolve_llm()
 
         # 超长输入走三明治抽样(头/中/尾),避免纯截断丢后半段(SSOT: 2026-09-10)
         input_text = sandwich_sample(text)
@@ -210,7 +234,7 @@ class VideoSummarizer:
         # reasoning model(M2.7 / R1)会在 think 块里数中文字符 / 规划段落,
         # 实际消耗 ~3000+ tokens,然后才输出 JSON。需要更大窗口。
         try:
-            response = self._llm.complete(full_prompt, max_tokens=4000, temperature=0.3)
+            response = llm.complete(full_prompt, max_tokens=4000, temperature=0.3)
         except Exception as e:
             logger.warning("⚠️ LLM 摘要调用失败,返回空 SummaryResult:%s", e)
             return SummaryResult(

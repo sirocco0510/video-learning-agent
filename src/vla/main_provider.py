@@ -30,7 +30,12 @@ from vla.config import VLAConfig
 from vla.log.transcription_log import TranscriptionLog
 from vla.models import Asset, ProcessResult, VideoTask
 from vla.subtitle import audio_scan
-from vla.transcribe.extract import extract_audio, extract_browser_audio, extract_m3u8_audio
+from vla.transcribe.extract import (
+    _BROWSER_CAPTURE_MAX_DURATION_SEC,
+    extract_audio,
+    extract_browser_audio,
+    extract_m3u8_audio,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -60,7 +65,7 @@ class RealTextProvider:
         checker: Any | None = None,
         refiner: Any | None = None,
         today_dir: Path | None = None,
-        summarizer: Any | None = None,
+        video_summarizer: Any | None = None,
     ) -> None:
         """
         Args:
@@ -78,8 +83,11 @@ class RealTextProvider:
                        §4.2 ④ 用;build_text_provider 自动从 cfg.audio.downloads_dir
                        计算,测试 fixture 也可手动注入,None 时 fetch_asset 路径 ④
                        仍走 audio_scan 但目录需由调用方保证存在)
-            summarizer: VideoSummarizer(可选,2026-09-10 新增 — 长视频 Refiner
-                       长度超限时生成 200-300 字单视频摘要)
+            video_summarizer: VideoSummarizer(可选 — 单视频 200-300 字摘要,FR-2.15d)。
+                       **注意不是** `VideoLearningAgent.summarizer`(那个是
+                       LLMSummarizer,6h 批量总结 FR-5/FR-9)。两者同名不同物,
+                       2026-09-10 前都叫 `summarizer`,已在 cli._build_learn_provider
+                       误传过一次 → 摘要静默不产出。现在形参名区分开,误传当场 TypeError。
         """
         self.cfg = cfg
         self.strategy = strategy
@@ -91,7 +99,7 @@ class RealTextProvider:
         self.log = log or TranscriptionLog(cfg.logging.log_dir)
         self.checker = checker
         self.refiner = refiner
-        self.summarizer = summarizer
+        self.video_summarizer = video_summarizer
         self._today_dir = today_dir
 
     async def fetch_asset(self, task: VideoTask) -> Asset | None:
@@ -124,21 +132,43 @@ class RealTextProvider:
                 return None
             wav_path = self._save_dir / "audio_raw" / f"{task.id}.wav"
             wav_path.parent.mkdir(parents=True, exist_ok=True)
-            # Phase 9.6.4+ (2026-09-10):bill-jc 长视频默认走浏览器 4x MediaRecorder
-            # 抽音(已验证,3h 视频 → 45min),复用 Chrome 已加载的视频不重复下 m3u8
-            # 切片; ffmpeg 慢路径(2h 视频 ~2h 抽音,受服务端限速)作为兜底。
+            # FR-2.30.1:audio 块在 VLAConfig 里是 Optional,缺省时退回常量默认值
+            # (1800),否则这里会 AttributeError。显式配成 null 才表示"不截断"。
+            audio_cfg = self.cfg.audio
+            max_sec = (
+                audio_cfg.max_extract_sec if audio_cfg is not None
+                else _BROWSER_CAPTURE_MAX_DURATION_SEC
+            )
+            # FR-2.30 (2026-09-10 反转):m3u8 直抽优先,浏览器 4x MediaRecorder 降兜底。
+            #
+            # 为什么反转 —— 同视频(177.59s)四组对照实测:
+            #   m3u8 直抽 + Refiner   → score 92 (通过)
+            #   m3u8 直抽             → score 62~65
+            #   浏览器 4x + atempo    → score 35 (未通过)
+            # 逐词对比显示 4x 抓取毁可懂度:国家统计局 → 规判统计、
+            # PhantomJS → 翻腾架子、Beautiful Soup/LXML → UFOSOS/MILO。
+            # 成因是 preservesPitch + atempo 双重时间拉伸叠加 opus 重编码
+            # (音高 F0 实测比值 0.97,不是音高问题)。整条 pipeline 也更快:
+            # 30s vs 87s(含抽取步骤)。
+            #
+            # 注意:这个 fallback 是**异常驱动**的,抓不到"音质差但没报错"的
+            # 回退场景 —— 所以主次必须由质量实测决定,不能指望运行时自动选。
             try:
-                await extract_browser_audio(video_url, wav_path)
+                # ffmpeg 是 sync 阻塞调用;包 to_thread 不阻塞 event loop。
+                await asyncio.to_thread(
+                    extract_m3u8_audio, video_url, wav_path, max_sec,
+                )
             except Exception as e1:
                 logger.warning(
-                    "extract_browser_audio failed (%s), fallback ffmpeg m3u8", e1,
+                    "extract_m3u8_audio failed (%s), fallback browser 4x capture", e1,
                 )
                 try:
-                    # ffmpeg 是 sync 阻塞调用;包 to_thread 不阻塞 event loop。
-                    await asyncio.to_thread(extract_m3u8_audio, video_url, wav_path)
+                    await extract_browser_audio(
+                        video_url, wav_path, max_duration_sec=max_sec or _BROWSER_CAPTURE_MAX_DURATION_SEC,
+                    )
                 except Exception as e2:
                     logger.warning(
-                        "extract_m3u8_audio fallback also failed: %s", e2,
+                        "extract_browser_audio fallback also failed: %s", e2,
                     )
                     return None
             return Asset(text=None, source="whisper_internal_download", audio_path=wav_path, deletable=True)
@@ -186,11 +216,13 @@ class RealTextProvider:
 
         步骤:
           ① 转写(if needs_transcribe) → 失败 log + return None
-          ② 质量门控 → 失败 log + 不 unlink(FR-3.7 v3.2 retry 保留) + browser 源 mark_unavailable
+          ② 质量门控 → 失败 log + browser 源 mark_unavailable(wav 已在 ① 删掉)
           ③ Refine(可选,cfg.quality_check.refine_enabled) → 失败 log warning + 用原文
           ④ save_transcribed(落盘 transcribed/)
-          ⑤ cleanup:unlink wav if deletable(best-effort)
-          ⑥ return ProcessResult
+          ⑤ return ProcessResult
+
+        音频生命周期(2026-09-10 FR-3.7 修正):
+          ① 转写成功 → 立即 unlink wav(不等质量门控);转写失败 → 保留供排查
         """
         # Step 1: 转写
         if asset.needs_transcribe:
@@ -208,6 +240,20 @@ class RealTextProvider:
                     asset.audio_path.with_suffix(".transcribed.txt").touch()
                 except Exception as e:
                     logger.warning("touch sidecar 失败 %s: %s", asset.audio_path, e)
+
+            # 2026-09-10 FR-3.7 修正:音频**转写成功即删**,不再等质量门控。
+            # 旧策略是"质量失败 → 保留 .wav 供重转写",已作废 —— 重跑 refine /
+            # summary 只需**文本**(transcript.txt 已落盘,Refiner 吃的是文本),
+            # 只有重**转写**才需要 wav,而 bill-jc 走 m3u8 直抽(FR-2.30)+
+            # 30 分钟上限(FR-2.30.1),重抽成本有界。
+            # 位置在 Step 2 质量门控**之前**,所以门控判 fail 时 wav 已不在。
+            # 转写失败(上面的 except 分支)仍保留 wav 供排查 —— 那是 FR-3.5。
+            if asset.deletable and asset.audio_path is not None and asset.audio_path.exists():
+                try:
+                    asset.audio_path.unlink()
+                    logger.info("🗑️ 转写成功 → 删音频: %s", asset.audio_path)
+                except Exception as e:
+                    logger.warning("删音频失败 %s,主流程继续: %s", asset.audio_path, e)
         else:
             text = asset.text
 
@@ -234,13 +280,13 @@ class RealTextProvider:
             except Exception as e:
                 logger.warning("Refine 失败,使用原文继续: %s", e)
 
-        # Step 4.5: 长视频摘要(2026-09-10 / FR-2.15d)
-        # 触发条件:cleaned_text > refine_max_chars(默认 6000)— 此时 Refiner
-        # 跳过云端清理,需要单视频 200-300 字摘要作为补充。
-        # 短视频不调 LLM,直接跳过(节省 token)。
+        # Step 4.5: 单视频摘要(FR-2.15d,2026-09-10 改为**无条件**)
+        # 摘要是关键路径 —— 只要视频通过质量门控就产出,不看字符长度。
+        # 旧行为是 len(cleaned_text) > refine_max_chars 才触发,已删除:
+        # 那个长度会被 Refiner 压缩影响,导致摘要静默不产出。
         # 注意:在 save_transcribed 之前调,因为 summary 文件路径依赖 task.id。
         # 用 getattr 兼容 test_process_asset.py 用 __new__ 跳过 __init__ 的 case。
-        summarizer = getattr(self, "summarizer", None)
+        summarizer = getattr(self, "video_summarizer", None)
         if summarizer is not None:
             try:
                 summary = summarizer.summarize_one(text, title=task.title)
@@ -255,7 +301,7 @@ class RealTextProvider:
                     written = summarizer.write_summary(summary_path, summary)
                     if written is not None:
                         logger.info(
-                            "📝 长视频摘要已落盘:%s (%d 字)",
+                            "📝 单视频摘要已落盘:%s (%d 字)",
                             written, len(summary.summary_text),
                         )
             except Exception as e:
@@ -269,12 +315,27 @@ class RealTextProvider:
             duration_sec=task.expected_duration,
         )
 
-        # Step 6: 清理 wav(best-effort)
-        if asset.deletable and asset.audio_path is not None and asset.audio_path.exists():
+        # Step 6: 质量已通过 + 正式产物已落盘 → 丢弃转写中间产物(2026-09-10)
+        # `.transcript.txt` / `.refined.txt` 只对**未通过**的视频有诊断价值
+        # (见 TranscriptionLog.discard_transcribe_intermediates)。失败分支
+        # 已在 Step 3 提前 return,走不到这里。
+        # 时序刻意放在 save_transcribed **之后**:万一下面那步之前的写盘失败,
+        # 中间产物就是唯一幸存的副本,不能先删。
+        # audio_path is None(api/browser 路径,根本没转写)⇒ 无中间产物,跳过。
+        if asset.audio_path is not None:
             try:
-                asset.audio_path.unlink()
+                removed = self.log.discard_transcribe_intermediates(asset.audio_path.stem)
+                if removed:
+                    logger.info(
+                        "🗑️ 质量通过 → 丢弃 %d 个转写中间产物: %s",
+                        len(removed), ", ".join(p.name for p in removed),
+                    )
             except Exception as e:
-                logger.warning("删音频失败 %s,主流程继续: %s", asset.audio_path, e)
+                # 清理失败(含 transcriber 与 log 的 stem 推导不一致等)不该影响主流程
+                logger.warning("丢弃转写中间产物失败,主流程继续: %s", e)
+
+        # (Step 6 已删除,2026-09-10 FR-3.7:音频改在 Step 1 转写成功后立即删,
+        #  不再等质量门控 —— 见上面的删除块)
 
         return ProcessResult(
             text=text, qr=qr,
@@ -304,7 +365,12 @@ def build_text_provider(
     refiner: Any | None = None,
     strategy: Any | None = None,
     internal_spider: Any | None = None,  # Phase 9.6:bill-jc 用,注入 InternalSiteSpider
-    summarizer: Any | None = None,  # 2026-09-10 / FR-2.15d:长视频 200-300 字单视频摘要
+    # 2026-09-10 / FR-2.15d:单视频 200-300 字摘要。形参**故意**不叫 `summarizer` ——
+    # `VideoLearningAgent(summarizer=LLMSummarizer)` 那个是 6h 批量总结(FR-5/FR-9),
+    # 同名不同物。cli._build_learn_provider 曾把后者注进这里,注入又优先于兜底,
+    # 于是 summarize_one AttributeError 被 process_asset 宽 except 吞成一行 warning,
+    # 整批一条摘要都没产出。改名后误传会当场 `TypeError: unexpected keyword argument`。
+    video_summarizer: Any | None = None,
 ) -> tuple[FetchAssetFn, ProcessAssetFn]:
     """工厂函数:装配一个完整的 RealTextProvider,返回 (fetch_asset, process_asset) 两个 callable。
 
@@ -345,6 +411,9 @@ def build_text_provider(
                   路径 ② 接管抽音。None 时维持旧 class-registered 行为
                   (spider 未注入,InternalSiteAdapter 的 fetch_via_spider 直接
                   返回 None,不影响老测试)。
+        video_summarizer: VideoSummarizer(可选 — 单视频 200-300 字摘要,FR-2.15d;
+                  与 `VideoLearningAgent.summarizer=LLMSummarizer` **不是同一个东西**)。
+                  None 时自动构造 `VideoSummarizer(cfg)`(构造期零凭据,LLM 惰性构造)。
 
     Returns:
         (fetch_asset, process_asset):两个独立 callable,分别对应"取资产"和"处理资产"。
@@ -380,12 +449,20 @@ def build_text_provider(
         from vla.quality.refiner import SubtitleRefiner
         refiner = SubtitleRefiner(cfg)
 
-    # 2026-09-10 / FR-2.15d:长视频 200-300 字单视频摘要。
-    # 当前永远启用 — 短视频在 VideoSummarizer 内部自动 skip(节省 token),
-    # 长视频自动触发。调用方不传 summarizer 时内部 auto-construct。
-    if summarizer is None:
+    # 2026-09-10 / FR-2.15d:单视频 200-300 字摘要(关键路径 — 每条通过质量门控
+    # 的视频都要产出,不设长度门控)。
+    #
+    # 这里只建对象、不建 LLM:构造期零凭据(同上面的 checker / refiner),
+    # LLM 由 VideoSummarizer 在首次 summarize_one 时按 cfg 惰性构造。
+    # 历史(2026-09-10 一天内两次修正):
+    #   ① 原先 `VideoSummarizer(cfg)` 无 LLM + 内部抛 RuntimeError
+    #      → 被 process_asset 的宽 except 吞成 warning → **FR-2.15d 静默不产出**;
+    #   ② 改成在这里 eager 建 `LLMClient(...)` → 构造期就要凭据,
+    #      `build_text_provider` 的单测(无 .env)全炸 Missing credentials;
+    #   ③ 定稿:构造零依赖 + 类内惰性构造。装配路径不再决定摘要产不产出。
+    if video_summarizer is None:
         from vla.summary.video_summarizer import VideoSummarizer
-        summarizer = VideoSummarizer(cfg)
+        video_summarizer = VideoSummarizer(cfg)
 
     source_factory = VideoSourceFactory(tmp_dir=save_dir, log=log, config=cfg)
     if transcriber is None:
@@ -428,7 +505,7 @@ def build_text_provider(
         checker=checker,
         refiner=refiner,
         today_dir=today_dir,
-        summarizer=summarizer,
+        video_summarizer=video_summarizer,
     )
 
     return provider.fetch_asset, provider.process_asset

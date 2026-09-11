@@ -55,7 +55,8 @@ class Asset:
     - text: 字幕已就绪(API / Browser 命中)
     - audio_path: 永远是 wav(由 fetch_asset 抽好)
     - source: "api" | "browser" | "whisper_scan" | "whisper_download" | "whisper_internal_download"
-    - deletable: 质量 pass 后是否 unlink 该 wav
+    - deletable: 转写成功后是否 unlink 该 wav(2026-09-10 FR-3.7:
+      不再等质量门控)
     """
     text: str | None
     source: str
@@ -119,10 +120,10 @@ class RefinementResult(BaseModel):
     """LLM 语义清理结果(2026-09-02 Level 4,FR-2.15c)。
 
     流程位置:
-      StreamingTranscriber.transcribe() (本地 postprocess)
+      StreamingTranscriber.transcribe() (本地 postprocess,结果只留内存)
       → SubtitleRefiner.refine() (云端 LLM)
       → QualityChecker.check() (云端 LLM 评分)
-      → 保存 *.cleaned.txt
+      → save_transcribed 落盘 <id>_<title>.txt
 
     与 QualityResult 的区别:
     - QualityResult 是"评分"(pass / fail)
@@ -141,8 +142,10 @@ class RefinementResult(BaseModel):
 class SummaryResult(BaseModel):
     """单视频摘要结果(FR-2.15d,2026-09-10)。
 
-    触发条件:cleaned_text 长度 > config.quality_check.refine_max_chars。
-    低于阈值 → summary_text="",调用方根据此字段判断要不要落盘。
+    触发条件(2026-09-10 修正):**无条件** —— 摘要是关键路径,不设长度门控。
+    旧行为是 len(text) > refine_max_chars 才触发,已删除(那个长度会被
+    Refiner 压缩影响,导致摘要静默不产出)。
+    仅 LLM 调用/解析失败时 summary_text="",调用方据此判断要不要落盘。
 
     与 RefinementResult 的区别:
     - RefinementResult 是"清理 preserve original length"

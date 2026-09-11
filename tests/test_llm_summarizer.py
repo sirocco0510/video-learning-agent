@@ -118,6 +118,27 @@ class TestLoadItems:
         items = summarizer._load_items(tmp_path)
         assert items == []
 
+    def test_skips_raw_and_refined_intermediates(self, tmp_path: Path):
+        """`.transcript.txt` / `.refined.txt` 是中间产物,**不得**计入总结。
+
+        2026-09-10:这两类文件与正式产物 `<id>_<title>.txt` 同落
+        `logs/transcribed/<date>/transcripts/`(统一落盘),而本方法对该目录是
+        无条件 `glob("*.txt")` —— 不过滤会让**每条视频被当成 3 条重复内容**
+        进入 6h 总结,标题/正文重复堆叠。
+        """
+        transcripts = tmp_path / "transcripts"
+        transcripts.mkdir()
+        canonical = write_transcribed(transcripts, "正式产物", "正文内容。")
+        (transcripts / "abc.transcript.txt").write_text("原始 whisper 输出", encoding="utf-8")
+        (transcripts / "abc.refined.txt").write_text("Level 4 产物", encoding="utf-8")
+
+        summarizer = LLMSummarizer(FakeLLM(), transcripts)
+        items = summarizer._load_items(transcripts)
+
+        assert len(items) == 1, "正式产物只该被读 1 次,中间产物必须排除"
+        assert items[0].title == "正式产物"
+        assert items[0].path == canonical
+
     def test_handles_malformed_files_gracefully(self, tmp_path: Path):
         """格式异常的文件不抛,用 stem 作 title + 默认元数据兜底。"""
         (tmp_path / "bad.txt").write_text("这是无效内容,没有 header", encoding="utf-8")

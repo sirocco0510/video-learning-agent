@@ -18,12 +18,15 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import typer
 import yaml
 
 from vla.utils.bvid import extract_bvid
+
+if TYPE_CHECKING:  # 仅注解用:VLAConfig 真正的 import 在各命令函数内部(延迟加载)
+    from vla.config import VLAConfig
 
 app = typer.Typer(no_args_is_help=True, help="视频挂机学习 Agent")
 
@@ -446,6 +449,158 @@ def batch(
         raise typer.Exit(code=2)
 
     typer.echo(f"\n📊 批量处理结果:{stats}")
+
+
+# ---------------- learn ----------------
+
+
+def _build_learn_provider(
+    cfg: VLAConfig, *, spider: Any, comps: dict,
+) -> tuple[Callable, Callable]:
+    """装配 learn 用的真实 fetch_asset / process_asset(bill-jc 课程路径)。
+
+    与 `_build_real_provider` 的区别 —— **Refiner 必须早于 QualityChecker**:
+      build_text_provider 的 auto-construct 会建 `StreamingTranscriber(cfg)`
+      **不带 refiner**,于是 Level 4 云端清理被静默跳过(streaming.py
+      `_maybe_refine` 在 self.refiner is None 时直接 return),未清理的文本
+      进质量门控打分 → 2026-09-10 实测 score 45(不过)vs 注入后 88(过)。
+      process_asset 的 Step 4 也 refine,但那在质量门控**之后**,救不回 fail。
+
+    所以这里像 spike 一样自建 refiner(with LLM)+ transcriber,再传进去。
+    """
+    from vla.llm.client import LLMClient
+    from vla.main_provider import build_text_provider
+    from vla.quality.refiner import SubtitleRefiner
+    from vla.transcribe.streaming import StreamingTranscriber
+
+    refiner = None
+    if cfg.quality_check.refine_enabled:
+        refiner = SubtitleRefiner(
+            cfg, LLMClient(cfg.llm_client, model=cfg.quality_check.refine_model)
+        )
+    transcriber = StreamingTranscriber(cfg, refiner=refiner)
+
+    return build_text_provider(
+        cfg,
+        transcriber=transcriber,
+        notifier=comps["notifier"],
+        plugin_status=comps["plugin_status"],
+        refiner=refiner,
+        internal_spider=spider,
+        # 2026-09-10 修复:这里原来传 `summarizer=comps["summarizer"]`,即把
+        # **LLMSummarizer**(6h 批量总结,FR-5/FR-9)注进了单视频摘要槽位
+        # (FR-2.15d 要的是 VideoSummarizer)。注入优先于兜底,于是
+        # `summarize_one` AttributeError 被 process_asset 的宽 except 吞成一行
+        # warning → 真机整批 5 条视频一条摘要都没产出。
+        # 不传 ⇒ 走 build_text_provider 的兜底 `VideoSummarizer(cfg)`。
+        # 形参也已改名 `video_summarizer`,误传会当场 TypeError 而非静默失败。
+    )
+
+
+@app.command()
+def learn(
+    college_id: str = typer.Option(
+        ..., "--college-id",
+        help="collegeId —— 课程目录页 URL 的 cid 参数",
+    ),
+    catalog_id: str = typer.Option(
+        ..., "--catalog-id",
+        help="catalogId —— 课程目录页 URL 的 catalogId 参数",
+    ),
+    limit: int = typer.Option(
+        10, "--limit", help="每页取多少条(同时是翻页步长)",
+    ),
+    cdp_url: str = typer.Option(
+        "http://localhost:9222", "--cdp-url",
+        help="Chrome CDP debug URL(cookie/JWT 从已登录的 Chrome 借)",
+    ),
+    resolution: str = typer.Option(
+        "720p", "--resolution", help="视频分辨率档(360p / 480p / 720p / 1080p)",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="只翻页列出任务,不转写(不装配转写组件)",
+    ),
+    config_path: Path = typer.Option(CONFIG_FILE, "--config", help="配置文件路径"),
+) -> None:
+    """bill-jc 课程目录批量转写(FR-11,2026-09-10)。
+
+    从课程目录页翻页取任务,逐页跑既有单条转写链路,直到累计配额(默认 6h)
+    用尽或目录翻完。已转写的视频按 logs/transcribed_history.jsonl 自动跳过。
+
+    目录页 URL 里两个参数都要复制过来:
+      https://b-learning.bill-jc.com/kng/#/list?catalogId=<catalogId>&cid=<collegeId>&...
+                                          ^^^^^^^^^^^          ^^^^^^^^^^^
+                                          --catalog-id         --college-id
+
+    前置:Chrome 已用 --remote-debugging-port=9222 启动并登录了 bill-jc。
+    """
+    import asyncio
+
+    from vla.learn import iter_course_tasks, run_course_batch, with_duration_resolution
+    from vla.main import VideoLearningAgent
+    from vla.subtitle.internal_site_spider import InternalSiteSpider
+
+    comps = _assemble_components(config_path)
+    spider = InternalSiteSpider(
+        cdp_url=cdp_url, college_id=college_id, resolution=resolution
+    )
+
+    if dry_run:
+        # 只翻页列任务:不装配 transcriber / refiner / LLM,零凭据零副作用
+        from vla.state.history import HistoryManager
+
+        async def _list() -> tuple[int, int]:
+            total = 0
+            done = 0
+            async for page in iter_course_tasks(spider, catalog_id, limit):
+                for t in page:
+                    total += 1
+                    # 与 agent.run 的去重键**完全一致**(FR-9.6 / FR-10.2):
+                    # main.py:_url_key 也是调这个 public static method
+                    key = HistoryManager.make_url_key(t.group_id, t.id)
+                    if comps["history"].is_already_done(key):
+                        done += 1
+                        typer.echo(f"  [{total:>4}] ⏭️  {t.id}  {t.title}(已转写)")
+                    else:
+                        typer.echo(f"  [{total:>4}] {t.id}  {t.title}")
+            return total, done
+
+        total, done = asyncio.run(_list())
+        typer.echo(
+            f"\n📋 dry-run:目录共 {total} 条 / 已转写 {done} 条 → "
+            f"本次将处理 {total - done} 条"
+        )
+        return
+
+    fetch_asset, process_asset = _build_learn_provider(
+        comps["cfg"], spider=spider, comps=comps,
+    )
+
+    agent = VideoLearningAgent(
+        cfg=comps["cfg"],
+        log=comps["log"],
+        history=comps["history"],
+        quota=comps["quota"],
+        summarizer=comps["summarizer"],
+        notifier=comps["notifier"],
+        fetch_asset=with_duration_resolution(fetch_asset),
+        process_asset=process_asset,
+        plugin_status=comps["plugin_status"],
+        # 不传 browser_driver / screenshot_controller:批量路径不需要截图,
+        # 且 main.py:_stop_chrome_session 会无条件对已注入的 driver 调
+        # disconnect()(ctx.close + browser.close)→ 每页一次,可能关掉
+        # 下一页还要借 cookie 的那个 Chrome 会话。
+    )
+
+    stats = asyncio.run(
+        run_course_batch(spider=spider, agent=agent, catalog_id=catalog_id, limit=limit)
+    )
+
+    typer.echo(
+        f"\n📊 课程批量结果:翻页 {stats['pages']} 页 / "
+        f"处理 {stats['processed']} / 通过 {stats['passed']} / 失败 {stats['failed']} / "
+        f"跳过(已转写){stats['skipped']} / 触发总结 {stats['summarized']}"
+    )
 
 
 # ---------------- summarize ----------------

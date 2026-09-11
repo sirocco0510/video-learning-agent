@@ -192,40 +192,42 @@ class TestHeuristicSpeed:
 # ---------------- 启发式:长度下界(v3.2 新增) ----------------
 
 
-class TestHeuristicLength:
-    """2026-09-07 v3.2 新增:char_count < min_chars → fail score=5,不调 LLM。"""
+class TestHeuristicShortText:
+    """短文本的**实际**失败路径(2026-09-10 订正)。
 
-    def test_short_text_fails_without_llm(self, cfg, checker: QualityChecker):
-        """文本 < min_chars(默认 50)→ fail score=5,不调 LLM。"""
+    本类原名 `TestHeuristicLength`,断言的是 v3.2 引入的"总字数下界
+    `char_count < min_chars` → fail score=5"启发式。该启发式**在更早的提交里
+    已从 `checker.py` 移除**(`git show 33d6f7e:src/vla/quality/checker.py`
+    可证),留下的是**过期断言** —— 它正是全量套件里 2 条既存失败的来源之一。
+
+    短文本现在走的是**语速过低**(`cps < min_char_per_second`)这条启发式。
+    """
+
+    def test_short_text_fails_via_low_cps_without_llm(self, cfg, checker: QualityChecker):
+        """30 字 / 600s = 0.05 cps < 1.0 → 语速过低 fail score=20,不调 LLM。"""
         llm = FakeLLM(response="should not be called")
         checker.set_llm(llm)
 
-        # 30 字 < min_chars=50
-        text = "短" * 30
-        result = checker.check(text, "t", duration_sec=600, model_size="small")
+        result = checker.check("短" * 30, "t", duration_sec=600, model_size="small")
 
         assert isinstance(result, QualityResult)
         assert result.passed is False
-        assert result.score == 5
-        assert any("文本过短" in i or "过短" in i for i in result.issues)
+        assert result.score == 20
+        assert any("语速过低" in i for i in result.issues)
         assert len(llm.calls) == 0
 
-    def test_text_at_min_chars_proceeds_to_llm(self, cfg, checker: QualityChecker):
-        """文本 = min_chars(50)→ 启发式通过,继续走 LLM。"""
+    def test_normal_cps_proceeds_to_llm(self, cfg, checker: QualityChecker):
+        """50 字 / 10s = 5 cps 在 [1.0, 20.0] 内 → 启发式全过,继续走 LLM。"""
         llm = FakeLLM(response=make_pass_response())
         checker.set_llm(llm)
 
-        # 50 字 + 600s = 0.083 cps → 会触发语速过低启发式,所以这里用 100s 让 cps=0.5
-        # 但语速 0.5 < 1.0 也会 fail ... 我们要测的是长度启发式先放过
-        # 用 10s 视频 + 50 字 = cps 5 在范围内
         text = "中" * 50
         result = checker.check(text, "t", duration_sec=10, model_size="small")
 
-        # 应该调 LLM(因为长度恰好不触发)
         assert len(llm.calls) == 1
 
     def test_long_text_proceeds_to_llm(self, cfg, checker: QualityChecker):
-        """正常长度文本 → 调 LLM,不被长度启发式拦截。"""
+        """正常长度文本 → 调 LLM,不被语速启发式拦截。"""
         llm = FakeLLM(response=make_pass_response())
         checker.set_llm(llm)
 
@@ -296,15 +298,68 @@ class TestLLMCall:
         assert text in prompt
 
     def test_prompt_contains_length_dimension(self, cfg, checker: QualityChecker):
-        """v3.2:PROMPT 应包含 '文本长度合理性' 检查维度。"""
+        """[已更换] 原断言 '文本长度合理性' 维度在 prompt 里 —— 该维度已移除。
+
+        FR-4.2 2026-09-10 重写 prompt 后,检查维度改为**两类判定**。
+        这里只守两条最稳定的措辞,不做整段散文比对
+        —— 过度比对本就是这条测试过期坏掉的原因。
+        """
         llm = FakeLLM(response=make_pass_response())
         checker.set_llm(llm)
 
-        text = normal_text(600)
-        checker.check(text, "t", duration_sec=100, model_size="small")
+        checker.check(normal_text(600), "t", duration_sec=100, model_size="small")
 
         prompt = llm.calls[0]["prompt"]
-        assert "文本长度合理性" in prompt
+        assert "转写失败" in prompt
+        assert "可读但需校对" in prompt
+
+
+class TestPromptThresholdAnchor:
+    """FR-4.4 2026-09-10:把 `min_score_to_pass` 注入 prompt,消除 pass/score 矛盾。
+
+    旧 prompt 同时索要 `pass`(bool)和 `score`(0-100),却**从不定义二者关系**
+    —— 于是 LLM 可以返回自相矛盾的 `score=55 / pass=false`(真机实例),
+    而代码里的 `passed = llm_pass AND score >= 阈值` 让那记 `pass=false`
+    一票否决。锚定后两个判据按构造一致,`AND` 退化为安全网。
+    """
+
+    def test_prompt_injects_configured_threshold(self, cfg, checker: QualityChecker):
+        """阈值必须来自配置,不是写死的字面量。"""
+        cfg.quality_check.min_score_to_pass = 42
+        llm = FakeLLM(response=make_pass_response())
+        checker.set_llm(llm)
+
+        checker.check(normal_text(600), "t", duration_sec=100, model_size="small")
+
+        assert "42" in llm.calls[0]["prompt"]
+
+    def test_prompt_ties_pass_to_score(self, cfg, checker: QualityChecker):
+        """prompt 要明确 `pass` 与 `score` 的从属关系。"""
+        cfg.quality_check.min_score_to_pass = 70
+        llm = FakeLLM(response=make_pass_response())
+        checker.set_llm(llm)
+
+        checker.check(normal_text(600), "t", duration_sec=100, model_size="small")
+
+        prompt = llm.calls[0]["prompt"]
+        # 同一条规则里同时出现 pass / score / 阈值三者
+        assert "pass" in prompt and "score" in prompt
+        assert "70" in prompt
+
+    def test_threshold_change_is_reflected(self, cfg, checker: QualityChecker):
+        """改配置 → prompt 跟着变(防止有人退回写死)。"""
+        cfg.quality_check.min_score_to_pass = 33
+        llm_a = FakeLLM(response=make_pass_response())
+        checker.set_llm(llm_a)
+        checker.check(normal_text(600), "t", duration_sec=100, model_size="small")
+
+        cfg.quality_check.min_score_to_pass = 88
+        llm_b = FakeLLM(response=make_pass_response())
+        checker.set_llm(llm_b)
+        checker.check(normal_text(600), "t", duration_sec=100, model_size="small")
+
+        assert "33" in llm_a.calls[0]["prompt"]
+        assert "88" in llm_b.calls[0]["prompt"]
 
 
 # ---------------- pass/fail 阈值 ----------------
@@ -393,3 +448,86 @@ class TestLLMInjection:
         c.check(normal_text(600), "t", duration_sec=100, model_size="small")
 
         assert len(llm.calls) == 1
+
+
+# ---------------- 惰性 LLM 构造(2026-09-10) ----------------
+
+
+class TestLazyLLMResolution:
+    """`QualityChecker(cfg)` 不注入 LLM 时也应能跑 —— 首次 check 惰性构造。
+
+    2026-09-10 真机批量暴露:`build_text_provider` 的 T13 兜底只建了
+    `QualityChecker(cfg)`(构造期零依赖),却没注入 LLM。旧实现在
+    `_llm is None` 时抛 RuntimeError → 该异常穿过 process_asset / _process_one
+    一路上抛,把**整个 `vla learn` 批量**带走(不是 fail 单条,是崩全批)。
+
+    与 `VideoSummarizer._resolve_llm` 同一修复(2026-09-10 已定稿):
+    构造期零依赖 + 类内惰性构造,装配路径不再决定功能是否可用。
+    """
+
+    def test_lazy_constructs_llm_when_not_injected(self, cfg, monkeypatch):
+        """没注入 LLM → 按 cfg 惰性构造一个,check 正常返回。"""
+        built: list[tuple[Any, str]] = []
+        llm = FakeLLM(response=make_pass_response(score=85))
+
+        def fake_llm_client(client_cfg: Any, model: str = "") -> FakeLLM:
+            built.append((client_cfg, model))
+            return llm
+
+        monkeypatch.setattr("vla.quality.checker.LLMClient", fake_llm_client)
+        checker = QualityChecker(cfg)  # 刻意不 set_llm
+
+        result = checker.check(normal_text(600), "t", duration_sec=100, model_size="small")
+
+        assert result.passed is True
+        assert len(built) == 1, "应恰好惰性构造一次 LLMClient"
+        assert built[0][0] is cfg.llm_client, "应传 cfg.llm_client"
+        assert built[0][1] == cfg.quality_check.model, "model 应取 quality_check.model"
+
+    def test_lazy_construction_happens_once(self, cfg, monkeypatch):
+        """惰性构造只做一次 —— 第二次 check 复用已建的客户端。"""
+        calls = {"n": 0}
+        llm = FakeLLM(response=make_pass_response())
+
+        def fake_llm_client(client_cfg: Any, model: str = "") -> FakeLLM:
+            calls["n"] += 1
+            return llm
+
+        monkeypatch.setattr("vla.quality.checker.LLMClient", fake_llm_client)
+        checker = QualityChecker(cfg)
+
+        checker.check(normal_text(600), "t", duration_sec=100, model_size="small")
+        checker.check(normal_text(600), "t", duration_sec=100, model_size="small")
+
+        assert calls["n"] == 1
+        assert len(llm.calls) == 2, "两次调用都该打到同一个客户端"
+
+    def test_injected_llm_wins_over_lazy(self, cfg, monkeypatch):
+        """显式注入优先 —— 注入了就不该再惰性构造。"""
+
+        def boom(client_cfg: Any, model: str = "") -> Any:
+            raise AssertionError("注入了 LLM 却仍去构造新的")
+
+        monkeypatch.setattr("vla.quality.checker.LLMClient", boom)
+        llm = FakeLLM(response=make_pass_response())
+        checker = QualityChecker(cfg, llm=llm)
+
+        result = checker.check(normal_text(600), "t", duration_sec=100, model_size="small")
+
+        assert result.passed is True
+        assert len(llm.calls) == 1
+
+    def test_heuristic_fail_does_not_construct_llm(self, cfg, monkeypatch):
+        """启发式已经 fail → 不该白建 LLM(省钱省时,原语义不变)。"""
+
+        def boom(client_cfg: Any, model: str = "") -> Any:
+            raise AssertionError("启发式已 fail,不该构造 LLM")
+
+        monkeypatch.setattr("vla.quality.checker.LLMClient", boom)
+        checker = QualityChecker(cfg)
+
+        # 100 字 / 600s = 0.17 cps → 语速过低启发式直接 fail
+        result = checker.check("短短短" * 20, "t", duration_sec=600, model_size="small")
+
+        assert result.passed is False
+        assert result.score == 20

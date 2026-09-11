@@ -32,6 +32,14 @@ class WhisperConfig(BaseModel):
     postprocess_min_line_chars: int = 8      # 短于这个字符的行认为碎片
     postprocess_max_line_chars: int = 80     # 合并后单行上限
     postprocess_min_overlap_chars: int = 6   # 重复段最小公共子串
+    # FR-3.10(2026-09-10):Whisper 强制简体输出。
+    # 中文简繁选择对 Whisper **不可控** —— 同一段普通话可能前段简体、后段繁体
+    # (真机 30 分钟 Python 课即如此:头部简体、尾部繁体)。`initial_prompt`
+    # 是标准压制手段。带默认值 ⇒ `config/vla.yaml` 无需改动。
+    # 置空字符串 = 关闭(传 None,而非空串 —— 空串在某些 faster-whisper
+    # 版本下仍会作为 prompt 参与解码,语义与"不传"不同)。
+    # 注意:这只是**源头压制**,不是保证;精修侧(FR-2.15c)仍会做繁简统一兜底。
+    initial_prompt: str = "以下是普通话的句子,请使用简体中文。"
 
 
 class VideoSourceDownloadConfig(BaseModel):
@@ -97,8 +105,14 @@ class AudioConfig(BaseModel):
     约定:用户把 Tab Audio Recorder 录完的 webm 拖到 `<downloads_dir>/YYYY-MM-DD/`。
     代码侧:扫描今天的 YYYY-MM-DD/ 找未转写 webm,转写后同文件夹落 `<id>.txt`
     + sidecar `<id>.transcribed.txt` 标记。
+
+    max_extract_sec (2026-09-10,FR-2.30.1):路径 ② 抽音上限(秒)。默认 1800
+    = 只保留视频前 30 分钟,超出部分**直接丢弃**。两条抽音路径都受它约束:
+    `extract_m3u8_audio` 转成 ffmpeg 输出侧 `-t`,`extract_browser_audio` 转成
+    其 `max_duration_sec`(video-time)。设为 None/0 → 不截断(全量)。
     """
     downloads_dir: Path
+    max_extract_sec: int | None = 1800
 
 
 class LLMClientConfig(BaseModel):
@@ -111,6 +125,15 @@ class LLMClientConfig(BaseModel):
     provider: str
     api_key_env: str
     base_url_env: str
+    # 2026-09-10:reasoning model 的推理量控制,透传给 chat.completions.create。
+    # 背景:deepseek-flash 默认推理极啰嗦 —— 实测一个 2507 字的 refiner 任务烧掉
+    # 16232 reasoning tokens,把调用方的 max_tokens=4000 吃光,content 返回空。
+    # 本项目三个云端 LLM 用途(质量检查 / 字幕清理 / 批量总结)都是**机械任务**,
+    # 不需要长推理链,所以默认关掉:
+    #   "none"  → 完全关闭推理(实测 reasoning_tokens=None,refiner 12.4s 跑通)
+    #   "minimal" / "low" / "high" → 保留但不放开来
+    #   None    → 不传该参数,走端点默认(有推理,需调用方自己把 max_tokens 拉够)
+    reasoning_effort: str | None = None
 
 
 class LLMConfig(BaseModel):

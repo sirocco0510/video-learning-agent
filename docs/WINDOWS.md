@@ -2,7 +2,8 @@
 
 > **状态**:2026-09-10 轻量化后首次支持 Windows。Tab Audio Recorder 浏览器扩展 + macOS 系统通知已删除,Windows 走 `NullNotifier`(静默,自动跳过弹窗)。
 >
-> **目标**:在 Windows 上跑通 `scripts/spike_bill_jc_full.py`(bill-jc 内网学习平台转写端到端)。
+> **目标**:在 Windows 上跑通 bill-jc 内网学习平台转写的**两条路径** ——
+> 单视频(`scripts/spike_bill_jc_full.py`,§四)和课程目录批量(`uv run vla learn`,§五)。
 
 ---
 
@@ -113,7 +114,8 @@ uv run python scripts/spike_bill_jc_full.py `
 
 **B. 手动拿 URL**:
 - 打开 `https://b-learning.bill-jc.com`
-- 浏览目录,点进某个视频 → URL 形如 `https://b-learning.bill-jc.com/learn/<kng_id>`
+- 浏览目录,点进某个视频 → URL 形如 `https://b-learning.bill-jc.com/kng/#/video/play?kngId=<kng_id>&...`
+  (`kngId` 在**查询参数**里;`/learn/<kng_id>` 这种 path 形式不存在)
 
 ### 4.2 跑单视频端到端
 
@@ -127,18 +129,38 @@ uv run python scripts/spike_bill_jc_full.py `
 流程:
 1. spider 调 yunxuetang 4 API(tree / pagelist / preinit / kngPlay)拿 m3u8
 2. ffmpeg 直接抽 m3u8 音轨为 wav(若失败 fallback 到浏览器内 MediaRecorder)
-3. faster-whisper 转写
-4. 质量门控(LLM 评分 ≥ 50,语速 ≥ 0.5 cps)
-5. Refine(L2 语义清理)
-6. 落盘 `<logs>/transcribed/<kng_id>_<title>.txt` + `<id>.summary.txt`
+3. faster-whisper 转写(`initial_prompt` 强制简体,FR-3.10)
+4. **Level 4 Refine**(云端 LLM 清错别字 / 统一繁简;`refine_enabled` 时)
+5. **质量门控**(LLM 评分 ≥ 50,语速 ≥ 0.5 cps)
+6. 长视频单视频摘要(FR-2.15d,200-300 字)
+7. 落盘 `<logs>/transcribed/<YYYY-MM-DD>/transcripts/<id>_<title>.txt`
+   + `<logs>/transcribed/<YYYY-MM-DD>/summaries/<id>_<title>.summary.txt`
+
+> ⚠️ **Refine 在门控之前**(步骤 4 在 5 前),这是有意为之:未精修的文本进
+> 门控会拿低分(2026-09-10 实测同一视频 未注入 Refiner 45 分 vs 注入后 88 分)。
+> 两处云端调用**都算「字幕质量检查」配额**,不额外开新用途。
+
+> ⚠️ 抽音受 `audio.max_extract_sec` 限制(默认 **1800 秒 = 30 分钟**),超出部分
+> **直接丢弃** —— 超长视频只会转出前 30 分钟,这不是 bug。
 
 ### 4.3 输出文件位置
 
 | 文件 | 路径 | 说明 |
 |---|---|---|
-| **wav 临时文件** | `<tmp>/audio_raw/<id>.wav` | 中间产物,转写完后自动删 |
-| **cleaned.txt** | `<logs>/transcribed/<id>_<title>.txt` | 主字幕文件(Refine 后) |
-| **summary.txt** | `<logs>/transcribed/<id>_<title>.summary.txt` | 长视频 200-300 字摘要(可选) |
+| **wav 临时文件** | `<tmp>/audio_raw/<id>.wav` | 中间产物,转写成功后**立即删**(FR-3.7,不等门控) |
+| **transcript.txt** | `<logs>/transcribed/<YYYY-MM-DD>/transcripts/<stem>.transcript.txt` | Whisper 原始输出(总写) |
+| **refined.txt** | `<logs>/transcribed/<YYYY-MM-DD>/transcripts/<stem>.refined.txt` | Refine 后(**仅未通过的条目残留** —— 成功条目在 Step 6 被删,见下) |
+| **主字幕** | `<logs>/transcribed/<YYYY-MM-DD>/transcripts/<id>_<title>.txt` | 正式产物 |
+| **summary.txt** | `<logs>/transcribed/<YYYY-MM-DD>/summaries/<id>_<title>.summary.txt` | 长视频 200-300 字摘要(可选) |
+
+> **成功条目上找不到 `.transcript.txt` / `.refined.txt` 是正常的**:`process_asset`
+> 成功路径的 Step 6(`main_provider.py:317`)会调 `discard_transcribe_intermediates(stem)`
+> 把它们清掉;只有**失败**条目会在 Step 3 提前返回、把中间产物留在盘上。
+> 所以精修有没有降级(`# notes:` 尾巴)事后**只能从运行时的 stdout 看**,
+> 别用 `| tail -1` 之类的管道把中间输出截掉。
+
+> 顺带:`<stem>` 与 `<id>_<title>` 是**两套命名**,都落同一个 `transcripts/`
+> 目录。核对产物时别数目录里的文件个数,按 `通过 N 条 → N 份 .txt + N 份 .summary.txt` 数。
 
 ### 4.4 常见错误
 
@@ -152,7 +174,113 @@ uv run python scripts/spike_bill_jc_full.py `
 
 ---
 
-## 五、跑 `vla process` CLI(主流程)
+## 五、跑课程目录批量(`vla learn`)
+
+**适用**:手里是**课程目录页** URL(含 `catalogId` + `cid`),想按目录翻页整门跑完。
+
+> **和 §四 的关系**:两条路径**平级**,不是同一条的两个参数。
+> `vla learn` 是 `src/vla/cli.py:501` 的 typer 命令 + `src/vla/learn.py`,
+> **不 import 也不调用** `scripts/spike_bill_jc_full.py` —— 单视频才用 spike。
+> 两者共享的只是库模块 `vla.subtitle.internal_site_spider.InternalSiteSpider`。
+
+### 5.1 怎么拿到 URL 和那两个参数
+
+**实操**:Chrome 里打开要跑的那门课的**课程目录页**(能看到整门课章节列表的那一页)→ **地址栏整条复制**。URL 长这样:
+
+```text
+https://b-learning.bill-jc.com/kng/#/list?catalogId=<X>&cid=<Y>&order=0&sort=0&type=
+                                         ^^^^^^^^^^^^      ^^^^^
+                                         --catalog-id      --college-id
+```
+
+`cid` **就是 collegeId**(不是"课程 ID" —— 名字有误导性)。两个都必须是 UUID,顺序任意。
+
+**真实示例**(可直接替换成你自己的):
+
+```text
+https://b-learning.bill-jc.com/kng/#/list?catalogId=3514be39-ee3f-4ad0-a276-d529474c6662&cid=7c80b070-28ac-4c1a-b54b-35b327b870eb&order=0&sort=0&type=
+```
+
+→
+
+```powershell
+--catalog-id 3514be39-ee3f-4ad0-a276-d529474c6662
+--college-id 7c80b070-28ac-4c1a-b54b-35b327b870eb
+```
+
+> ⚠️ **别把整条 URL 当参数传**。CLI 收的是 `--catalog-id` / `--college-id` 两个独立
+> flag,**没有** `--url`。而且 PowerShell 里 `&` 是**调用运算符**,未加引号的 URL 会被
+> 解析成"执行 `https://...` 这条命令"而报错 —— 这也正是为什么要把两个 UUID 拆出来。
+
+> ⚠️ 两个 UUID **都要带**。只给 `catalogId` 缺 `cid` → `vla learn` 会因缺少必填
+> `--college-id` 直接报 typer 用法错误(`Missing option`)。
+
+### 5.2 先 `--dry-run` 列清单
+
+```powershell
+uv run vla learn `
+  --college-id 7c80b070-28ac-4c1a-b54b-35b327b870eb `
+  --catalog-id 3514be39-ee3f-4ad0-a276-d529474c6662 `
+  --limit 10 `
+  --dry-run
+```
+
+(两个 UUID 换成 §5.1 从你自己那条 URL 里抄出来的)
+
+`--dry-run` **不装配** transcriber / refiner / LLM(零凭据零副作用),只翻页列条目并标注哪些已转写:
+
+```text
+📋 dry-run:目录共 <total> 条 / 已转写 <done> 条 → 本次将处理 <total-done> 条
+```
+
+> `--limit` 既是**每页条数**也是**翻页步长**。
+
+### 5.3 真跑
+
+```powershell
+uv run vla learn `
+  --college-id 7c80b070-28ac-4c1a-b54b-35b327b870eb `
+  --catalog-id 3514be39-ee3f-4ad0-a276-d529474c6662 `
+  --limit 10
+```
+
+把 `--dry-run` 去掉即可,其余参数与 §5.2 完全一致。
+
+- **不需要** `--real-provider`(与 §六 的 `vla process` 不同 —— `vla learn` 内部自己装配真实链路)
+- 可选 `--cdp-url`(默认 `http://localhost:9222`)/ `--resolution`(默认 `720p`)/ `--config`
+- **全程不弹窗**(FR-11.12):内部站走 m3u8 直抽,不碰浏览器插件路径。Windows 上更是
+  走 `NullNotifier`,即使命中降级分支也是静默 → 不会卡在无人应答的弹窗上
+
+### 5.4 输出与停止
+
+```text
+📊 课程批量结果:翻页 <pages> 页 / 处理 <processed> / 通过 <passed> / 失败 <failed> / 跳过(已转写)<skipped> / 触发总结 <summarized>
+```
+
+| 停止方式 | 日志 | 含义 |
+|---|---|---|
+| 目录翻完 | `🏁 翻页结束:offset=N 无更多视频` | 全跑完 |
+| 配额到 | `🛑 累计配额已到(X.Xh)且 on_exhausted=stop_session → 停止翻页` | 累计 6h,本 session 结束(已跑完的照常落盘) |
+
+> ⚠️ **去重只记成功**。`logs/transcribed_history.jsonl` 由 `agent.run` 在**成功后**写入;
+> 失败条目**不写** → 下次跑同一门课会**重跑**。`--dry-run` 的「已转写」也只数成功。
+> 另外 spike 从不写这个文件,所以**用 spike 单跑过的视频,批量会再跑一遍**。
+
+> ⚠️ **逐条明细在 stdout 的 `logger.info` 行里**(每条打 score / 时长 / 落盘路径)。
+> 别把 `vla learn` 接到 `| tail -1` 之类的管道上 —— 那会把明细和 `# notes:`
+> 降级信号一起截掉,只留最后那行统计。
+
+### 5.5 常见错误
+
+| 错误 | 原因 | 解决 |
+|---|---|---|
+| `📋 dry-run:目录共 0 条` | `catalogId` 给错 / 目录为空 | 回 §5.1 核对 URL,**别**靠调大 `--limit` 硬试 |
+| 看到"是否已开启字幕插件"弹窗 | kngId 解析 miss,走错路径了 | 停下核对 URL 形式(§4.1 B),**不要**点"跳过"硬跑 |
+| 翻页停不下来 | `--limit` 给了过大值且目录异常 | 先 Ctrl-C,再用 `--dry-run` 确认总条数 |
+
+---
+
+## 六、跑 `vla process` CLI(主流程)
 
 ```powershell
 # B站(无需 Chrome debug,API 命中即可)
@@ -164,7 +292,7 @@ uv run vla process `
 
 # bill-jc(需 Chrome debug)
 uv run vla process `
-  --url "https://b-learning.bill-jc.com/learn/<kng_id>" `
+  --url "https://b-learning.bill-jc.com/kng/#/video/play?kngId=<kng_id>" `
   --title "内训课程" `
   --duration 3600 `
   --real-provider
@@ -181,7 +309,7 @@ uv run vla doctor
 
 ---
 
-## 六、与 mac 的差异速查(代码层)
+## 七、与 mac 的差异速查(代码层)
 
 | 模块 | macOS 行为 | Windows 行为 |
 |---|---|---|
@@ -196,7 +324,7 @@ uv run vla doctor
 
 ---
 
-## 七、性能 / 磁盘注意
+## 八、性能 / 磁盘注意
 
 | 项 | 值 |
 |---|---|
@@ -207,7 +335,7 @@ uv run vla doctor
 
 ---
 
-## 八、进阶:PyInstaller 单文件 exe(可选)
+## 九、进阶:PyInstaller 单文件 exe(可选)
 
 > **状态**:未在主线启用(2026-09-10)。如需要单文件 exe,后续可加 `pyinstaller.spec` 走 spec hiddenimports 模式。
 
@@ -215,7 +343,7 @@ uv run vla doctor
 
 ---
 
-## 九、故障排查 checklist
+## 十、故障排查 checklist
 
 - [ ] Chrome debug 9222 已启?`curl http://localhost:9222/json/version` 有响应?
 - [ ] Chrome 里已登录 bill-jc / B站?cookie 没过期?
@@ -227,9 +355,9 @@ uv run vla doctor
 
 ---
 
-## 十、相关文档
+## 十一、相关文档
 
-- `requirements.md` — 需求 SSOT(FR-1 ~ FR-10)
-- `implementation-plan.md` — 9 个 Phase 实施计划
+- `requirements.md` — 需求 SSOT(FR-1 ~ FR-11)
 - `README.md` — 项目门户
 - `docs/superpowers/specs/2026-09-09-bill-jc-spider-impl-design.md` — bill-jc spider 设计 spec
+- `.claude/skills/vla-learn-bill-jc/SKILL.md` — 两条路径的交互式引导(URL 校验 + 分流)

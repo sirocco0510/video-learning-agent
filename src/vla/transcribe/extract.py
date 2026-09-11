@@ -8,6 +8,11 @@
 Phase 9.6.4(2026-09-10):新增 extract_browser_audio — 浏览器内 MediaRecorder 抽音,
 用于 yunxuetang (b-learning.bill-jc.com) BCE DRM-encrypted m3u8 兜底(ffmpeg 直抽
 被服务端 token 绑定 session 拒)。
+
+Phase 9.6.6(2026-09-10):extract_browser_audio 的 webm→wav 转换加 ffmpeg
+``-af atempo`` 后处理 — 4x 抓的音时间轴被压缩 4 倍,直送 whisper 会在快速连读场景
+产生同音字幻觉("资格资格资格" 刷 66 行)+ 数字串乱码;atempo=0.5 拉伸 2 倍后消失。
+详见 _BROWSER_CAPTURE_ATEMPO。
 """
 
 from __future__ import annotations
@@ -57,7 +62,11 @@ def extract_audio(input_path: Path, output_path: Path) -> None:
         raise
 
 
-def extract_m3u8_audio(m3u8_url: str, output_path: Path) -> None:
+def extract_m3u8_audio(
+    m3u8_url: str,
+    output_path: Path,
+    max_sec: int | None = None,
+) -> None:
     """ffmpeg 流式抽 m3u8 音轨 → wav, 不缓存视频。
 
     与 extract_audio 的差异: -vn 跳过视频轨, m3u8 直接走 HLS 流式输入。
@@ -66,6 +75,9 @@ def extract_m3u8_audio(m3u8_url: str, output_path: Path) -> None:
     Args:
         m3u8_url: HLS manifest URL(可达, 含签名 token)
         output_path: 目标 wav 路径(需 .wav 后缀)
+        max_sec: 只抽前 N 秒, 超出丢弃(FR-2.30.1)。None / 0 → 全量。
+            `-t` 放在 `-i` **之后** 是输出侧选项: ffmpeg 产出够 N 秒就停止
+            读取输入, 所以既截音频也省带宽(不再拉后续 HLS 切片)。
 
     Raises:
         RuntimeError: ffmpeg 返回非 0(网络/格式错)
@@ -77,8 +89,10 @@ def extract_m3u8_audio(m3u8_url: str, output_path: Path) -> None:
         "ffmpeg", "-y", "-loglevel", "error",
         "-vn",  # 跳过视频轨(磁盘友好: 不缓存 mp4)
         "-i", m3u8_url,
-        "-ac", "1", "-ar", "16000", "-f", "wav", str(output_path),
     ]
+    if max_sec:
+        cmd += ["-t", str(max_sec)]
+    cmd += ["-ac", "1", "-ar", "16000", "-f", "wav", str(output_path)]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
@@ -94,15 +108,31 @@ def extract_m3u8_audio(m3u8_url: str, output_path: Path) -> None:
         raise
 
 
-# Default max duration for browser-based audio capture (avoids indefinite hangs when
-# video.duration is NaN / Infinity on DRM-protected HLS streams).
-_BROWSER_CAPTURE_MAX_DURATION_SEC = 3600
+# Default max duration for browser-based audio capture. 双重作用:
+#   ① 防挂死 —— video.duration 在 DRM 保护的 HLS 流上可能是 NaN / Infinity
+#   ② FR-2.30.1 产品上限 —— 默认只留前 30 分钟(2026-09-10,3600 → 1800)。
+# 调用方通常显式传 `audio.max_extract_sec`;此处默认值只在漏传时兜底。
+_BROWSER_CAPTURE_MAX_DURATION_SEC = 1800
 
 # Default playback rate for browser-based audio capture. 4x means a 3h video
 # captures in ~45 min wall-clock. MediaRecorder gets audio at original sample
-# rate (browser internal resample), so faster-whisper transcription is rate-
-# agnostic. Chromium supports playbackRate up to ~16x.
+# rate (browser internal resample) — the *sample rate* is unchanged, but the
+# *timeline* is compressed 4x, which whisper is NOT agnostic to (see
+# _BROWSER_CAPTURE_ATEMPO). Chromium supports playbackRate up to ~16x.
 _BROWSER_CAPTURE_PLAYBACK_RATE = 4.0
+
+# Phase 9.6.6+ (2026-09-10):4x 抓的音让 whisper 看到"时间轴压缩 4 倍"的语流 ——
+# 采样率没变,但音素密度是真实语速的 4 倍。快速连读场景(编程教程 / 公司简介 /
+# 商业宣传片)因此产生同音字幻觉("资格资格资格" 连刷 66 行)和数字串乱码,质量
+# 门控 fail。atempo 把时域拉伸 1/atempo 倍,把语流密度降回来。
+#
+# 0.5 = 拉伸 2 倍,即 4x 抓的音变成净 2x 速度(而非完全还原 1x)。
+# 793df1f8 实测(4min23s 编程 if-else 教程):wav 263s → 526s,字符 522 → 2899
+# (5.5x),"资格资格资格" 66 行 → 0 行,转出真实教学内容。
+#
+# 注:ffmpeg atempo 单级合法区间 [0.5, 100],0.5 正好是下边界 —— 要拉伸超过 2 倍
+# 必须链式(如 "atempo=0.5,atempo=0.5" = 4 倍),本模块只暴露单级因子。
+_BROWSER_CAPTURE_ATEMPO = 0.5
 
 # JS that runs inside the navigated page: force-play the <video>, captureStream() its
 # audio track, MediaRecorder → webm/opus chunks → base64 to Python. Awaits either
@@ -112,12 +142,22 @@ async ({maxDurationSec, playbackRate}) => {
     const video = document.querySelector("video");
     if (!video) throw new Error("No <video> element");
 
+    // Phase 9.6.4+ (2026-09-10):学完状态(capture JS 第一次被调用时,video 可能已 ended)
+    // 重置 currentTime 到 0,否则 addEventListener("ended") 永远不触发(事件已发过),
+    // capture JS 会一直等 setTimeout(15min)。seekTo(0) 强制从头播放。
+    if (video.ended || (video.duration && video.currentTime >= video.duration - 1)) {
+        try { video.currentTime = 0; } catch(e) { /* seek 失败也继续 */ }
+    }
+
     // Ensure autoplay (may need muted first); some browsers require user gesture,
     // but a fresh tab navigated by Playwright usually allows muted autoplay.
     video.muted = false;
     // Speed up playback so capture wall-clock is compressed (3h video @ 4x → 45min).
-    // MediaRecorder gets audio at original sample rate (browser internal resample);
-    // faster-whisper transcription is rate-agnostic.
+    // MediaRecorder gets audio at original sample rate (browser internal resample), so
+    // the *sample rate* is preserved — but the *timeline* is compressed by this factor,
+    // which faster-whisper is NOT agnostic to. The Python side undoes the compression
+    // with ffmpeg atempo (see _BROWSER_CAPTURE_ATEMPO); without it, fast continuous
+    // speech produces homophone hallucinations.
     video.playbackRate = playbackRate;
     try { await video.play(); } catch(e) { /* autoplay restricted; will still record if stream is live */ }
 
@@ -168,6 +208,7 @@ async def extract_browser_audio(
     cdp_url: str = "http://localhost:9222",
     max_duration_sec: int = _BROWSER_CAPTURE_MAX_DURATION_SEC,
     playback_rate: float = _BROWSER_CAPTURE_PLAYBACK_RATE,
+    atempo: float = _BROWSER_CAPTURE_ATEMPO,
 ) -> Path:
     """浏览器内 MediaRecorder 抽音 → webm → ffmpeg → wav。
 
@@ -181,7 +222,8 @@ async def extract_browser_audio(
          tab 默认 route 不是视频学习页,button.yxtf-button--primary 永远不渲染)
       4. goto video_url → 等 button → 点"开始学习" → 等 <video> ready →
          playbackRate 加速 → MediaRecorder 录 webm/opus
-      5. base64 传回 Python → 临时 webm → ffmpeg -vn -ac 1 -ar 16000 转 wav
+      5. base64 传回 Python → 临时 webm → ffmpeg -vn -ac 1 -ar 16000
+         **-af atempo={atempo}** 转 wav(tempo 拉伸把 4x 压缩的语流密度降回来)
       6. unlink webm(磁盘友好), close page
 
     Args:
@@ -191,6 +233,9 @@ async def extract_browser_audio(
         max_duration_sec: 视频时长上限(秒,video-time;非 wall-clock);超过兜底停录
         playback_rate: HTMLMediaElement.playbackRate,默认 4x(3h 视频 → 45min
             捕获;MediaRecorder 拿原始采样率音频,浏览器内部 resample)
+        atempo: ffmpeg atempo 因子,默认 0.5(时域拉伸 2 倍)。4x 抓的音因此变成
+            净 2x 速度 —— 不拉伸(1.0)会让 whisper 在快速连读场景产生同音字幻觉。
+            合法区间 [0.5, 100];0.5 是下边界,更慢需链式。
 
     Returns:
         output_path
@@ -221,32 +266,51 @@ async def extract_browser_audio(
             await page.goto(video_url, wait_until="domcontentloaded")
 
             try:
-                # bill-jc SPA 默认显示课程详情页,<video> 只在用户点 "开始学习"
-                # 后才挂载(bind 在 yxtf-button yxtf-button--primary)。
-                # 不点的话 querySelector('video') 永远 None。
-                # state="attached": 只要 DOM 里有,不要求 visible(可能被课程详情
-                # overlay 挡住,但我们 click() 直接调 trigger,绕过 overlay)。
-                await page.wait_for_selector(
-                    "button.yxtf-button--primary", timeout=30_000, state="attached",
-                )
-                await page.evaluate(
-                    """
-                    () => {
-                        for (const b of document.querySelectorAll('button')) {
-                            if (b.innerText && b.innerText.trim() === '开始学习') {
-                                b.click();
-                                return true;
+                # Phase 9.6.4+ (2026-09-10):bill-jc SPA 根据学习进度显示不同 button:
+                #   - 没学过 → "开始学习"
+                #   - 学过一部分 → "继续学习"
+                #   - 学完想重看 → "重新学习"
+                #   - 已学完 → 没有 button,video 元素已在 DOM(readyState=4)
+                # 学完状态(77c57083 spike 发现)如果没有 fast-path 检测,SPA 不渲染
+                # 任何"开始学习"类 button → 等 30s timeout → fallback ffmpeg,失去 4x。
+                #
+                # 流程:
+                #   ① 先快速 wait_for_selector("video", timeout=5s)— 学完场景命中
+                #   ② 否则 wait button → click(支持 3 种 text) → wait video ready
+                try:
+                    await page.wait_for_selector("video", timeout=5_000, state="attached")
+                    logger.info(
+                        "[BROWSER] video element already present (学完场景),"
+                        " skip button click — go directly to capture"
+                    )
+                except Exception:
+                    # video 不在,需要点 button 进 player
+                    await page.wait_for_selector(
+                        "button.yxtf-button--primary", timeout=30_000, state="attached",
+                    )
+                    await page.evaluate(
+                        """
+                        () => {
+                            const targets = ['开始学习', '继续学习', '重新学习'];
+                            for (const b of document.querySelectorAll('button')) {
+                                const txt = b.innerText ? b.innerText.trim() : '';
+                                if (targets.includes(txt)) {
+                                    b.click();
+                                    return txt;  // 返哪个 text 被点,便于排查
+                                }
                             }
+                            return null;
                         }
-                        return false;
-                    }
-                    """
-                )
-                await page.wait_for_selector("video", timeout=30_000, state="attached")
-                await page.wait_for_function(
-                    "document.querySelector('video') && document.querySelector('video').readyState >= 2",
-                    timeout=30_000,
-                )
+                        """
+                    )
+                    await page.wait_for_selector(
+                        "video", timeout=30_000, state="attached",
+                    )
+                    await page.wait_for_function(
+                        "document.querySelector('video') && "
+                        "document.querySelector('video').readyState >= 2",
+                        timeout=30_000,
+                    )
             except Exception as e:
                 raise RuntimeError(
                     f"browser audio capture failed: <video> element not ready: {e}"
@@ -274,7 +338,13 @@ async def extract_browser_audio(
                 cmd = [
                     "ffmpeg", "-y", "-loglevel", "error",
                     "-i", str(webm_path),
-                    "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", str(output_path),
+                    "-vn", "-ac", "1", "-ar", "16000",
+                    # Phase 9.6.6+ (2026-09-10):4x 抓的音时间轴被压缩 4 倍,atempo
+                    # 拉伸 1/atempo 倍把语流密度降回 whisper 友好区间(默认 0.5
+                    # = 净 2x)。不拉伸会在快速连读场景产生同音字幻觉,详见
+                    # _BROWSER_CAPTURE_ATEMPO 注释。
+                    "-af", f"atempo={atempo}",
+                    "-f", "wav", str(output_path),
                 ]
                 proc = subprocess.run(cmd, capture_output=True, text=True)
                 if proc.returncode != 0:

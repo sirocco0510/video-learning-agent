@@ -19,9 +19,10 @@ tags:
 
 | 文档 | 用途 |
 |------|------|
-| [[requirements]] | **需求规格**:功能、非功能、模块接口、验收标准(给 VS Code AI 助手看的 SSOT) |
-| [[implementation-plan]] | **实施计划**:9 个 Phase 顺序推进,每个 Phase 含实现要点 + 验收代码 |
+| [[requirements]] | **需求规格**:功能、非功能、模块接口、验收标准(给 AI 助手看的 SSOT) |
 | 本 README | 项目入口 + 快速上手 |
+
+> `implementation-plan.md` 已于 2026-09-10 弃用(不再同步 / 不再参考),文件保留作历史存档。
 
 ---
 
@@ -133,6 +134,15 @@ uv run vla process \
 
 # 6. 批量处理(从 videos.yaml,FR-10)
 uv run vla batch --config ./videos.yaml
+
+# 7. 课程目录批量转写(FR-11,2026-09-10)—— 只支持 bill-jc
+#    参数从课程目录页 URL 拿:
+#    https://b-learning.bill-jc.com/kng/#/list?catalogId=<X>&cid=<Y>&...
+uv run vla learn \
+  --college-id  "7c80b070-28ac-4c1a-b54b-35b327b870eb" \
+  --catalog-id  "4ff8c024-219c-4e49-91d0-ec869bcf859f" \
+  --limit 10            # 每页 10 条 + 翻页步长;累计 6h 或目录翻完即停
+# 先看要跑哪些(不转写、不装配 LLM):加 --dry-run
 ```
 
 ### Claude skill 入口(2026-09-10)
@@ -141,8 +151,7 @@ uv run vla batch --config ./videos.yaml
 
 | Skill | 触发 | 适用场景 |
 |---|---|---|
-| `/vla-implement-phase` | "实现 Phase N" / "继续 Phase" | 按 `implementation-plan.md` 推进 TDD |
-| `/vla-learn-bill-jc` | "学 bill-jc 视频" / "跑 bill-jc 转写" | b-learning.bill-jc.com 单视频端到端转写(只支持 bill-jc,其他平台用 `vla process`) |
+| `/vla-learn-bill-jc` | "学 bill-jc 视频" / "跑 bill-jc 转写" | b-learning.bill-jc.com 端到端转写。**单视频**(粘详情页 URL)或**整课批量**(粘目录页 URL,内部走 `vla learn`) |
 
 
 ### `videos.yaml` 写法(FR-10.5)
@@ -361,11 +370,9 @@ bilibili://group/{group_id}/{bvid}
 
 ### 工作流
 
-1. 三份文档(`README` / [[requirements]] / [[implementation-plan]])就是 AI 助手的**上下文 SSOT**
-2. 每个 Phase 开始时,把 [[implementation-plan]] 对应小节的"必读" + "验收"代码贴给 AI 助手
-3. AI 助手按 Phase 推进,每完成一个跑验收代码,通过再开下一个
-
-详细使用建议见 [[implementation-plan#VS Code AI 助手使用建议]]。
+1. 两份文档(`README` / [[requirements]])就是 AI 助手的**上下文 SSOT**
+2. 开工时把需求背景 + [[requirements]] 对应的 FR 段贴给 AI 助手
+3. AI 助手按 TDD 推进(先写测试 → 再写实现),跑测试 + 全量回归确认无退化
 
 ---
 
@@ -382,9 +389,9 @@ bilibili://group/{group_id}/{bvid}
 
 ## 文档维护原则
 
-- 修改需求 → 先改 [[requirements]],再同步 [[implementation-plan]]
-- 每个 Phase 完成后,在 [[implementation-plan#进度跟踪]] 勾掉
-- 验收代码 = 唯一真相;改了规格必须同步更新验收代码
+- 修改需求 → 先改 [[requirements]],再改代码
+- 验收标准 = [[requirements]] 对应 FR 的验收段 + 测试;改了规格必须同步更新测试
+- ~~`implementation-plan.md`~~ 已弃用(2026-09-10),不要再同步它
 
 ---
 
