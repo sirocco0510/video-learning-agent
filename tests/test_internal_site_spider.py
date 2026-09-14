@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -207,13 +209,13 @@ async def test_list_tasks_walks_tree_then_paginates(monkeypatch):
     ]
     pagelist_leaf1 = {
         "datas": [
-            {"id": "kng-001", "title": "视频1", "coverUrl": "..."},
-            {"id": "kng-002", "title": "视频2", "coverUrl": "..."},
+            {"id": "kng-001", "title": "视频1", "coverUrl": "...", "fileType": "video"},
+            {"id": "kng-002", "title": "视频2", "coverUrl": "...", "fileType": "video"},
         ],
         "totalCount": 2,
     }
     pagelist_leaf2 = {
-        "datas": [{"id": "kng-003", "title": "视频3", "coverUrl": "..."}],
+        "datas": [{"id": "kng-003", "title": "视频3", "coverUrl": "...", "fileType": "video"}],
         "totalCount": 1,
     }
 
@@ -265,7 +267,7 @@ async def test_list_tasks_filters_by_root_label(monkeypatch):
             return MagicMock(status_code=200, json=lambda: tree_payload)
         if "pagelist" in url:
             pagelist_calls.append(json["catalogId"])
-            body = {"datas": [{"id": f"kng-{json['catalogId']}", "title": "t"}]}
+            body = {"datas": [{"id": f"kng-{json['catalogId']}", "title": "t", "fileType": "video"}]}
             return MagicMock(status_code=200, json=lambda: body)
         raise ValueError(url)
 
@@ -301,7 +303,9 @@ async def test_list_tasks_respects_limit(monkeypatch):
     spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
     monkeypatch.setattr(spider, "_fetch_cookies_and_token", _fake_cookies)
     tree_payload = [{"id": "leaf-1", "label": "L", "kngCount": 5, "children": []}]
-    pagelist_body = {"datas": [{"id": f"kng-{i}", "title": f"t{i}"} for i in range(5)]}
+    pagelist_body = {
+        "datas": [{"id": f"kng-{i}", "title": f"t{i}", "fileType": "video"} for i in range(5)]
+    }
 
     async def fake_post(url, json=None, headers=None, **kwargs):
         if "tree" in url:
@@ -330,7 +334,7 @@ async def test_list_tasks_skips_empty_leaves(monkeypatch):
         if "tree" in url:
             return MagicMock(status_code=200, json=lambda: tree_payload)
         pagelist_calls.append(json["catalogId"])
-        body = {"datas": [{"id": f"kng-{json['catalogId']}", "title": "t"}]}
+        body = {"datas": [{"id": f"kng-{json['catalogId']}", "title": "t", "fileType": "video"}]}
         return MagicMock(status_code=200, json=lambda: body)
 
     with patch(
@@ -338,6 +342,61 @@ async def test_list_tasks_skips_empty_leaves(monkeypatch):
     ):
         await spider.list_tasks(limit=10)
     assert pagelist_calls == ["full-leaf"]
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_skips_non_video_filetypes(monkeypatch, caplog):
+    """FR-11.15:只收 fileType == 'video',img / zip 一律跳过。
+
+    真机场景(2026-09-11 实测某课 59 条 = 50 video + 8 img + 1 zip):
+    非 video 的 kngPlay 返回图片 URL 冒充播放地址 → 抽音必失败 → 浏览器
+    录屏兜底空等 → 被错记成 transcribe_fail。
+    """
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
+    monkeypatch.setattr(spider, "_fetch_cookies_and_token", _fake_cookies)
+
+    pagelist_body = {
+        "datas": [
+            {"id": "kng-vid", "title": "真视频", "fileType": "video"},
+            {"id": "kng-img", "title": "骑摩托车的托马斯", "fileType": "img"},
+            {"id": "kng-zip", "title": "project", "fileType": "zip"},
+        ]
+    }
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        assert json["catalogId"] == "cat-1", "直通模式不该调 tree"
+        return MagicMock(status_code=200, json=lambda: pagelist_body)
+
+    with caplog.at_level(logging.INFO, logger="vla.subtitle.internal_site_spider"):
+        with patch(
+            "vla.subtitle.internal_site_spider.httpx.AsyncClient",
+            return_value=_fake_client(fake_post),
+        ):
+            tasks = await spider.list_tasks(catalog_id="cat-1", limit=10)
+
+    assert [t.id for t in tasks] == ["kng-vid"]
+    skipped = [r.message for r in caplog.records if "跳过非视频条目" in r.message]
+    assert len(skipped) == 2
+    assert any("kng-img" in m and "'img'" in m for m in skipped)
+    assert any("kng-zip" in m and "'zip'" in m for m in skipped)
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_all_non_video_returns_empty(monkeypatch):
+    """整页都是非视频 → 返回空列表(调用方按"翻完"终止,不会造出假任务)。"""
+    spider = InternalSiteSpider(cdp_url="http://localhost:9222", college_id="cid")
+    monkeypatch.setattr(spider, "_fetch_cookies_and_token", _fake_cookies)
+
+    pagelist_body = {"datas": [{"id": "kng-img", "title": "图", "fileType": "img"}]}
+
+    async def fake_post(url, json=None, headers=None, **kwargs):
+        return MagicMock(status_code=200, json=lambda: pagelist_body)
+
+    with patch(
+        "vla.subtitle.internal_site_spider.httpx.AsyncClient", return_value=_fake_client(fake_post)
+    ):
+        tasks = await spider.list_tasks(catalog_id="cat-1", limit=10)
+    assert tasks == []
 
 
 # --- 分页 (2026-09-10 learn 批量入口需要,见 FR-11) ---
@@ -348,7 +407,9 @@ def _fake_pagelist_client(captured: list[dict]):
 
     async def fake_post(url, json=None, headers=None, **kwargs):
         captured.append(kwargs.get("params") or {})
-        body = {"datas": [{"id": f"kng-{i}", "title": f"t{i}"} for i in range(3)]}
+        body = {
+            "datas": [{"id": f"kng-{i}", "title": f"t{i}", "fileType": "video"} for i in range(3)]
+        }
         return MagicMock(status_code=200, json=lambda: body)
 
     return _fake_client(fake_post)
@@ -363,7 +424,7 @@ async def test_catalog_id_mode_skips_tree(monkeypatch):
 
     async def fake_post(url, json=None, headers=None, **kwargs):
         urls.append(url)
-        body = {"datas": [{"id": "kng-1", "title": "t"}]}
+        body = {"datas": [{"id": "kng-1", "title": "t", "fileType": "video"}]}
         return MagicMock(status_code=200, json=lambda: body)
 
     with patch(
@@ -476,7 +537,7 @@ async def test_offset_zero_allowed_in_tree_mode(monkeypatch):
     async def fake_post(url, json=None, headers=None, **kwargs):
         if "tree" in url:
             return MagicMock(status_code=200, json=lambda: tree_payload)
-        body = {"datas": [{"id": "kng-1", "title": "t"}]}
+        body = {"datas": [{"id": "kng-1", "title": "t", "fileType": "video"}]}
         return MagicMock(status_code=200, json=lambda: body)
 
     with patch(
@@ -584,8 +645,8 @@ async def test_list_tasks_with_catalog_id_skips_tree(monkeypatch):
         pagelist_calls.append(json["catalogId"])
         body = {
             "datas": [
-                {"id": "kng-A", "title": "A"},
-                {"id": "kng-B", "title": "B"},
+                {"id": "kng-A", "title": "A", "fileType": "video"},
+                {"id": "kng-B", "title": "B", "fileType": "video"},
             ]
         }
         return MagicMock(status_code=200, json=lambda: body)

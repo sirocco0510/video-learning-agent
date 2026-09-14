@@ -258,6 +258,20 @@ class InternalSiteSpider:
                 for v in page_resp.json().get("datas") or []:
                     if len(tasks) >= limit:
                         break
+                    # FR-11.15:只处理真视频。pagelist 每条的 fileType 实测取值
+                    # 只有 video / img / zip(无 mp4)。非 video 的 kngPlay 会返回
+                    # **图片 URL** 冒充播放地址(如 .../xxx.jpg)→ 抽音必失败 →
+                    # 再走浏览器录屏兜底空等 30s+ → 最后被记成 transcribe_fail,
+                    # 把"这条根本不是视频"错记成"视频转写失败"。
+                    file_type = v.get("fileType")
+                    if file_type != "video":
+                        logger.info(
+                            "⏭️ 跳过非视频条目 kng=%s fileType=%r title=%s",
+                            v.get("id"),
+                            file_type,
+                            v.get("title"),
+                        )
+                        continue
                     kng_id = v["id"]
                     tasks.append(
                         VideoTask(

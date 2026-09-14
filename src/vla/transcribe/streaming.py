@@ -150,11 +150,16 @@ class StreamingTranscriber:
         # 转写(FR-3.1 + 3.2)
         # FR-3.10(2026-09-10):initial_prompt 强制简体。空串 → None(干净关闭,
         # 空串在某些 faster-whisper 版本下仍会作为 prompt 参与解码)。
+        # FR-3.11(2026-09-11):condition_on_previous_text=False 防重复死循环。
+        # faster-whisper 默认 True —— 模型一旦复读,先前输出会被当上下文反复
+        # 强化,配合 beam_size=5 可近乎无限解码。真机事故:某条 12:28 音频
+        # (volumedetect 三处采样均 ~-17dB,健康语音)卡死 91 分钟、整批停摆。
         segments, info = self.model.transcribe(
             str(audio_path),
             language=self.config.whisper.language,
             beam_size=5,
             vad_filter=True,
+            condition_on_previous_text=False,
             initial_prompt=self.config.whisper.initial_prompt or None,
         )
         raw_text = "\n".join(seg.text for seg in segments)
