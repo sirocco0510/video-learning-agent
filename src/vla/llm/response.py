@@ -36,12 +36,14 @@ def parse_json_response(
     if strip_think:
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
-    # Collect skip regions: think blocks always, code blocks always
-    # so brace scan doesn't pick up JSON inside them.
+    # 2026-09-14:skip regions 只标 think block;**不**再标 code block。
+    # 原版同时把 code block 加入 skip → 如果 code block 内的 JSON 字符串值含
+    # ``` 字符(LLM 偶发输出示例代码),整个 code block 被当作 skip region,
+    # brace scan 跳过 outermost JSON → raise ValueError → QualityChecker 进程
+    # 死。修法是 brace scan 始终扫所有 `{`(包括 code block 内的),由
+    # _try_parse_balanced_object 正确处理 strings 内的 braces 即可。
     skip_regions: list[tuple[int, int]] = []
     for m in re.finditer(r"<think>.*?</think>", text, re.DOTALL):
-        skip_regions.append((m.start(), m.end()))
-    for m in re.finditer(r"```(?:json)?\s*\n?.*?\n?```", text, re.DOTALL):
         skip_regions.append((m.start(), m.end()))
 
     def _in_skip(idx: int) -> bool:
@@ -114,7 +116,7 @@ def _try_parse_truncated_json(text: str) -> dict[str, Any] | None:
                 candidate = candidate + '"'
             candidate = candidate + "}" * depth
             try:
-                return json.loads(candidate)
+                return json.loads(candidate, strict=False)
             except json.JSONDecodeError:
                 continue
     return None
@@ -128,6 +130,11 @@ def _try_parse_balanced_object(
     Returns:
         解析成功 → dict
         解析失败 → None(调用方继续尝试下一个起点)
+
+    2026-09-14:用 `json.loads(..., strict=False)` 容忍 LLM 输出的 raw 控制字符
+    (如 string value 内的 raw `\n` 换行)。JSON 规范严格不允许这种写法,但
+    MiniMax-M3 等模型在示例代码场景下经常直接字面输出多行字符串 → 不开
+    strict 会被 `Invalid control character` 拒掉。
     """
     if not text or text[start] != "{":
         return None
@@ -154,7 +161,7 @@ def _try_parse_balanced_object(
             if depth == 0:
                 candidate = text[start:i + 1]
                 try:
-                    return json.loads(candidate)
+                    return json.loads(candidate, strict=False)
                 except json.JSONDecodeError:
                     return None
     return None
