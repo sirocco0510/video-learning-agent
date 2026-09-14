@@ -288,36 +288,48 @@ class TestSandwich:
 
 
 class TestFailureModes:
-    """失败 fallback:不抛错,返回空 SummaryResult + notes 说明。"""
+    """失败 fallback:不抛错,返回**降级** SummaryResult(heuristic)+ notes 说明。
+
+    2026-09-14 修订:旧契约返**空** SummaryResult,write_summary 不写文件 →
+    现场批量事故里,f8daa57f / 25b9dad8 都因 parse / 429 走了空分支 →
+    B4b 核对发现"通过 4 条但摘要只 2 条",用户无法判断是 parse 失败还是
+    根本没跑过。现与 QualityChecker 同款:失败也**至少产一条降级摘要**(取
+    cleaned_text 前 ~250 字),notes 注明降级 + 失败原因。
+    """
 
     def test_llm_call_failure(self, cfg: VLAConfig, long_text: str) -> None:
-        """LLM 抛异常 → fallback 空 SummaryResult + notes 记录。"""
+        """LLM 抛异常 → fallback **降级** SummaryResult + notes 记录。"""
         llm = FakeLLM(raise_exc=RuntimeError("API quota exceeded"))
         summarizer = VideoSummarizer(cfg, llm)
 
         result = summarizer.summarize_one(long_text, title="t")
 
-        assert result.summary_text == ""
+        assert result.summary_text, "降级 fallback 也不能空"
         assert "RuntimeError" in result.notes or "quota" in result.notes.lower()
 
     def test_invalid_json_response(self, cfg: VLAConfig, long_text: str) -> None:
-        """LLM 返回非 JSON → fallback 空 + notes 解析失败。"""
+        """LLM 返回非 JSON → fallback **降级** + notes 解析失败。"""
         llm = FakeLLM(response="这是 LLM 的自由文本回复,没有 JSON。")
         summarizer = VideoSummarizer(cfg, llm)
 
         result = summarizer.summarize_one(long_text, title="t")
 
-        assert result.summary_text == ""
+        assert result.summary_text, "降级 fallback 也不能空"
         assert "解析" in result.notes or "JSON" in result.notes or "失败" in result.notes
 
     def test_empty_summary_text(self, cfg: VLAConfig, long_text: str) -> None:
-        """LLM 返回 summary_text="" → fallback 空 + notes 说明。"""
+        """LLM 返回 summary_text="" → fallback 空 + notes 说明。
+
+        这是 LLM 主动选择空字符串(**成功**响应),不是 fallback 失败路径。
+        与 parse 失败 / LLM 异常区别:这里 LLM 说了话,只是内容空。
+        """
         llm = FakeLLM(response='{"summary_text": ""}')
         summarizer = VideoSummarizer(cfg, llm)
 
         result = summarizer.summarize_one(long_text, title="t")
 
         assert result.summary_text == ""
+        assert "空" in result.notes
 
     def test_lazy_constructs_llm_when_not_injected(
         self, cfg: VLAConfig, long_text: str, monkeypatch: pytest.MonkeyPatch,
@@ -384,6 +396,86 @@ class TestFailureModes:
         result = summarizer.summarize_one(long_text, title="t")
 
         assert result.summary_text == "注入的摘要。"
+
+
+class TestDegradedFallback20260914:
+    """LLM 失败 / 解析失败时**仍产出一条降级摘要**(2026-09-14)。
+
+    现场事故:MiniMax-M3 撞 429 / parse_json_response 在边缘响应上抛
+    ValueError → video_summarizer 旧契约是空 SummaryResult → write_summary
+    返回 None → 没有任何 .summary.txt 文件落盘。QualityChecker 已改"兜底
+    仍 pass(score=75)",本类对齐:解析/调用失败 → 用 cleaned_text 前 250 字
+    拼 heuristic summary + notes 注明降级,**至少留个文件**(B4b 对账能看出)。
+
+    与旧契约差异:旧 `TestFailureModes.test_llm_call_failure /
+    test_invalid_json_response` 断言 summary_text == "" —— 那两条现在
+    期望 summary_text 是 heuristic(头 ~250 字)+ notes 含"兜底 / 降级"。
+    见 TestFailureModes 内的同步订正。
+    """
+
+    def test_parse_failure_returns_heuristic_summary(
+        self, cfg: VLAConfig, long_text: str,
+    ) -> None:
+        """parse_json_response 抛 ValueError → 返回降级摘要(非空)+ notes。"""
+        llm = FakeLLM(response="完全没 JSON 也没 code block 的纯文本")
+        summarizer = VideoSummarizer(cfg, llm)
+
+        result = summarizer.summarize_one(long_text, title="t")
+
+        assert isinstance(result, SummaryResult)
+        # 降级摘要必须**非空** + 来自原 cleaned_text(截断形式)
+        assert result.summary_text, "降级 fallback 也不能空 — 否则又退回静默不产出"
+        assert len(result.summary_text) <= 300, "降级摘要控制在 ~250 字以内"
+        # 必须能从原 long_text 里找到这段(说明是 heuristic 截断,不是凭空生成)
+        probe = result.summary_text.replace("...", "").strip()[:50]
+        assert probe and probe in long_text, "降级摘要必须取自 cleaned_text 开头"
+        # notes 注明降级
+        assert "解析" in result.notes or "兜底" in result.notes or "降级" in result.notes
+
+    def test_llm_call_failure_returns_heuristic_summary(
+        self, cfg: VLAConfig, long_text: str,
+    ) -> None:
+        """LLM 抛异常(如 429 / 网络)→ 也走降级,不返回空。
+
+        与 QualityChecker 同款:**只**兜底 ValueError 不够 —— 429 也是常见失败
+        模式,RateLimitError 也走降级,而不是空。
+        """
+        llm = FakeLLM(raise_exc=RuntimeError("API quota exceeded"))
+        summarizer = VideoSummarizer(cfg, llm)
+
+        result = summarizer.summarize_one(long_text, title="t")
+
+        assert result.summary_text, "降级 fallback 不因 LLM 异常而返回空"
+        assert "RuntimeError" in result.notes or "quota" in result.notes.lower() \
+            or "调用失败" in result.notes
+
+    def test_heuristic_summary_truncates_at_punctuation(
+        self, cfg: VLAConfig, long_text: str,
+    ) -> None:
+        """heuristic 截断优先在句末标点处切,避免半句话。"""
+        llm = FakeLLM(response="纯文本无 JSON")
+        summarizer = VideoSummarizer(cfg, llm)
+
+        result = summarizer.summarize_one(long_text, title="t")
+
+        # 末尾以 "。" 或 "…" / "..." 收尾,不以半句话标点收尾
+        assert result.summary_text.endswith(("。", "…", "..."))
+
+    def test_empty_summary_text_from_llm_still_returns_empty(
+        self, cfg: VLAConfig, long_text: str,
+    ) -> None:
+        """LLM 真的返 summary_text=""(成功调用,但内容空)→ 仍返空。
+
+        这是**正常**成功路径上的空(LLM 主动选择空字符串),不是 fallback。
+        不该被降级覆盖 —— 降级只在"LLM 没说上话"时介入。
+        """
+        llm = FakeLLM(response='{"summary_text": ""}')
+        summarizer = VideoSummarizer(cfg, llm)
+
+        result = summarizer.summarize_one(long_text, title="t")
+
+        assert result.summary_text == ""
+        assert "空" in result.notes
 
 
 class TestWriteToFile:

@@ -31,8 +31,11 @@ LLM 注入契约(2026-09-10):
 - 调用方负责 QuotaManager 控制;本类**不**自己加限流
 
 失败 fallback:
-- LLM 调用失败 / 解析失败 / quota 用完 → 返回空 SummaryResult + notes 说明
+- LLM 调用失败 / 解析失败 / quota 用完 → 返回**降级** SummaryResult
+  (heuristic 取 cleaned_text 前 ~250 字)+ notes 注明降级与原因(2026-09-14)
 - 不抛错(主流程不因摘要失败中断)
+- 不返空 SummaryResult —— 旧契约下空 → write_summary 不写文件 → B4b
+  对账看不出"到底是 parse 失败还是根本没跑"。降级至少留个文件。
 """
 
 from __future__ import annotations
@@ -126,6 +129,53 @@ def sandwich_sample(text: str) -> str:
     separator = f"\n\n[...中间省略 {omitted} 字...]\n\n"
 
     return f"{head}{separator}{mid}{separator}{tail}"
+
+
+# 2026-09-14:heuristic 降级摘要长度上限(粗略对齐 FR-2.15d 的 ~250 字)。
+# 中文 ~250 字 ≈ 500 bytes,这里按字符算。截断时优先在句末标点处切;
+# cut 后再加 "..." 表示被截。
+_HEURISTIC_MAX_CHARS = 250
+_HEURISTIC_SENT_END = "。!?.!?"
+
+
+def _heuristic_summary(text: str, max_chars: int = _HEURISTIC_MAX_CHARS) -> str:
+    """LLM 失败兜底:取 cleaned_text 前 ~max_chars 字,优先在句末标点切。
+
+    现场事故:MiniMax-M3 撞 429 / parse_json_response 在边缘响应上抛
+    ValueError → 旧实现返空 SummaryResult → write_summary 不写文件 → B4b
+    对账发现"通过 4 但摘要只 2"且**看不出是 parse 失败**。降级策略:
+    取 cleaned_text 开头一段,优先切在。/!/?/. /!? 等标点处,补 "..." 收尾。
+    比空 SummaryResult 强 —— 至少能看出"该视频产出了内容,只是 LLM 没说话"。
+
+    Args:
+        text: cleaned_text(Refiner 输出后)
+        max_chars: 上限字符数(默认 250,对齐 FR-2.15d 200-300 字范围下界)
+
+    Returns:
+        截断后的字符串(可能为空:空 text)。收尾必为 "。" / "!" / "?" /
+        "…" / "..."(空串除外)。
+    """
+    text = text.strip()
+    if not text:
+        return ""
+
+    if len(text) <= max_chars:
+        return text
+
+    # 在 [max_chars, max_chars*2] 区间倒着找最近的句末标点,避免硬切半句话
+    candidate = text[: max_chars * 2]
+    cut_pos = max_chars
+    for i in range(max_chars - 1, -1, -1):
+        if i >= len(candidate):
+            continue
+        if candidate[i] in _HEURISTIC_SENT_END:
+            cut_pos = i + 1
+            break
+    truncated = candidate[:cut_pos].rstrip()
+    if cut_pos >= max_chars:
+        # 找不到合适的标点 → 强制在 max_chars 切 + 补 "..."
+        truncated = text[:max_chars].rstrip()
+    return truncated + "..."
 
 
 # ---------------- 主类 ----------------
@@ -236,10 +286,14 @@ class VideoSummarizer:
         try:
             response = llm.complete(full_prompt, max_tokens=4000, temperature=0.3)
         except Exception as e:
-            logger.warning("⚠️ LLM 摘要调用失败,返回空 SummaryResult:%s", e)
+            # 2026-09-14 降级兜底(同 QualityChecker 套路):
+            # 旧契约返空 SummaryResult → write_summary 不写文件 → B4b
+            # 对账看不出"是 LLM 抛了还是根本没跑"。降级:heuristic 取
+            # cleaned_text 前 ~250 字,notes 注明 LLM 异常。
+            logger.warning("⚠️ LLM 摘要调用失败,降级兜底(heuristic):%s", e)
             return SummaryResult(
-                summary_text="",
-                notes=f"LLM 调用失败:{type(e).__name__}:{str(e)[:100]}",
+                summary_text=_heuristic_summary(text),
+                notes=f"LLM 调用失败({type(e).__name__}:{str(e)[:100]}),采用 cleaned_text 截断兜底",
                 model=self.model,
             )
 
@@ -247,11 +301,15 @@ class VideoSummarizer:
         try:
             from vla.llm.response import parse_json_response
             data = parse_json_response(response)
-        except (ValueError, Exception) as e:
-            logger.warning("⚠️ LLM 摘要响应解析失败:%s", e)
+        except ValueError as e:
+            # 2026-09-14 降级兜底(同 QualityChecker):parse_json_response
+            # 抛 ValueError(LLM 响应无可解析 JSON)→ heuristic 摘要 + notes
+            # 注明降级。**只**接 ValueError;其它异常不归这里(走更外的
+            # except)。
+            logger.warning("⚠️ LLM 摘要响应解析失败,降级兜底(heuristic):%s", e)
             return SummaryResult(
-                summary_text="",
-                notes=f"LLM 响应解析失败:{e}",
+                summary_text=_heuristic_summary(text),
+                notes=f"LLM 响应解析失败:{e},采用 cleaned_text 截断兜底",
                 model=self.model,
             )
 

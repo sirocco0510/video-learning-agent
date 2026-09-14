@@ -59,16 +59,16 @@ class TestFromYaml:
         # 2026-09-10 轻量化:browser_plugin 字段已删除,不再断言。
 
         # llm_client 配置字段名(不是值)
-        # 2026-09-10:provider 从 minimax 切到 deepseek
-        # (MiniMax Token Plan 用量耗尽,Refiner 429 → 质量门控拿不到分数)
-        assert cfg.llm_client.provider == "deepseek"
+        # 2026-09-14:provider 从 deepseek 切回 minimax(deepseek-flash 余额
+        # 耗尽)。MiniMax-M3 是 hybrid thinking model,关掉 thinking_mode
+        # 防止 <think> 块吃光 max_tokens(实测推理 token 占满 → content 空)。
+        assert cfg.llm_client.provider == "minimax"
         assert cfg.llm_client.api_key_env == "OPENAI_API_KEY"
         assert cfg.llm_client.base_url_env == "OPENAI_BASE_URL"
-        # 2026-09-10 回归护栏:必须关推理。deepseek-flash 默认推理极啰嗦
-        # (实测 16232 reasoning tokens / 2507 字任务),这些 token 计入
-        # max_tokens,会把 Refiner 预算吃光 → content 空 → 静默回退原文。
+        # 2026-09-14 回归护栏:MiniMax-M3 必须关 thinking。开了 thinking 块
+        # 会把 max_tokens 预算吃光,Refiner / Summary 拿到空 content。
         # 删掉这行配置会让 Refiner 重新坏掉,别删。
-        assert cfg.llm_client.reasoning_effort == "none"
+        assert cfg.llm_client.thinking_mode == "disabled"
 
         # 2026-09-10 FR-2.30.1 回归护栏:路径 ② 抽音上限 = 30 分钟。
         # 30 分钟语音 ≈ 8700 字,再长会顶到 refine_max_chars / max_tokens 预算。

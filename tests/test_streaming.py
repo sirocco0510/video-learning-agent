@@ -192,6 +192,15 @@ class TestWhisperTranscribe:
         kwargs = mock_model.transcribe.call_args.kwargs
         assert kwargs["vad_filter"] is True
 
+    def test_condition_on_previous_text_disabled(self, transcriber, audio_file, mock_model):
+        """FR-3.11:必须显式关掉 —— faster-whisper 默认 True 会导致复读死循环。
+
+        真机事故(2026-09-11):某条 12:28 音频卡死 91 分钟、整批停摆。
+        """
+        transcriber.transcribe(audio_file)
+        kwargs = mock_model.transcribe.call_args.kwargs
+        assert kwargs["condition_on_previous_text"] is False
+
     def test_segments_joined_with_newline(self, transcriber, audio_file, mock_model):
         """segments 文本用 \\n 拼接返回。"""
         mock_model.transcribe.return_value = (

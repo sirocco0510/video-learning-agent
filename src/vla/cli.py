@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -24,6 +25,16 @@ from typing import TYPE_CHECKING, Any, Callable
 
 import typer
 import yaml
+
+# Windows 默认 console 是 gbk,typer.echo 打 emoji(📋 / 🏁 等)会 UnicodeEncodeError。
+# 在 CLI 启动早期把 stdout/stderr 切到 utf-8,让统计行 / dry-run 收尾能正常打印。
+for _stream in (sys.stdout, sys.stderr):
+    reconfigure = getattr(_stream, "reconfigure", None)
+    if callable(reconfigure):
+        try:
+            reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):  # 已关闭 / 不支持(测试环境)→ 跳过
+            pass
 
 from vla.utils.bvid import extract_bvid
 
@@ -537,6 +548,14 @@ def learn(
     前置:Chrome 已用 --remote-debugging-port=9222 启动并登录了 bill-jc。
     """
     import asyncio
+
+    # FR-11.15:`learn` 此前从不配日志 → 根 logger 停在 WARNING,所有
+    # logger.info 被静默丢弃(含"📄 第 N 页"/"⏭️ 跳过非视频条目"等)。
+    # 跳过非视频是**正常路径**不是告警,所以按 INFO 打,这里把闸门打开。
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
     from vla.learn import iter_course_tasks, run_course_batch, with_duration_resolution
     from vla.main import VideoLearningAgent
