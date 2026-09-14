@@ -531,3 +531,93 @@ class TestLazyLLMResolution:
 
         assert result.passed is False
         assert result.score == 20
+
+
+# ---------------- LLM 响应不可解析兜底(2026-09-14) ----------------
+
+
+class TestLLMUnparseableFallback:
+    """parse_json_response 抛 ValueError 时不该把整批带走(2026-09-14)。
+
+    现场事故:MiniMax-M3 在 Refiner / QualityChecker / VideoSummarizer 三处
+    都可能返回 `ValueError: LLM 响应中没有找到 JSON`。Refiner / Summary 已有
+    try/except 兜底,QualityChecker 没有 → batch 在第 11 条崩。
+
+    兜底契约(2026-09-14):
+    - parse_json_response 抛 ValueError → 不向上传播
+    - 返回 fallback QualityResult:passed=True(score=75,启发式已过;但**只**
+      信任启发式,LLM 没说话),issues 注明"LLM 响应无法解析",suggestion
+      提示人工核对
+    - **不**改 LLMException(LLMEmptyResponseError / OpenAIError)处理 —— 那
+      类真异常照旧上抛,让日志模块记
+    """
+
+    def test_valueerror_from_parser_returns_fallback_result(self, cfg, checker: QualityChecker):
+        """LLM 返不可解析的字符串 → 不抛 ValueError,改返兜底 QualityResult。"""
+        llm = FakeLLM(response="完全没 JSON 也没 code block 的纯文本")
+        checker.set_llm(llm)
+
+        result = checker.check(normal_text(600), "t", duration_sec=100, model_size="small")
+
+        assert isinstance(result, QualityResult)
+        assert result.passed is True, "启发式已过 + LLM 无信号 → 兜底 pass"
+        assert result.score == 75, "兜底固定 75(>min_score=50)"
+        assert any("无法解析" in i or "JSON" in i for i in result.issues), \
+            "issues 必须注明 LLM 响应无法解析"
+        assert "人工" in result.suggestion or "核对" in result.suggestion, \
+            "suggestion 必须提示人工核对"
+
+    def test_fallback_still_records_char_count(self, cfg, checker: QualityChecker):
+        """兜底 QualityResult 也必须填 char_count(下游契约)。"""
+        llm = FakeLLM(response="no json")
+        checker.set_llm(llm)
+
+        text = normal_text(600)
+        result = checker.check(text, "t", duration_sec=100, model_size="small")
+
+        assert result.char_count == len(text)
+
+    def test_json_decode_error_also_triggers_fallback(self, cfg, checker: QualityChecker):
+        """JSON 形似 dict 但 json.loads 仍 fail 时也应走兜底。
+
+        _try_parse_balanced_object 在 json.loads 失败时返回 None,而
+        parse_json_response 的 brace-counting 全失败后会 raise。这里通过
+        一个 `{"unclosed":` 之类输出来同时触发 skip 路径失败 + raise。
+        """
+        llm = FakeLLM(response='{"unclosed":')  # brace 不闭合 → raise
+        checker.set_llm(llm)
+
+        result = checker.check(normal_text(600), "t", duration_sec=100, model_size="small")
+
+        assert isinstance(result, QualityResult)
+        assert result.passed is True
+        assert result.score == 75
+
+    def test_non_valueerror_still_propagates(self, cfg, checker: QualityChecker):
+        """OpenAIError / LLMEmptyResponseError 等真异常仍应上抛,不被吞。
+
+        parse_json_response 只抛 ValueError;其它异常(网络 / LLM 限流 / 空
+        content)走它自己的链路,不该被这个兜底误吞。
+        """
+        class ExplodingLLM(FakeLLM):
+            def complete(self, prompt: str, max_tokens: int = 1000, temperature: float = 0.3) -> str:
+                self.calls.append({"prompt": prompt})
+                raise RuntimeError("模拟网络异常")
+
+        checker.set_llm(ExplodingLLM())
+
+        with pytest.raises(RuntimeError, match="模拟网络异常"):
+            checker.check(normal_text(600), "t", duration_sec=100, model_size="small")
+
+    def test_valid_json_response_does_not_trigger_fallback(self, cfg, checker: QualityChecker):
+        """正常 JSON 响应 → 走原解析路径,不动兜底。"""
+        llm = FakeLLM(response=make_pass_response(score=88))
+        checker.set_llm(llm)
+
+        result = checker.check(normal_text(600), "t", duration_sec=100, model_size="small")
+
+        # score=88(>50) + pass=true → passed=True,但 issues 应**不**含
+        # "无法解析"(否则说明错误触发了兜底)
+        assert result.passed is True
+        assert result.score == 88
+        assert not any("无法解析" in i for i in result.issues)

@@ -188,7 +188,35 @@ class QualityChecker:
         )
         response = llm.complete(prompt, max_tokens=2000)
         from vla.llm.response import parse_json_response
-        data = parse_json_response(response)
+
+        # 2026-09-14 兜底:parse_json_response 抛 ValueError → 不向上传播,
+        # 改返 fallback QualityResult(passed=True, score=75, 启发式已过)。
+        #
+        # 现场事故:Refiner / Summary 已有 try/except,QualityChecker 没有 →
+        # MiniMax-M3 在边缘 LLM 响应上抛 ValueError,**整批** vla learn 崩
+        # (不是 fail 单条,是崩全批)。这里与 Refiner / Summary 同款兜底:
+        # "解析失败" ≠ "内容不可用",启发式已经过了(cps 在范围 + 没重复)
+        # → 给个保守的 pass,issues 注明解析失败,留人工核对余地。
+        #
+        # **只**接 ValueError;OpenAIError / LLMEmptyResponseError 等真异常
+        # 仍上抛(由日志模块记,FR-3.5 风格)。
+        try:
+            data = parse_json_response(response)
+        except ValueError as e:
+            logger.warning(
+                "QualityChecker 解析 LLM 响应失败,走兜底: %s | raw[0:200]=%r",
+                e, response[:200],
+            )
+            return QualityResult(
+                passed=True,
+                score=75,
+                issues=[
+                    f"LLM 响应 JSON 无法解析(已兜底):{e}",
+                    "文本已通过语速 / 重复启发式预筛,但未经 LLM 语义审核",
+                ],
+                suggestion="建议人工核对转写文本,确认无错别字或语序混乱",
+                char_count=char_count,
+            )
 
         llm_pass = bool(data.get("pass", False))
         score = int(data.get("score", 0))
