@@ -1,4 +1,14 @@
-"""FFmpeg helper — 从输入(任意 ffmpeg 支持格式)抽 wav。
+"""Whisper 转写的音频预处理 — 从视频源抽 whisper 规格的 wav。
+
+**模块定位** — 本模块是 faster-whisper 流式转写的**前置步骤**,不是通用音频抽音工具:
+
+- 唯一调用方:``transcribe/streaming.py``(whisper streaming 入口)
+- 所有 wav 参数(16kHz、mono)都是 whisper 的输入需求,**不是** 通用音频规格;
+  移到 source/ 会让源端反过来"知道"下游是 whisper,耦合方向反了
+- 因此放在 ``transcribe/`` 下,而不是 ``source/``;历史原因见 commit ab54249
+
+如果未来要服务其他音频消费方(摘要 / 关键词提取),应抽到独立模块(如
+``audio_extract.py``),把 16k/mono 等 whisper 私有需求做成调用方传入的参数。
 
 调用方约定:
 - input_path 可以是 mp4/webm/m3u8 URL/本地路径
@@ -6,17 +16,18 @@
 - 失败时调用方负责决策(降级 / 报警);半截 wav 会被本模块清掉
 
 Phase 9.6.4(2026-09-10):新增 extract_browser_audio — 浏览器内 MediaRecorder 抽音,
-用于 yunxuetang (b-learning.bill-jc.com) BCE DRM-encrypted m3u8 兜底(ffmpeg 直抽
-被服务端 token 绑定 session 拒)。
+原用于 yunxuetang (b-learning.bill-jc.com) BCE DRM-encrypted m3u8 兜底(ffmpeg 直抽
+被服务端 token 绑定 session 拒)。**2026-09-14** 改为 ``main_provider`` 路径 ② m3u8
+失败时不再走 browser fallback(直接跳过视频);函数本身保留供测试 1x + 最低画质的
+耗时/性能。
 
-Phase 9.6.6(2026-09-10):extract_browser_audio 的 webm→wav 转换加 ffmpeg
-``-af atempo`` 后处理 — 4x 抓的音时间轴被压缩 4 倍,直送 whisper 会在快速连读场景
-产生同音字幻觉("资格资格资格" 刷 66 行)+ 数字串乱码;atempo=0.5 拉伸 2 倍后消失。
-详见 _BROWSER_CAPTURE_ATEMPO。
+Phase 9.6.6(2026-09-10,2026-09-14 移除):曾加 ffmpeg ``-af atempo`` 后处理,应对 4x
+抓音的语流压缩问题。**2026-09-14 改为 1x 原速播放后 atempo 不再需要**,该段删除。
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import subprocess
@@ -30,11 +41,11 @@ logger = logging.getLogger(__name__)
 
 
 def extract_audio(input_path: Path, output_path: Path) -> None:
-    """ffmpeg 抽 input → wav(output_path)。
+    """ffmpeg 抽 input → wav(output_path),按 whisper 输入规格(16kHz/mono)输出。
 
     Args:
         input_path: 任意 ffmpeg 支持格式(mp4/webm/m3u8/...)
-        output_path: 目标 wav 路径(需 .wav 后缀)
+        output_path: 目标 wav 路径(需 .wav 后缀,wav 会被写成 16kHz / mono)
 
     Raises:
         RuntimeError: ffmpeg 返回非 0
@@ -114,31 +125,36 @@ def extract_m3u8_audio(
 # 调用方通常显式传 `audio.max_extract_sec`;此处默认值只在漏传时兜底。
 _BROWSER_CAPTURE_MAX_DURATION_SEC = 1800
 
-# Default playback rate for browser-based audio capture. 4x means a 3h video
-# captures in ~45 min wall-clock. MediaRecorder gets audio at original sample
-# rate (browser internal resample) — the *sample rate* is unchanged, but the
-# *timeline* is compressed 4x, which whisper is NOT agnostic to (see
-# _BROWSER_CAPTURE_ATEMPO). Chromium supports playbackRate up to ~16x.
-_BROWSER_CAPTURE_PLAYBACK_RATE = 4.0
+# Default playback rate for browser-based audio capture (2026-09-14 由 4.0 改为 1.0)。
+# 1x = 原速播放,MediaRecorder 拿原始采样率 + 原始时间轴的音频,whisper 友好。
+# 之前的 4x 是为压缩 wall-clock(3h → 45min),但配合 atempo=0.5 后仍毁可懂度
+# (FR-2.30 实测 score 35 vs m3u8 直抽 92);2026-09-14 决定:
+#   - m3u8 失败不再 fallback 到 browser(见 main_provider.py 注释)
+#   - browser 函数保留供测试,默认改 1x 测基线耗时/性能
+_BROWSER_CAPTURE_PLAYBACK_RATE = 1.0
 
-# Phase 9.6.6+ (2026-09-10):4x 抓的音让 whisper 看到"时间轴压缩 4 倍"的语流 ——
-# 采样率没变,但音素密度是真实语速的 4 倍。快速连读场景(编程教程 / 公司简介 /
-# 商业宣传片)因此产生同音字幻觉("资格资格资格" 连刷 66 行)和数字串乱码,质量
-# 门控 fail。atempo 把时域拉伸 1/atempo 倍,把语流密度降回来。
+# MediaRecorder opus bitrate(2026-09-14 新增)。默认 16000 = 16kbps,opus 下限偏上,
+# 语音仍可懂但体积省 4x(对比默认 ~64kbps)。用于测试"最低画质"录屏的耗时/性能。
+# 调高 bitrate 改这里即可,JS 端从 payload `opusBitrate` 字段读。
+_BROWSER_CAPTURE_OPUS_BITRATE = 16000
+
+# Python-side 安全兜底(2026-09-14 新增):page.evaluate 套 asyncio.wait_for,
+# 防止 JS 线程死 / Chrome 标签页崩溃时 Python 无限等。JS 内 setTimeout 兜的是
+# "视频不结束 + DRMed stream NaN duration" 场景;Python 这层兜的是更狠的
+# "浏览器死了" 场景 — JS 引擎都不在了,setTimeout 不会触发,只能 Python 切。
 #
-# 0.5 = 拉伸 2 倍,即 4x 抓的音变成净 2x 速度(而非完全还原 1x)。
-# 793df1f8 实测(4min23s 编程 if-else 教程):wav 263s → 526s,字符 522 → 2899
-# (5.5x),"资格资格资格" 66 行 → 0 行,转出真实教学内容。
-#
-# 注:ffmpeg atempo 单级合法区间 [0.5, 100],0.5 正好是下边界 —— 要拉伸超过 2 倍
-# 必须链式(如 "atempo=0.5,atempo=0.5" = 4 倍),本模块只暴露单级因子。
-_BROWSER_CAPTURE_ATEMPO = 0.5
+# 默认 1800s(30 分钟),作为 capture wall-clock 硬上限。**含义**:
+#   - caller 传 max_duration_sec=1800 + 默认 safety = capture 最长 1800s(正常)
+#   - caller 传 max_duration_sec=7200(2 小时)+ 默认 safety = capture 实际封顶 1800s
+#     → 这正是"防 max_duration 误传太大"的设计意图;故意要长视频请改这里
+#   - 触发时直接 RuntimeError,不重试(走 main_provider 的"m3u8 失败 → 跳过视频"分支)
+_BROWSER_CAPTURE_SAFETY_TIMEOUT_SEC = 1800
 
 # JS that runs inside the navigated page: force-play the <video>, captureStream() its
 # audio track, MediaRecorder → webm/opus chunks → base64 to Python. Awaits either
 # "ended" event or maxDurationSec timeout (whichever first).
 _BROWSER_CAPTURE_JS = """
-async ({maxDurationSec, playbackRate}) => {
+async ({maxDurationSec, playbackRate, opusBitrate, disableCapture, mute}) => {
     const video = document.querySelector("video");
     if (!video) throw new Error("No <video> element");
 
@@ -149,15 +165,16 @@ async ({maxDurationSec, playbackRate}) => {
         try { video.currentTime = 0; } catch(e) { /* seek 失败也继续 */ }
     }
 
-    // Ensure autoplay (may need muted first); some browsers require user gesture,
-    // but a fresh tab navigated by Playwright usually allows muted autoplay.
-    video.muted = false;
-    // Speed up playback so capture wall-clock is compressed (3h video @ 4x → 45min).
-    // MediaRecorder gets audio at original sample rate (browser internal resample), so
-    // the *sample rate* is preserved — but the *timeline* is compressed by this factor,
-    // which faster-whisper is NOT agnostic to. The Python side undoes the compression
-    // with ffmpeg atempo (see _BROWSER_CAPTURE_ATEMPO); without it, fast continuous
-    // speech produces homophone hallucinations.
+    // 2026-09-14 静音播放(默认 True):watch 模式 + 真实 capture 都默认静音。
+    // 影响:
+    //   - 浏览器音频输出静音,不会突然响(打扰用户)
+    //   - captureStream() **仍拿到音频数据**(mute 只影响 audio output,不影响
+    //     MediaStream source),所以 MediaRecorder 录到的内容不变
+    //   - 自动播放更稳(浏览器对 muted autoplay 比 unmuted 更友好,无需用户手势)
+    video.muted = mute;
+    // 2026-09-14:playbackRate 改为默认 1x(原速播放),MediaRecorder 拿到原始采样率
+    // + 原始时间轴的音频,whisper 友好。
+    // (FR-2.30 实测 score 35 vs m3u8 直抽 92),所以此处不压缩时间轴。
     video.playbackRate = playbackRate;
     try { await video.play(); } catch(e) { /* autoplay restricted; will still record if stream is live */ }
 
@@ -169,34 +186,66 @@ async ({maxDurationSec, playbackRate}) => {
         setTimeout(() => reject(new Error("video readyState timeout")), 10000);
     });
 
-    const stream = video.captureStream();
-    const audioTracks = stream.getAudioTracks();
-    if (audioTracks.length === 0) throw new Error("No audio track");
-    const audioStream = new MediaStream(audioTracks);
+    // 2026-09-14:JS 侧读取 video.duration 当 setTimeout 上限(替代硬编码 maxDurationSec)。
+    // 之前 setTimeout 用的就是 maxDurationSec / playbackRate,DRM 视频时长已知却仍被短
+    // 上限截断(典型场景:catalog 默认 --max-sec=30,但视频实际 5min,JS 30s 就退出)。
+    // 修复:用 min(video.duration, maxDurationSec) 当 setTimeout bound,前者让视频自然
+    // 播完,后者保留用户硬限速(短测试时仍可截断)。DRM HLS 流 duration 可能 NaN /
+    // Infinity → isFinite 兜底 1800s(=_BROWSER_CAPTURE_MAX_DURATION_SEC,防止
+    // setTimeout(NaN) 永远不触发把 JS 挂死)。
+    const rawDur = isFinite(video.duration) && video.duration > 0
+        ? Math.ceil(video.duration) : 1800;
+    const videoDuration = rawDur;
+    const waitMs = Math.min(videoDuration, maxDurationSec) * 1000 / playbackRate;
 
-    const recorder = new MediaRecorder(audioStream, { mimeType: "audio/webm;codecs=opus" });
-    window.__vlaChunks = [];
-    recorder.ondataavailable = e => { if (e.data.size > 0) window.__vlaChunks.push(e.data); };
-    recorder.start(1000);  // 1s chunk granularity
+    // 2026-09-14 spike(debug 旋钮):disableCapture=true → 跳过 MediaRecorder 全流程,
+    // 只测超时等待(JS 端 setTimeout / video.ended vs Python 端 asyncio.wait_for)。
+    // 默认 false,生产路径不变。
+    if (!disableCapture) {
+        const stream = video.captureStream();
+        const audioTracks = stream.getAudioTracks();
+        if (audioTracks.length === 0) throw new Error("No audio track");
+        const audioStream = new MediaStream(audioTracks);
+
+        // 2026-09-14:audioBitsPerSecond 从 payload opusBitrate 读取,默认 16000 (16kbps)。
+        // opus 下限偏上,语音仍可懂但体积省 4x(对比默认 ~64kbps)。用于测"最低画质"耗时/性能。
+        const recorder = new MediaRecorder(audioStream, {
+            mimeType: "audio/webm;codecs=opus",
+            audioBitsPerSecond: opusBitrate,
+        });
+        window.__vlaChunks = [];
+        recorder.ondataavailable = e => { if (e.data.size > 0) window.__vlaChunks.push(e.data); };
+        recorder.start(1000);  // 1s chunk granularity
+        window.__vlaStartTime = Date.now();
+
+        await new Promise((resolve) => {
+            const onEnded = () => resolve();
+            video.addEventListener("ended", onEnded, { once: true });
+            // 2026-09-14:用 waitMs(video.duration 与 maxDurationSec 的较小者)替代硬编码
+            // maxDurationSec,保证视频能自然播完,不被误传短 maxDurationSec 截断。
+            setTimeout(resolve, waitMs);
+        });
+
+        recorder.stop();
+        await new Promise(r => { recorder.onstop = r; });
+
+        const blob = new Blob(window.__vlaChunks, { type: "audio/webm" });
+        const buf = await blob.arrayBuffer();
+        const u8 = new Uint8Array(buf);
+        let bin = "";
+        for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
+        return { b64: btoa(bin), duration: (Date.now() - window.__vlaStartTime) / 1000, video_duration: videoDuration };
+    }
+
+    // disableCapture 路径:不录,只跑超时等待(同样的 ended-or-setTimeout 竞速)
     window.__vlaStartTime = Date.now();
-
     await new Promise((resolve) => {
         const onEnded = () => resolve();
         video.addEventListener("ended", onEnded, { once: true });
-        // Wall-clock budget scaled by playbackRate so maxDurationSec stays in
-        // real-time seconds (not video-time seconds).
-        setTimeout(resolve, (maxDurationSec / playbackRate) * 1000);
+        // 2026-09-14:同上,waitMs 用 min(video.duration, maxDurationSec),不要硬编码
+        setTimeout(resolve, waitMs);
     });
-
-    recorder.stop();
-    await new Promise(r => { recorder.onstop = r; });
-
-    const blob = new Blob(window.__vlaChunks, { type: "audio/webm" });
-    const buf = await blob.arrayBuffer();
-    const u8 = new Uint8Array(buf);
-    let bin = "";
-    for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
-    return { b64: btoa(bin), duration: (Date.now() - window.__vlaStartTime) / 1000 };
+    return { b64: "", duration: (Date.now() - window.__vlaStartTime) / 1000, video_duration: videoDuration };
 }
 """
 
@@ -208,12 +257,14 @@ async def extract_browser_audio(
     cdp_url: str = "http://localhost:9222",
     max_duration_sec: int = _BROWSER_CAPTURE_MAX_DURATION_SEC,
     playback_rate: float = _BROWSER_CAPTURE_PLAYBACK_RATE,
-    atempo: float = _BROWSER_CAPTURE_ATEMPO,
+    disable_capture: bool = False,
+    mute: bool = True,
 ) -> Path:
     """浏览器内 MediaRecorder 抽音 → webm → ffmpeg → wav。
 
-    用于 yunxuetang (b-learning.bill-jc.com) BCE DRM-encrypted m3u8 兜底:服务端
-    key token 按 session 发放, ffmpeg 直抽会 400 拒。
+    用于 yunxuetang (b-learning.bill-jc.com) BCE DRM-encrypted m3u8 兜底:**2026-09-14
+    后 main_provider.py 不再调用本函数**(m3u8 失败 → 直接跳过);保留供测试 1x +
+    最低 opus bitrate 的耗时/性能。
 
     流程:
       1. async_playwright + chromium.connect_over_cdp(cdp_url) 借用户主 Chrome
@@ -221,9 +272,9 @@ async def extract_browser_audio(
       3. **SPA 重置**:先 goto bill-jc 根 URL 让 SPA 初始化(否则 new_page 后的空白
          tab 默认 route 不是视频学习页,button.yxtf-button--primary 永远不渲染)
       4. goto video_url → 等 button → 点"开始学习" → 等 <video> ready →
-         playbackRate 加速 → MediaRecorder 录 webm/opus
-      5. base64 传回 Python → 临时 webm → ffmpeg -vn -ac 1 -ar 16000
-         **-af atempo={atempo}** 转 wav(tempo 拉伸把 4x 压缩的语流密度降回来)
+         playbackRate 加速 → MediaRecorder 录 webm/opus(audioBitsPerSecond = 16kbps)
+      5. base64 传回 Python → 临时 webm → ffmpeg -vn -ac 1 -ar 16000 转 wav
+         (**2026-09-14 移除 atempo**,1x 抓的音不需要拉伸回 2x)
       6. unlink webm(磁盘友好), close page
 
     Args:
@@ -231,11 +282,16 @@ async def extract_browser_audio(
         output_path: 目标 wav 路径(需 .wav 后缀)
         cdp_url: Chrome CDP 端点(默认 localhost:9222)
         max_duration_sec: 视频时长上限(秒,video-time;非 wall-clock);超过兜底停录
-        playback_rate: HTMLMediaElement.playbackRate,默认 4x(3h 视频 → 45min
-            捕获;MediaRecorder 拿原始采样率音频,浏览器内部 resample)
-        atempo: ffmpeg atempo 因子,默认 0.5(时域拉伸 2 倍)。4x 抓的音因此变成
-            净 2x 速度 —— 不拉伸(1.0)会让 whisper 在快速连读场景产生同音字幻觉。
-            合法区间 [0.5, 100];0.5 是下边界,更慢需链式。
+        playback_rate: HTMLMediaElement.playbackRate,**默认 1.0**(2026-09-14 由 4.0
+            改为 1.0,原速播放,whisper 友好)。MediaRecorder 拿原始采样率音频,
+            浏览器内部 resample。opus bitrate 见模块常量 ``_BROWSER_CAPTURE_OPUS_BITRATE``
+            (默认 16000 = 16kbps,2026-09-14 新增,用于测试"最低画质")。
+        disable_capture: True → 跳过 MediaRecorder 抓音,只测超时等待
+            (2026-09-14 spike 用,生产默认 False)。
+        mute: True → ``video.muted = true`` 静音播放(2026-09-14 加,默认 True)。
+            只影响 audio output,**不影响** captureStream()(仍抓到原音频)→
+            MediaRecorder 录到的内容不变。好处是用户不会被突然的视频声音打扰,
+            且 muted autoplay 比 unmuted 更稳(浏览器无需 user gesture)。
 
     Returns:
         output_path
@@ -317,12 +373,50 @@ async def extract_browser_audio(
                 ) from e
 
             try:
-                result = await page.evaluate(
-                    _BROWSER_CAPTURE_JS,
-                    {"maxDurationSec": max_duration_sec, "playbackRate": playback_rate},
+                # 2026-09-14:套 asyncio.wait_for 兜底,防止 Chrome 标签页崩溃 / OOM 时
+                # JS 线程死、setTimeout 也不触发 → Python 无限等。safety 触发时直接抛
+                # RuntimeError,触发者走 main_provider "m3u8 失败 → 跳过" 分支。
+                result = await asyncio.wait_for(
+                    page.evaluate(
+                        _BROWSER_CAPTURE_JS,
+                        {
+                            "maxDurationSec": max_duration_sec,
+                            "playbackRate": playback_rate,
+                            "opusBitrate": _BROWSER_CAPTURE_OPUS_BITRATE,
+                            "disableCapture": disable_capture,
+                            "mute": mute,
+                        },
+                    ),
+                    timeout=_BROWSER_CAPTURE_SAFETY_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                # safety timeout 触发 — JS 引擎死了 / 浏览器崩了。
+                # finally 仍会跑(关 page + 清 webm),然后异常往外冒。
+                raise RuntimeError(
+                    f"browser audio capture safety timeout {_BROWSER_CAPTURE_SAFETY_TIMEOUT_SEC}s "
+                    "(setTimeout + video.ended + asyncio.wait_for all failed; "
+                    "possible Chrome tab crash / OOM)"
                 )
             except Exception as e:
                 raise RuntimeError(f"browser audio capture failed: {e}") from e
+
+            # 2026-09-14 spike(debug 旋钮):disable_capture=True → 跳过 b64 解码 + webm
+            # 落盘 + ffmpeg 转 wav,只测超时等待。output_path 不被创建(spike 自己判断)。
+            # 返回 output_path 让调用方签名兼容,但文件**不**存在 — 调用方应检查。
+            if disable_capture:
+                # 2026-09-14:日志加 video_duration 字段,让 watch 模式能区分:
+                #   - video_duration < wall-clock / playbackRate → 视频自然 ended,
+                #     JS wall-clock 接近真实 duration(略大是因为 setTimeout 仍挂在事件循环)
+                #   - video_duration ≈ max_duration_sec → JS 等到上限被截
+                #   - video_duration < wall-clock / playbackRate < max_duration_sec →
+                #     视频结束时间晚于 wall-clock,异常(几乎不该发生)
+                logger.info(
+                    "[NO-CAPTURE] skip b64 decode / webm / ffmpeg,"
+                    " wall-clock=%.2fs reported_by_js, video_duration=%s",
+                    result.get("duration", 0.0) if result else 0.0,
+                    f"{result.get('video_duration')}s" if result and result.get("video_duration") is not None else "unknown",
+                )
+                return output_path
 
             if not result or not result.get("b64"):
                 raise RuntimeError("browser audio capture failed: empty b64 payload")
@@ -339,11 +433,8 @@ async def extract_browser_audio(
                     "ffmpeg", "-y", "-loglevel", "error",
                     "-i", str(webm_path),
                     "-vn", "-ac", "1", "-ar", "16000",
-                    # Phase 9.6.6+ (2026-09-10):4x 抓的音时间轴被压缩 4 倍,atempo
-                    # 拉伸 1/atempo 倍把语流密度降回 whisper 友好区间(默认 0.5
-                    # = 净 2x)。不拉伸会在快速连读场景产生同音字幻觉,详见
-                    # _BROWSER_CAPTURE_ATEMPO 注释。
-                    "-af", f"atempo={atempo}",
+                    # 2026-09-14:1x 原速播放后,webm 音频时间轴未压缩,无需 atempo 拉伸。
+                    # 之前 Phase 9.6.6 (2026-09-10) 用的 `-af atempo=0.5` 已删除。
                     "-f", "wav", str(output_path),
                 ]
                 proc = subprocess.run(cmd, capture_output=True, text=True)

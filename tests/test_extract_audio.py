@@ -350,11 +350,11 @@ async def test_extract_browser_audio_returns_runtimeerror_when_capture_stream_em
 
 @pytest.mark.asyncio
 async def test_extract_browser_audio_passes_playback_rate_to_js(tmp_path, monkeypatch):
-    """验证 playback_rate=4 默认值 + 自定义值都正确传给 page.evaluate。
+    """验证 playback_rate=1.0 默认值(2026-09-14 由 4.0 改为 1.0)+ 自定义值都正确传给 page.evaluate。
 
-    3h 视频 @ 4x → 45min wall-clock。MediaRecorder 拿原始采样率音频 —— 采样率不受
-    影响,但时间轴被压缩 4 倍,whisper 对**时间轴**敏感(所以才有 atempo 后处理,
-    见 test_extract_browser_audio_applies_atempo_stretch_to_ffmpeg)。
+    1x = 原速播放,MediaRecorder 拿到原始采样率 + 原始时间轴的音频,whisper 友好。
+    之前的 4x + atempo=0.5 组合会毁可懂度(FR-2.30 实测 score 35 vs m3u8 直抽 92),
+    所以默认改回 1x,不再需要 atempo 拉伸。
     """
     out_wav = tmp_path / "browser.wav"
     fake_browser, fake_page = _make_fake_browser()
@@ -379,7 +379,7 @@ async def test_extract_browser_audio_passes_playback_rate_to_js(tmp_path, monkey
     # 第二次的 call_args 才有 playbackRate 参数
     capture_args = fake_page.evaluate.call_args_list[1]
     capture_payload = capture_args[0][1]  # (_BROWSER_CAPTURE_JS, payload)
-    assert capture_payload["playbackRate"] == 4.0
+    assert capture_payload["playbackRate"] == 1.0
     # FR-2.30.1:默认上限由 3600 降为 1800(只抽前 30 分钟)
     assert capture_payload["maxDurationSec"] == 1800
 
@@ -615,22 +615,65 @@ async def test_extract_browser_audio_click_js_matches_multiple_learning_states(
 
 
 # -----------------------------------------------------------------------------
-# atempo 后处理(Phase 9.6.6+)— 4x 抓的音拉伸回 2x,消同音字幻觉
+# 2026-09-14:1x 原速 + 最低 opus bitrate(替代 2026-09-10 的 4x + atempo=0.5)
+# 验证 opusBitrate 走通 payload + ffmpeg 不再有 atempo 滤镜
 # -----------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_extract_browser_audio_applies_atempo_stretch_to_ffmpeg(
+async def test_extract_browser_audio_passes_opus_bitrate_to_js(
     tmp_path, monkeypatch,
 ):
-    """Phase 9.6.6+ (2026-09-10):browser 4x 抓的 webm 必须经 `-af atempo=0.5` 拉伸
-    2 倍再落 wav。
+    """验证 2026-09-14 新增的 opusBitrate 字段走通 page.evaluate payload。
 
-    Why:4x 抓的音让 whisper 看到"时间轴压缩 4 倍"的语流,快速连读场景产生同音字
-    幻觉 + 数字串乱码,质量门控 fail。793df1f8 实测 4min23s 编程教程:wav 263s→526s,
-    字符 522→2899(5.5x),"资格资格资格" 66 行 → 0 行,识别出真实 if-else 教学内容。
+    默认值 = ``_BROWSER_CAPTURE_OPUS_BITRATE`` (16000 = 16kbps),"最低画质"
+    测试用。opus 16kbps 仍是语音可懂区间(vs 默认 64kbps),但体积省 4x。
+    """
+    from vla.transcribe.extract import _BROWSER_CAPTURE_OPUS_BITRATE
 
-    验证:ffmpeg 命令行必须带 atempo=0.5(4x 抓 → 净 2x 速度)。
+    out_wav = tmp_path / "browser.wav"
+    fake_browser, fake_page = _make_fake_browser()
+
+    ap = MagicMock()
+    ap.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+    ap.return_value.__aenter__.return_value.chromium = MagicMock()
+    ap.return_value.__aenter__.return_value.chromium.connect_over_cdp = AsyncMock(return_value=fake_browser)
+    ap.return_value.__aexit__ = AsyncMock(return_value=None)
+
+    def fake_ffmpeg_run(cmd, **kwargs):
+        Path(cmd[cmd.index("-f") + 2]).write_bytes(b"RIFF")
+        return MagicMock(returncode=0, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_ffmpeg_run)
+
+    with patch("vla.transcribe.extract.async_playwright", ap):
+        await extract_browser_audio("https://b-learning.bill-jc.com/kng/#/video/play?kngId=x", out_wav)
+
+    # evaluate 调 2 次: ①点开始学习(返 True) ②跑 MediaRecorder(返 b64)
+    # 第二次的 call_args 才有完整 payload(opusBitrate 在 MediaRecorder capture JS 里)
+    capture_args = fake_page.evaluate.call_args_list[1]
+    capture_payload = capture_args[0][1]  # (_BROWSER_CAPTURE_JS, payload)
+    assert capture_payload["opusBitrate"] == _BROWSER_CAPTURE_OPUS_BITRATE, (
+        f"opusBitrate 默认值漂移,常量={_BROWSER_CAPTURE_OPUS_BITRATE},"
+        f"payload={capture_payload.get('opusBitrate')}"
+    )
+    # sanity: 默认 16000 是"最低画质"基线,后续 capture 质量调优时改这个值
+    assert capture_payload["opusBitrate"] == 16000, (
+        "opusBitrate 默认应保持 16000(16kbps),"
+        "调高需同时改 _BROWSER_CAPTURE_OPUS_BITRATE 常量 + 此处断言"
+    )
+
+
+@pytest.mark.asyncio
+async def test_extract_browser_audio_ffmpeg_skips_atempo_after_1x_switch(
+    tmp_path, monkeypatch,
+):
+    """2026-09-14:playbackRate 改 1x 后,ffmpeg webm→wav 不再需要 ``-af atempo`` 拉伸。
+
+    之前 4x + atempo=0.5 的组合用于把时间轴压缩 4 倍的语流拉回 2x;1x 原速后
+    MediaRecorder 拿的就是原始时间轴,直接转 wav 即可。
+
+    验证:ffmpeg 命令行不含 ``-af`` 滤镜(回归测试,防有人误加 atempo)。
     """
     out_wav = tmp_path / "browser.wav"
     fake_browser, _ = _make_fake_browser()
@@ -655,26 +698,72 @@ async def test_extract_browser_audio_applies_atempo_stretch_to_ffmpeg(
 
     assert len(captured_ffmpeg_cmds) == 1
     cmd = captured_ffmpeg_cmds[0]
-    assert "-af" in cmd, f"ffmpeg 必须带 atempo 滤镜,got: {cmd}"
-    filter_arg = cmd[cmd.index("-af") + 1]
-    assert filter_arg == "atempo=0.5", (
-        f"4x 抓的音必须拉伸回 2 倍(atempo=0.5),got: {filter_arg!r}"
+    assert "-af" not in cmd, (
+        f"1x 原速后 ffmpeg 不该有 -af 滤镜(回归保护,防 atempo 重新加入),got: {cmd}"
     )
-    # 滤镜必须在输入之后(ffmpeg 语法要求 -af 作用于已声明的输入)
-    assert cmd.index("-af") > cmd.index("-i")
+    assert "atempo" not in " ".join(cmd), (
+        f"1x 原速后 ffmpeg 命令不该含 atempo,got: {cmd}"
+    )
+    # 健全性:输出格式仍是 wav 16kHz mono
+    assert "wav" in cmd
+    assert "-ar" in cmd and "16000" in cmd
+    assert "-ac" in cmd and "1" in cmd
     assert out_wav.exists()
 
 
-@pytest.mark.asyncio
-async def test_extract_browser_audio_atempo_is_overridable(tmp_path, monkeypatch):
-    """atempo 可显式覆盖:atempo=1.0 = 不拉伸(4x 直出,退回旧行为)。
+# -----------------------------------------------------------------------------
+# 2026-09-14:Python-side asyncio.wait_for 兜底(防 Chrome 标签页崩溃时 Python 挂死)
+# -----------------------------------------------------------------------------
 
-    atempo 单级合法区间是 [0.5, 100](ffmpeg 硬限制),0.5 正好是下边界 ——
-    想要比 2 倍更慢必须链式(如 ``atempo=0.5,atempo=0.5`` = 4 倍拉伸),本函数
-    只暴露单级因子。
+
+def test_extract_browser_audio_default_safety_timeout_is_30_minutes():
+    """2026-09-14 增补:硬安全兜底默认 30 分钟(1800s)。
+
+    兜的是 JS 线程死了 / Chrome 标签页 OOM 的场景 — 此时 JS 内 setTimeout 也不触发,
+    Python 这层 asyncio.wait_for 必须切。改这个值需要同步改这条测试。
     """
+    from vla.transcribe.extract import _BROWSER_CAPTURE_SAFETY_TIMEOUT_SEC
+    assert _BROWSER_CAPTURE_SAFETY_TIMEOUT_SEC == 1800, (
+        f"safety timeout 默认应保持 30 分钟,got: {_BROWSER_CAPTURE_SAFETY_TIMEOUT_SEC}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_extract_browser_audio_safety_timeout_raises_runtimeerror(
+    tmp_path, monkeypatch,
+):
+    """2026-09-14 增补:page.evaluate 挂死超过 safety timeout → RuntimeError,Python 不挂死。
+
+    模拟 Chrome 标签页崩溃:OOM / JS 线程死 → setTimeout 也不触发。
+    安全兜底 30 分钟 = _BROWSER_CAPTURE_SAFETY_TIMEOUT_SEC。
+
+    测试加速:monkeypatch 把 safety 降到 0.2s,page.evaluate 模拟 sleep 2s 挂死,
+    验证 0.2s 后 RuntimeError 抛出(而非 Python 无限等)。
+    """
+    import asyncio as _asyncio
+    from vla.transcribe import extract as extract_mod
+
+    # 把 safety 临时降到 0.2s,加速测试(safety 默认 1800s,跑测试会等到天荒地老)
+    monkeypatch.setattr(extract_mod, "_BROWSER_CAPTURE_SAFETY_TIMEOUT_SEC", 0.2)
+
     out_wav = tmp_path / "browser.wav"
-    fake_browser, _ = _make_fake_browser()
+    fake_browser, fake_page = _make_fake_browser()
+
+    # extract_browser_audio 调 page.evaluate 两次:
+    #   ① 点开始学习 button (JS: innerText + click)— 应立刻返回 "开始学习"
+    #   ② 跑 MediaRecorder capture JS — 必须 hang,触发 safety timeout
+    # 用计数器 wrapper 替代 AsyncMock.side_effect:AsyncMock 把 coroutine 当成普通
+    # 值返回(没 await),wrapper 自己 await sleep 才会被 wait_for 切。
+    call_count = [0]
+
+    async def evaluate_wrapper(*args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return "开始学习"
+        # 第二次:hang 2.0s(远超 0.2s safety),被 wait_for 在 0.2s 处切掉
+        await _asyncio.sleep(2.0)
+
+    fake_page.evaluate = evaluate_wrapper
 
     ap = MagicMock()
     ap.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
@@ -682,19 +771,304 @@ async def test_extract_browser_audio_atempo_is_overridable(tmp_path, monkeypatch
     ap.return_value.__aenter__.return_value.chromium.connect_over_cdp = AsyncMock(return_value=fake_browser)
     ap.return_value.__aexit__ = AsyncMock(return_value=None)
 
-    captured_ffmpeg_cmds: list = []
+    # ffmpeg 不该被调用(evaluate 在那之前就超时了)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: MagicMock(returncode=0, stderr=""))
+
+    t0 = __import__("time").monotonic()
+    with patch("vla.transcribe.extract.async_playwright", ap):
+        with pytest.raises(RuntimeError, match="safety timeout"):
+            await extract_browser_audio("https://x.com/play", out_wav)
+    elapsed = __import__("time").monotonic() - t0
+
+    # 必须在 ~0.2s + 一些开销 内抛(允许到 1s 留 pytest fixture 余量)
+    assert elapsed < 1.5, (
+        f"safety timeout 触发太慢,expected <1s,got: {elapsed:.2f}s"
+    )
+    # finally 仍要关 page
+    fake_page.close.assert_called_once()
+    # ffmpeg 不该被调
+    # (subprocess.run 被 monkeypatch 成 no-op,不直接断言调用次数避免脆)
+    # wav 不该存在(evaluate 超时 → 不进入 webm→wav 阶段)
+    assert not out_wav.exists()
+
+
+@pytest.mark.asyncio
+async def test_extract_browser_audio_uses_wait_for_around_evaluate():
+    """回归保护:extract_browser_audio 源码内 page.evaluate 必须套 asyncio.wait_for。
+
+    静态扫描 — 不验运行时行为(那个由上面 test 验),只验"有人不小心把 wait_for 删了"
+    这种回归。inspect.getsource 是最便宜的 guard,毫秒级跑完。
+    """
+    import inspect
+    from vla.transcribe.extract import extract_browser_audio
+    src = inspect.getsource(extract_browser_audio)
+    # 必须含 wait_for 包住 page.evaluate
+    assert "asyncio.wait_for(" in src, (
+        "extract_browser_audio 必须用 asyncio.wait_for 包 page.evaluate "
+        "(防 Chrome 标签页崩溃时 Python 挂死)"
+    )
+    assert "page.evaluate(" in src
+    # 源码里有两处 page.evaluate(308 行 button click + 341 行 capture JS),
+    # safety 只覆盖后者(capture 可挂几小时,button click 30s Playwright 自带超时够了)。
+    # 验证 wait_for 紧贴第二处 page.evaluate:用正则找 `await asyncio.wait_for(\n` 后面跟 `page.evaluate(`
+    import re
+    pattern = re.compile(
+        r"await\s+asyncio\.wait_for\(\s*\n\s*page\.evaluate\(",
+        re.MULTILINE,
+    )
+    assert pattern.search(src), (
+        "asyncio.wait_for 必须紧贴 capture page.evaluate 调用\n"
+        "(button click evaluate 不需要 safety,只用 Playwright 自带 timeout 即可)"
+    )
+
+
+# -----------------------------------------------------------------------------
+# 2026-09-14:disable_capture debug 旋钮 — 跳过 MediaRecorder + webm + ffmpeg,
+# 只测超时等待(spike 用,生产路径不变)
+# -----------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_extract_browser_audio_disable_capture_skips_webm_and_ffmpeg(
+    tmp_path, monkeypatch,
+):
+    """disable_capture=True → JS 跳 MediaRecorder + Python 跳 b64/webm/ffmpeg。
+
+    验证:
+      - JS payload 含 disableCapture=true
+      - 返回的 b64 为空(JS 没录)
+      - wav 文件**不**被创建(finally 不写盘)
+      - ffmpeg 不被调
+      - 仍走 asyncio.wait_for(timeout=1800)(safety 兜底不变)
+    """
+    out_wav = tmp_path / "browser.wav"
+    fake_browser, fake_page = _make_fake_browser()
+
+    # capture JS 返空 payload(disable_capture 路径 JS 返 { b64: "", duration: ... })
+    # 用 AsyncMock side_effect:第一次返 "开始学习"(button click JS),
+    # 第二次返空 dict(capture JS 在 disableCapture=true 时的产物)。
+    # AsyncMock 把 dict 当返回值(direct await result),不需要手动 await。
+    fake_page.evaluate = AsyncMock(
+        side_effect=["开始学习", {"b64": "", "duration": 0.0}],
+    )
+
+    ap = MagicMock()
+    ap.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+    ap.return_value.__aenter__.return_value.chromium = MagicMock()
+    ap.return_value.__aenter__.return_value.chromium.connect_over_cdp = AsyncMock(return_value=fake_browser)
+    ap.return_value.__aexit__ = AsyncMock(return_value=None)
+
+    # ffmpeg 不该被调 — 用 sentinel,如果被调则测试失败
+    ffmpeg_called = [False]
 
     def fake_ffmpeg_run(cmd, **kwargs):
-        captured_ffmpeg_cmds.append(cmd)
+        ffmpeg_called[0] = True
+        return MagicMock(returncode=0, stderr="")
+
+    monkeypatch.setattr("vla.transcribe.extract.subprocess.run", fake_ffmpeg_run)
+
+    with patch("vla.transcribe.extract.async_playwright", ap):
+        result = await extract_browser_audio(
+            "https://b-learning.bill-jc.com/kng/#/video/play?kngId=x",
+            out_wav,
+            disable_capture=True,
+        )
+
+    # 函数仍返 output_path(签名兼容),但文件**不**存在
+    assert result == out_wav
+    assert not out_wav.exists(), (
+        "disable_capture 模式不该创建 wav(没录就没东西可转)"
+    )
+    # ffmpeg 绝不该被调
+    assert not ffmpeg_called[0], (
+        "disable_capture 模式不该调 ffmpeg"
+    )
+    # page 仍要关(finally)
+    fake_page.close.assert_called_once()
+
+    # JS payload 应含 disableCapture=True
+    capture_args = fake_page.evaluate.call_args_list[1]
+    capture_payload = capture_args[0][1]
+    assert capture_payload["disableCapture"] is True, (
+        f"disableCapture 字段必须 = True,got: {capture_payload.get('disableCapture')}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_extract_browser_audio_disable_capture_default_is_false(
+    tmp_path, monkeypatch,
+):
+    """disable_capture 默认 False — 回归保护,生产路径不该受影响。
+
+    不传 disable_capture → JS payload 含 disableCapture=False → MediaRecorder 走默认路径。
+    """
+    out_wav = tmp_path / "browser.wav"
+    fake_browser, fake_page = _make_fake_browser()
+
+    ap = MagicMock()
+    ap.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+    ap.return_value.__aenter__.return_value.chromium = MagicMock()
+    ap.return_value.__aenter__.return_value.chromium.connect_over_cdp = AsyncMock(return_value=fake_browser)
+    ap.return_value.__aexit__ = AsyncMock(return_value=None)
+
+    def fake_ffmpeg_run(cmd, **kwargs):
         Path(cmd[cmd.index("-f") + 2]).write_bytes(b"RIFF")
         return MagicMock(returncode=0, stderr="")
 
     monkeypatch.setattr("vla.transcribe.extract.subprocess.run", fake_ffmpeg_run)
 
     with patch("vla.transcribe.extract.async_playwright", ap):
+        await extract_browser_audio("https://b-learning.bill-jc.com/kng/#/video/play?kngId=x", out_wav)
+
+    capture_args = fake_page.evaluate.call_args_list[1]
+    capture_payload = capture_args[0][1]
+    assert capture_payload["disableCapture"] is False
+    # wav 应被生成(默认 capture 模式)
+    assert out_wav.exists()
+
+
+# -----------------------------------------------------------------------------
+# 2026-09-14:JS 用 video.duration 当 setTimeout 上限(替代硬编码 maxDurationSec)
+# 之前 setTimeout 用的就是 maxDurationSec/video-playback,DRM 视频时长已知却仍被短
+# 上限截断。修复:JS 内读 video.duration,setTimeout 取 min(duration, maxDurationSec),
+# maxDurationSec 退化为硬上限(用户短限速仍生效,DRM NaN 兜底 1800)。
+# -----------------------------------------------------------------------------
+
+
+def test_browser_capture_js_uses_video_duration_with_hard_cap():
+    """静态回归:_BROWSER_CAPTURE_JS 必须读 video.duration 并用 min() 当 setTimeout 上限。
+
+    两个分支(recording + disableCapture)都要有这个保护,且返回 payload 含
+    video_duration 字段(供 Python 端日志区分"视频实际时长"vs"setTimeout 兜底")。
+    """
+    import inspect
+
+    from vla.transcribe.extract import _BROWSER_CAPTURE_JS
+
+    # 1) 必须读 video.duration
+    assert "video.duration" in _BROWSER_CAPTURE_JS, (
+        "JS 必须读 video.duration(否则 DRM 短视频仍会被 maxDurationSec 截断)"
+    )
+    # 2) 必须用 min() 把 video.duration 跟 maxDurationSec 取小(用户硬上限保留)
+    assert "Math.min" in _BROWSER_CAPTURE_JS, (
+        "JS 必须用 Math.min 把 video.duration 和 maxDurationSec 取小"
+    )
+    assert "maxDurationSec" in _BROWSER_CAPTURE_JS
+    # 3) 必须有 isFinite 兜底(DRM HLS 流 duration 可能 NaN/Infinity,需兜底 1800)
+    assert "isFinite" in _BROWSER_CAPTURE_JS, (
+        "JS 必须用 isFinite 兜底 DRM NaN/Infinity,否则 setTimeout(NaN) 不触发"
+    )
+    # 4) 两个分支(recording + disableCapture)的 return payload 都必须含 video_duration
+    #    字段(供 Python 端 [NO-CAPTURE] 日志区分"视频实际时长"vs"setTimeout 兜底")
+    video_duration_occurrences = _BROWSER_CAPTURE_JS.count("video_duration")
+    assert video_duration_occurrences >= 2, (
+        f"JS 必须在 recording return + disableCapture return 都含 video_duration,"
+        f"got {video_duration_occurrences} occurrences"
+    )
+    # 5) 老的裸 setTimeout(resolve, (maxDurationSec / playbackRate) * 1000) 已被替换
+    #    新形式应该是 setTimeout(resolve, ...ms) 而非 *1000(因为 dur 已是秒,直接 * 1000)
+    #    防回归:检查"setTimeout(resolve, (maxDurationSec / playbackRate) * 1000)"不存在
+    old_pattern = "(maxDurationSec / playbackRate) * 1000"
+    assert old_pattern not in _BROWSER_CAPTURE_JS, (
+        f"JS 仍有旧的硬编码 setTimeout({old_pattern}) — 未替换为 video.duration"
+    )
+
+
+@pytest.mark.asyncio
+async def test_extract_browser_audio_disable_capture_logs_video_duration(
+    tmp_path, monkeypatch, caplog,
+):
+    """disable_capture=True + 新 payload 含 video_duration → Python 端日志应透出。
+
+    验证 [NO-CAPTURE] 日志包含 video_duration 字段(让 watch 模式可区分
+    "视频实际 42s,被 maxDurationSec=30 截"vs"视频 25s 自然结束")。
+    """
+    import logging as _logging
+
+    out_wav = tmp_path / "browser.wav"
+    fake_browser, fake_page = _make_fake_browser()
+
+    # capture JS 返 payload 含 video_duration=42.0(wall-clock 30.0 因为 setTimeout)
+    fake_page.evaluate = AsyncMock(
+        side_effect=[
+            "开始学习",
+            {"b64": "", "duration": 30.0, "video_duration": 42.0},
+        ],
+    )
+
+    ap = MagicMock()
+    ap.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+    ap.return_value.__aenter__.return_value.chromium = MagicMock()
+    ap.return_value.__aenter__.return_value.chromium.connect_over_cdp = AsyncMock(
+        return_value=fake_browser,
+    )
+    ap.return_value.__aexit__ = AsyncMock(return_value=None)
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: MagicMock(returncode=0, stderr=""))
+
+    with caplog.at_level(_logging.INFO, logger="vla.transcribe.extract"):
+        with patch("vla.transcribe.extract.async_playwright", ap):
+            await extract_browser_audio(
+                "https://b-learning.bill-jc.com/kng/#/video/play?kngId=x",
+                out_wav,
+                disable_capture=True,
+                max_duration_sec=30,
+            )
+
+    # [NO-CAPTURE] 日志应包含 video_duration=42.0(实际视频 42s,被 max_sec=30 截)
+    no_capture_logs = [r.message for r in caplog.records if "[NO-CAPTURE]" in r.message]
+    assert len(no_capture_logs) >= 1, (
+        f"[NO-CAPTURE] 日志应至少 1 条,got: {[r.message for r in caplog.records]}"
+    )
+    assert "video_duration=42.0" in no_capture_logs[0], (
+        f"[NO-CAPTURE] 日志应包含 video_duration=42.0,got: {no_capture_logs[0]!r}"
+    )
+    assert "wall-clock=30.0" in no_capture_logs[0], (
+        f"[NO-CAPTURE] 日志应包含 wall-clock=30.0,got: {no_capture_logs[0]!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_extract_browser_audio_recording_branch_accepts_video_duration_payload(
+    tmp_path, monkeypatch,
+):
+    """recording 分支:JS payload 含新字段 video_duration,Python 不应拒绝。
+
+    验证默认 capture 模式(disable_capture=False) 也能处理新 payload 字段,
+    wav 落盘 + ffmpeg 被调(老路径不变,新字段只多返不破坏)。
+    """
+    out_wav = tmp_path / "browser.wav"
+    fake_browser, fake_page = _make_fake_browser()
+
+    # happy path payload 加 video_duration
+    b64_payload = {
+        "b64": base64.b64encode(b"\x1a\x45\xdf\xa3").decode("ascii"),
+        "duration": 12.0,
+        "video_duration": 15.0,
+    }
+    fake_page.evaluate = AsyncMock(side_effect=["开始学习", b64_payload])
+
+    ap = MagicMock()
+    ap.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+    ap.return_value.__aenter__.return_value.chromium = MagicMock()
+    ap.return_value.__aenter__.return_value.chromium.connect_over_cdp = AsyncMock(
+        return_value=fake_browser,
+    )
+    ap.return_value.__aexit__ = AsyncMock(return_value=None)
+
+    def fake_ffmpeg_run(cmd, **kwargs):
+        Path(cmd[cmd.index("-f") + 2]).write_bytes(b"RIFF")
+        return MagicMock(returncode=0, stderr="")
+
+    monkeypatch.setattr("vla.transcribe.extract.subprocess.run", fake_ffmpeg_run)
+
+    with patch("vla.transcribe.extract.async_playwright", ap):
+        # 不应抛异常(新 video_duration 字段兼容老 Python 端)
         await extract_browser_audio(
-            "https://b-learning.bill-jc.com/kng/#/video/play?kngId=x", out_wav, atempo=1.0,
+            "https://b-learning.bill-jc.com/kng/#/video/play?kngId=x",
+            out_wav,
         )
 
-    cmd = captured_ffmpeg_cmds[0]
-    assert cmd[cmd.index("-af") + 1] == "atempo=1.0"
+    # wav 落盘 + page 关
+    assert out_wav.exists()
+    fake_page.close.assert_called_once()
