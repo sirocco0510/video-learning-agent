@@ -390,6 +390,147 @@ class TestFailFlow:
         assert (Path(cfg.logging.log_dir) / "transcribe_fail.csv").exists()
 
 
+# ---------------- 主流程:批量容错(2026-09-14 新增)----------------
+
+
+class TestBatchFaultTolerance:
+    """单 video 抛异常 → batch 循环捕获 → log + stats[failed] +=1 + continue 下个。
+
+    修复前 gap:main.py run() 循环没有 try/except 包 _process_one,任何 video 抛
+    异常都会挂掉整 batch,后续 video 不再处理。典型场景:
+      - browser safety timeout RuntimeError(若有人重新启用 browser fallback)
+      - m3u8 漏网异常 / ffmpeg binary FileNotFoundError
+      - LLM 网络错 / notifier API 失败 / scan 权限错
+      - 任何 fetch_asset / process_asset 内部未包死的异常
+    """
+
+    async def test_batch_continues_after_task_raises(self, cfg, tmp_path):
+        """3 个 video,中间 fetch_asset 抛 RuntimeError → batch 不挂,跳下个。
+
+        模拟浏览器兜底超时场景(虽然 2026-09-14 已删 fallback,但留个回归保护)。
+        验证:
+          - run() 不抛异常
+          - stats = {processed: 3, passed: 2, failed: 1}
+          - 第 3 个 video 的 fetch_asset 被调(继续证据)
+          - transcribe_fail.csv 含 task 2 的失败记录(stage=batch_exception)
+        """
+        from unittest.mock import AsyncMock
+        from vla.models import Asset, SubtitleResult
+
+        checker = StubChecker(passed=True, score=85)
+        notifier = StubNotifier()
+        summarizer = StubSummarizer()
+
+        # 造 audio 文件,让 pass 路径有东西可"成功"
+        audios = []
+        for i in (1, 3):  # 只造 task 1 和 3 的 audio
+            a = tmp_path / f"v{i}.wav"
+            a.write_bytes(b"fake audio")
+            audios.append(a)
+
+        agent, _fetch, _process = make_agent_and_pair(
+            cfg, checker=checker, notifier=notifier, summarizer=summarizer,
+            mapping={
+                "BV1": ("内容1", "whisper", audios[0]),
+                "BV3": ("内容3", "whisper", audios[1]),
+            },
+        )
+
+        # 替换 fetch_asset:task1 OK, task2 抛 RuntimeError, task3 OK
+        call_log: list[str] = []
+        original_fetch = agent.fetch_asset
+
+        async def mock_fetch_asset(task):
+            call_log.append(task.id)
+            if task.id == "BV2":
+                raise RuntimeError(
+                    "browser audio capture safety timeout 1800s "
+                    "(setTimeout + video.ended + asyncio.wait_for all failed; "
+                    "possible Chrome tab crash / OOM)"
+                )
+            return await original_fetch(task)
+
+        agent.fetch_asset = mock_fetch_asset
+
+        tasks = [
+            make_task("BV1", "v1", duration=1800),
+            make_task("BV2", "v2_会爆", duration=1800),
+            make_task("BV3", "v3", duration=1800),
+        ]
+        # 不应 raise —— batch 容错应吞掉异常
+        stats = await agent.run(tasks)
+
+        # 3 个 task 都"被处理过"(processed +=1),2 个通过,1 个失败
+        assert stats == {
+            "processed": 3, "passed": 2, "failed": 1,
+            "skipped": 0, "summarized": 0,
+        }, f"期望 batch 吞异常继续,实际 stats: {stats}"
+        # 关键:第 3 个 video 的 fetch_asset 被调(如果 batch 中断就不会调)
+        assert "BV3" in call_log, (
+            f"batch 中断,第 3 个 video 未处理,call_log: {call_log}"
+        )
+        # call_log 顺序:BV1 → BV2(爆)→ BV3(继续)
+        assert call_log == ["BV1", "BV2", "BV3"], (
+            f"call 顺序错: {call_log}"
+        )
+        # transcribe_fail.csv 含 BV2 的 batch_exception 记录
+        fail_csv = Path(cfg.logging.log_dir) / "transcribe_fail.csv"
+        assert fail_csv.exists(), "transcribe_fail.csv 未生成"
+        content = fail_csv.read_text(encoding="utf-8")
+        assert "BV2" in content, f"transcribe_fail.csv 缺 BV2: {content}"
+        assert "batch_exception" in content, (
+            f"stage 字段应为 batch_exception: {content}"
+        )
+
+    async def test_batch_continues_when_later_task_raises(self, cfg, tmp_path):
+        """第 1 个 video 抛异常,后续 video 仍能正常处理。
+
+        跟 test_batch_continues_after_task_raises 互补 —— 验证循环不是"一旦失败就停"。
+        """
+        from unittest.mock import AsyncMock
+        from vla.models import Asset
+
+        checker = StubChecker(passed=True, score=85)
+        notifier = StubNotifier()
+        summarizer = StubSummarizer()
+
+        audio = tmp_path / "v2.wav"
+        audio.write_bytes(b"fake audio")
+
+        agent, _fetch, _process = make_agent_and_pair(
+            cfg, checker=checker, notifier=notifier, summarizer=summarizer,
+            mapping={"BV2": ("内容2", "whisper", audio)},
+        )
+
+        original_fetch = agent.fetch_asset
+
+        async def mock_fetch_asset(task):
+            if task.id == "BV1":
+                raise ValueError("unexpected: configuration error")
+            return await original_fetch(task)
+
+        agent.fetch_asset = mock_fetch_asset
+
+        tasks = [
+            make_task("BV1", "v1_爆", duration=1800),
+            make_task("BV2", "v2_正常", duration=1800),
+        ]
+        stats = await agent.run(tasks)
+
+        assert stats == {
+            "processed": 2, "passed": 1, "failed": 1,
+            "skipped": 0, "summarized": 0,
+        }
+        # BV2 应被处理(否则 stats['passed'] 不可能为 1)
+        # transcribed/ 应有 BV2 的产物
+        transcribed_files = list(
+            (Path(cfg.logging.log_dir) / "transcribed").rglob("transcripts/*.txt")
+        )
+        assert len(transcribed_files) == 1, (
+            f"BV2 应该被处理并落盘,got {len(transcribed_files)} files"
+        )
+
+
 # ---------------- 去重 ----------------
 
 

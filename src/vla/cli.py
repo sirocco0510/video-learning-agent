@@ -4,6 +4,8 @@
 - vla doctor             — 环境检查
 - vla process            — 处理单条视频
 - vla batch              — 批量处理(YAML/JSON 任务列表)
+- vla learn              — bill-jc 课程目录批量转写(m3u8 直抽,FR-2.30)
+- vla watch              — bill-jc 课程目录迭代(关录屏 + 不调 process_asset,2026-09-14 改)
 - vla summarize          — 手动触发总结(无需等 6h)
 
 完整数据流在 src/vla/main.py + 依赖模块。
@@ -28,7 +30,7 @@ from vla.utils.bvid import extract_bvid
 if TYPE_CHECKING:  # 仅注解用:VLAConfig 真正的 import 在各命令函数内部(延迟加载)
     from vla.config import VLAConfig
 
-app = typer.Typer(no_args_is_help=True, help="视频挂机学习 Agent")
+app = typer.Typer(no_args_is_help=True, help="视频转写字幕总结 Agent")
 
 # 项目根目录:src/vla/cli.py → 上两级
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -38,8 +40,8 @@ CONFIG_FILE = PROJECT_ROOT / "config" / "vla.yaml"
 
 @app.callback()
 def _root() -> None:
-    """视频挂机学习 Agent。"""
-    # 2026-09-02 修正:把 .env 加载进 os.environ,LLMClient 等模块直接读 os.environ 才能拿到 key
+    """视频转写字幕总结 Agent。"""
+    # 把 .env 加载进 os.environ,LLMClient 等模块直接读 os.environ 才能拿到 key
     _load_env_into_environ()
 
 
@@ -133,12 +135,12 @@ def _check_screenshot_tcc(driver: Any) -> tuple[bool, str]:
 def doctor(
     check_screenshot: bool = typer.Option(
         False, "--check-screenshot",
-        help="FR-2.28.2c 屏幕录制权限 pre-warm (Q8=Warn)"
+        help="屏幕录制权限预热"
     ),
 ) -> None:
     """检测本机环境:Python、ffmpeg、核心 Python 包、.env、配置。
 
-    `--check-screenshot`:Q8 规则下尝试 requestFullscreen;失败时 WARN,不影响 doctor 退出码。
+    `--check-screenshot`:尝试 requestFullscreen;失败时 WARN,不影响 doctor 退出码。
     当前 `doctor` 不持有 browser driver,传 MagicMock() 让 _try() 走到 except
     返回 WARN(代表 "未接入真实浏览器");接入 driver 后改为传真实 driver 即可。
     """
@@ -600,6 +602,131 @@ def learn(
         f"\n📊 课程批量结果:翻页 {stats['pages']} 页 / "
         f"处理 {stats['processed']} / 通过 {stats['passed']} / 失败 {stats['failed']} / "
         f"跳过(已转写){stats['skipped']} / 触发总结 {stats['summarized']}"
+    )
+
+
+# ---------------- watch ----------------
+
+
+@app.command()
+def watch(
+    college_id: str = typer.Option(
+        ..., "--college-id",
+        help="collegeId —— 课程目录页 URL 的 cid 参数",
+    ),
+    catalog_id: str = typer.Option(
+        ..., "--catalog-id",
+        help="catalogId —— 课程目录页 URL 的 catalogId 参数",
+    ),
+    limit: int = typer.Option(
+        10, "--limit", help="每页取多少条(同时是翻页步长)",
+    ),
+    cdp_url: str = typer.Option(
+        "http://localhost:9222", "--cdp-url",
+        help="Chrome CDP debug URL(cookie/JWT 从已登录的 Chrome 借)",
+    ),
+    max_duration_sec: int = typer.Option(
+        1800, "--max-sec",
+        help="单 video max 时长(秒,video-time)。JS 侧 setTimeout 兜底:"
+             "到点停录(或不录的 nav 等)。默认 1800(30 分钟)。",
+    ),
+    config_path: Path = typer.Option(CONFIG_FILE, "--config", help="配置文件路径"),
+) -> None:
+    """bill-jc 课程目录 —— **watch 模式**(2026-09-14 起**开 tab + 不录 + 不调 process_asset**)。
+
+    **当前状态**(2026-09-14 用户指示):
+      - **Chrome tab 要开** —— `extract_browser_audio` 调用走真实 Chrome CDP,
+        借已登录 Chrome 跑页面 nav(button click → 学完检测 → 等 video ready)
+      - **关闭录屏** —— `disable_capture=True`,跳过 MediaRecorder 抓音
+      - **不用 process_asset** —— 没有 wav 资产,transcribe / quality / save
+        全链路不跑
+
+    **每 video 实际行为**:
+      1. `iter_course_tasks` 翻页取 VideoTask
+      2. 检查 `HistoryManager.is_already_done` —— 已转写跳过
+      3. 对未转写 task:`extract_browser_audio(disable_capture=True, mute=True,
+         max_duration_sec=1800)` → 打开新 Chrome tab → 双 page.goto(bill-jc root
+         + video URL)→ wait_for_selector(button) → click("开始/继续/重新学习") →
+         等 <video> → JS evaluate(走 capture JS 但 disableCapture=true,纯等待
+         + video.muted=true 静音不响) → close page
+      4. 不调 process_asset → 不转写、不落盘、不打分、不摘要
+      5. 异常用 try/except 吞掉 → log + 继续下个 video(2026-09-14 batch 容错模式)
+
+    **超时兜底**:
+      - JS 侧 `setTimeout(video-time)`:到点 JS 退出 → Python 收到结果 → close
+      - Python 侧 `asyncio.wait_for(_BROWSER_CAPTURE_SAFETY_TIMEOUT_SEC=1800s)`:
+        二级兜底,见 extract.py
+      - main.py:run 的 try/except **不再适用**(本命令不调 agent.run,自己吞异常)
+
+    **前置**:Chrome 已用 `--remote-debugging-port=9222` 启动并登录 bill-jc
+    (即便不录屏,spider 仍要借 cookie 调 list_tasks API 翻页 + extract_browser_audio
+    要借 cookie 跑 nav)。
+
+    **重新启用 capture 时**:把 `disable_capture=True` 改回 `False`,再装配
+    `_build_watch_provider`(git 2026-09-14 当天版本里有) + VideoLearningAgent +
+    run_course_batch 完整链路即可。
+
+    目录页 URL 参数:
+      https://b-learning.bill-jc.com/kng/#/list?catalogId=<catalogId>&cid=<collegeId>&...
+                                          ^^^^^^^^^^^          ^^^^^^^^^^^
+                                          --catalog-id         --college-id
+    """
+    import asyncio
+
+    from vla.learn import iter_course_tasks
+    from vla.state.history import HistoryManager
+    from vla.subtitle.internal_site_spider import InternalSiteSpider
+    from vla.transcribe.extract import extract_browser_audio
+
+    comps = _assemble_components(config_path)
+    spider = InternalSiteSpider(
+        cdp_url=cdp_url, college_id=college_id, resolution="480p",
+    )
+
+    async def _iterate() -> tuple[int, int]:
+        total = 0
+        done = 0
+        async for page in iter_course_tasks(spider, catalog_id, limit):
+            for t in page:
+                total += 1
+                key = HistoryManager.make_url_key(t.group_id, t.id)
+                if comps["history"].is_already_done(key):
+                    done += 1
+                    typer.echo(f"  [{total:>4}] ⏭️  {t.id}  {t.title}(已转写)")
+                    continue
+
+                # 开 Chrome tab + 跑 nav(不录 + 不调 process_asset)
+                wav_path = comps["cfg"].storage.tmp_dir / "watch" / f"{t.id}.wav"
+                wav_path.parent.mkdir(parents=True, exist_ok=True)
+                typer.echo(
+                    f"  [{total:>4}] 👀 {t.id}  {t.title} — 开 tab + nav..."
+                )
+                t0 = time.monotonic()
+                try:
+                    await extract_browser_audio(
+                        video_url=str(t.url),
+                        output_path=wav_path,
+                        cdp_url=cdp_url,
+                        max_duration_sec=max_duration_sec,
+                        disable_capture=True,  # 2026-09-14 用户指示:关录屏
+                        mute=True,  # 2026-09-14 静音播放:不打扰用户(默认值,显式传)
+                    )
+                    elapsed = time.monotonic() - t0
+                    typer.echo(
+                        f"           ✓ nav OK({elapsed:.1f}s) — 待转写(不录)"
+                    )
+                except Exception as e:
+                    elapsed = time.monotonic() - t0
+                    typer.echo(
+                        f"           ❌ nav 失败({elapsed:.1f}s):"
+                        f" {type(e).__name__}: {e}"
+                    )
+        return total, done
+
+    total, done = asyncio.run(_iterate())
+    typer.echo(
+        f"\n👀 watch 模式(开 tab + 不录 + 不调 process_asset):"
+        f"目录共 {total} 条 / 已转写 {done} 条 / 待转写 {total - done} 条"
     )
 
 

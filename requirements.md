@@ -502,6 +502,70 @@ monkeypatch `build_text_provider` 截住 `_build_learn_provider` 传的关键字
 喂一个 `LLMSummarizer` 形状的 stand-in(有 `summarize_batch`,无 `summarize_one`),
 让红灯落在真正的断言上。
 
+#### 2026-09-14 browser fallback 删除 —— m3u8 失败即跳过 / 1x + 最低 opus bitrate
+
+**背景**:沿用 FR-2.30 (2026-09-10) 的 m3u8 直抽优先方案,但发现 browser fallback 路径本身质量不可靠(4x + atempo=0.5 → score 35,逐词对比毁可懂度),且维护成本(Chrome/CDP 启动 + preservesPitch + atempo 双重时间拉伸技术债)高于其覆盖收益(仅在 m3u8 签名过期 / BCE DRM token 失效时才有需求)。用户裁定彻底放弃 browser 路径,m3u8 失败 → 跳过视频。同时为未来 capture 质量调优做基线准备(默认 playbackRate 改 1x + opus 16kbps)。
+
+**改动点**
+
+| # | 位置 | 改动 | 依据 |
+|---|---|---|---|
+| 1 | FR-2.30(修正) | 删除浏览器 4x MediaRecorder fallback;m3u8 直抽失败 → `fetch_asset` 返回 None,该视频跳过 | 用户 2026-09-14 裁定。历史对比(2026-09-10):browser 4x score 35 vs m3u8 score 92,4x 毁可懂度。维护成本(Chrome/CDP/preservesPitch+atempo 双拉伸)> 覆盖收益 |
+| 2 | `_BROWSER_CAPTURE_PLAYBACK_RATE` 常量(extract.py) | `4.0` → `1.0` | 1x 原速播放,MediaRecorder 拿原始采样率 + 原始时间轴的音频,whisper 友好。4x 抓音需配合 atempo 拉伸回 2x,而 atempo 拉伸本身又叠加 opus 重编码 + 16kHz 降采样,共振峰抹平(见 FR-2.30 旧描述) |
+| 3 | `_BROWSER_CAPTURE_ATEMPO` 常量 + ffmpeg `-af atempo=...` 滤镜(extract.py) | **删除** | 1x 抓的音不需要拉伸,atempo=0.5 历史意义归零。`extract_browser_audio()` 函数签名同步删 `atempo` 参数 |
+| 4 | `_BROWSER_CAPTURE_OPUS_BITRATE` 常量(extract.py,**新增**) | `16000`(16kbps) | "最低画质"基线。opus 16kbps 仍是语音可懂区间(vs 默认 64kbps),体积省 4x。用于 spike 测 1x + 最低画质的耗时/性能,后续 capture 质量调优时调整此值 |
+| 5 | `_BROWSER_CAPTURE_JS` JS payload | 新增 `opusBitrate` 字段;`MediaRecorder` 构造加 `audioBitsPerSecond: opusBitrate` | 与 #4 常量配套 |
+| 6 | FR-2.30.1(范围调整) | 长视频 30min 上限仅作用于 m3u8 路径;`extract_browser_audio` 的 `max_duration_sec` 参数仍保留(spike 用),但生产不调用 | 与 #1 一致 |
+| 7 | `tests/test_extract_audio.py` | 改 `test_..._passes_playback_rate_to_js` 默认值断言(4.0 → 1.0);**删** `test_..._applies_atempo_stretch_to_ffmpeg` + `test_..._atempo_is_overridable`;**新增** `test_..._passes_opus_bitrate_to_js`(验证 opusBitrate=16000)+ `test_..._ffmpeg_skips_atempo_after_1x_switch`(回归保护,ffmpeg 不含 `-af` / `atempo`) | 反映 #2 / #3 / #4 行为变更 |
+| 8 | `tests/test_fetch_asset.py` | happy path 删 `patch extract_browser_audio`(main_provider 已无此 import);**替换** `...falls_back_to_browser_when_m3u8_fails` → `...skips_video_when_m3u8_fails`(断言 asset is None);**删** `...returns_none_when_both_extract_fail`(与新测试重复) | 反映 #1 行为变更 |
+| 9 | `_BROWSER_CAPTURE_SAFETY_TIMEOUT_SEC` 常量 + `asyncio.wait_for` 兜底(extract.py,**新增**) | `1800`(30 分钟,wall-clock 硬上限);`page.evaluate(_BROWSER_CAPTURE_JS, payload)` 外层包 `asyncio.wait_for(..., timeout=1800)`;`asyncio.TimeoutError` → `RuntimeError("browser audio capture safety timeout 1800s ...")` | 兜的是"JS 引擎死了 / Chrome 标签页 OOM" — 此时 JS 内 setTimeout 也不触发,Python 必须切。**两层防御**:JS `setTimeout(max_duration_sec)` 兜正常场景(视频不结束 + DRMed stream NaN duration);Python `asyncio.wait_for` 兜硬崩溃(浏览器死了)。**与 max_duration_sec 关系**:safety 是 capture wall-clock 硬上限 — caller 传 `max_duration_sec=7200`(2 小时)会被 safety 截到 30 分钟,故意要长视频需改 #9 常量 |
+
+**保留物(供未来复用 / 测试)**:
+- `extract_browser_audio()` 函数本身仍保留在 `src/vla/transcribe/extract.py`(供 spike / 性能测试)
+- `_BROWSER_CAPTURE_MAX_DURATION_SEC / PLAYBACK_RATE / OPUS_BITRATE / SAFETY_TIMEOUT_SEC / JS` 常量一并保留
+- `playwright` 依赖暂不移除 —— 字幕插件(FR-2.6 / 2.8 / 2.10)独立使用
+
+**回归影响**:
+- bill-jc 部分视频可能落 `transcribe_fail.csv`(原本 browser 兜底能拿下的那些),用户已接受此 trade-off
+- 单个视频最大 wall-clock 30 分钟(`max_extract_sec=1800` 不变,1x 下 video-time = wall-clock)
+- **硬安全上限 30 分钟**(`_BROWSER_CAPTURE_SAFETY_TIMEOUT_SEC=1800`):即便 caller 误传 `max_duration_sec=86400`(24h),capture 也会在 30 分钟处硬切,不会挂 Python 进程 — 触发即 `RuntimeError`,调用方按"m3u8 失败 → 跳过视频"语义处理
+- **触发检测**:Chrome 标签页崩溃 / OOM → JS 线程死 → `setTimeout` 不触发 → Python `page.evaluate` 无限等 → `asyncio.wait_for` 在 30 分钟切 → `RuntimeError` 抛出;finally 块仍跑(关 page + 清 webm)
+
+#### 2026-09-14 批量容错 —— 单 video 异常不挂整 batch
+
+**背景**:课程目录批量入口(FR-11,`vla learn`)动辄几十上百条 video,任何一条在
+`main.py:_process_one` 内部未包死的异常都会让 `run()` 循环整体崩溃,后续 video
+不再处理。审计发现的漏防御异常路径:
+1. browser safety timeout RuntimeError(若有人重新启用 browser fallback)
+2. `extract_m3u8_audio` 未被 try 包死的代码路径(ffmpeg binary FileNotFoundError 等)
+3. `scan_untranscribed_audio` 权限错 / 路径不存在
+4. LLM client 网络错(timeout / connection refused)
+5. `notifier.info()` macOS 通知 API 失败
+6. 任何 `fetch_asset` / `process_asset` 内部未包死的异常
+
+`_process_one` 内部已部分防御(Step 0 Phase A 截图 / Step 4 Phase C 截图都有 try/except),
+但**外部** `run()` 循环没兜底 → 一个 video 抛,整 batch 挂。
+
+**改动点**
+
+| # | 位置 | 改动 | 依据 |
+|---|---|---|---|
+| 1 | `main.py:run()` 循环(line 206) | `await self._process_one(task)` 包 `try/except Exception`,异常走 `logger.exception` + `log_transcribe_fail(stage="batch_exception")` + `failure_alert.check_after_write()` + `stats["failed"] += 1` + `continue` | 兜上面列的 6 类异常路径。复用 FR-6.6 FailureAlert 的"累计失败倍数边界"做通知分级,不引入新通知机制 |
+| 2 | `tests/test_video_learning_agent.py` 新增 `TestBatchFaultTolerance` | 2 个 test:`test_batch_continues_after_task_raises`(3 task / 中间抛 RuntimeError / 验证 batch 不挂 + 后续 task 被调 + transcribe_fail.csv 含 `stage=batch_exception`)+ `test_batch_continues_when_later_task_raises`(2 task / 第 1 个抛 / 验证第 2 个仍正常落盘) | 回归保护,确保后续重构不破坏容错语义 |
+
+**容错语义**(2026-09-14 定):
+- 单 video 异常 → `log_transcribe_fail(stage="batch_exception")` 落 `transcribe_fail.csv`
+- `stats["failed"] += 1`,累计在 stats 里返回
+- 异常**不**冒泡,后续 video 正常处理
+- **配合 FR-6.6**:连续失败达到 `log_alert_threshold` 倍数才弹通知,避免打扰(单条异常不通知)
+- **不重试**:失败的 video 不在本次 batch 内重跑,留给下个 session / 用户手动决定
+
+**回滚成本**:1 个文件 14 行 diff(main.py)+ 1 个 test class。回滚即删 try/except 块,行为退回到"任何 video 抛异常挂整 batch"。
+
+**不验证的边界**(留个 TODO,本次不做):
+- batch 跑完后整 session 退出时 `_stop_chrome_session` 抛异常 → 仍会让进程非零退出(影响小,因为是 cleanup 阶段)
+- `_process_one` 内部如果死循环(理论上不该发生)→ batch 也会卡住,需要更外层 watchdog
+
 ### FR-1 视频源管理
 
 | ID     | 描述                                                      | 优先级 |
@@ -572,8 +636,8 @@ monkeypatch `build_text_provider` 截住 `_build_learn_provider` 传的关键字
 | FR-2.28.2h | **通知可点 → 打开 Finder 目录**(2026-09-07 spike v4 沉淀):FR-2.28.2d 的"准备截图"通知只能告知,不能导航。**升级为"完成通知"**:点击 → 打开截图所在 Finder 目录。**技术**:`terminal-notifier -title X -subtitle Y -message Z -open "file:///<dir>"`(brew 装的 macOS 通知 CLI,支持 click 打开 URL)。**首次使用**:`vla doctor` 检测 terminal-notifier + 触发一次测试通知,macOS 弹"允许通知"提示,用户授权。**fallback**:`terminal-notifier` 缺失 / 未授权 → 用 osascript 不可点通知,消息体附 `open "<dir>"` 命令供复制。**配置**:`screenshot.notify_clickable: true`(默认 true;`false` 时强制走 osascript)。**降级**:`terminal-notifier -remove <group>` 在 screencapture 前 0.3s 调用,避免通知横幅被截进图(经验证:macOS 通知会渲染在 screen buffer,需给屏幕刷新时间) | P1  |
 | FR-2.28.2i | **多帧模式**(2026-09-07 spike v4 沉淀,**3 start + 3 end-window + 1 end-final**):FR-2.28 单帧(start + end)在长视频可能错过关键画面(B站 首帧黑屏 / 末尾 paused 在 0:00)。**新流程**:**start 阶段** 3 帧(目标 cur≈0.0 / 0.6 / 1.5s,允许 ±0.5s 误差);**end-window 阶段** 3 帧(目标 cur≈duration-10 / duration-7 / duration-4,允许 ±2s 误差,等 currentTime 轮询到目标值才截图);**end-final 阶段** 1 帧(等 `ended` 事件后,cur = duration)。共 7 帧/视频。**文件名**:`<bvid>__start__t<TIMESTAMP>.png` / `<bvid>__end__t<TIMESTAMP>.png` / `<bvid>__end_final__t<TIMESTAMP>.png`(<TIMESTAMP> 用 `video.currentTime` 实际值,不是目标值)。**index.jsonl**:每张一记录(沿用 FR-2.28.2e,加 `frame_role: "start" | "end" | "end_final"` 字段区分)。**短视频兼容**:duration < 13s 时,end-window 退到 [duration*0.5, duration-1] 区间(3 帧);start 仍 3 帧。**配置**:`screenshot.multi_frame: true`(默认 true;`false` 走老 single-frame 路径)。**失败降级**:任一帧失败 → log warning + 跳过该帧,继续后续帧 | P1  |
 | FR-2.29  | **截图嵌入笔记**(2026-09-03 新增,**P1 可选**):质量门控通过的截图(FR-4 + FR-2.28)→ 在生成 `notes.md` 时插入 Obsidian 嵌入引用 `![[screenshots/<bvid>_<ts>_start.png]]` + `![[screenshots/<bvid>_<ts>_end.png]]`(用户可点击打开)。**实现**:在 `LLMSummarizer.summarize_batch` 输出 Markdown 头部插入截图引用块(在总结内容之前)。**失败语义**:截图缺失(FR-2.28 降级后无文件)→ 跳过嵌入,不报错。**配置**:`screenshot.embed_in_notes: true`(默认 false,P1 可选) | P1  |
-| FR-2.30  | **内部站(bill-jc)音频获取 —— m3u8 直抽优先**(2026-09-10 新增):`InternalSiteSpider` 拿到 m3u8 后,路径 ② 的抽音顺序为 **① `extract_m3u8_audio`(ffmpeg HLS 流式,`-vn -ac 1 -ar 16000`)→ ② `extract_browser_audio`(Chrome 已加载页面内 MediaRecorder `playbackRate=4` + ffmpeg `atempo=0.5`,兜底)**;两条都失败 → `fetch_asset` 返回 `None`。**为什么反转(2026-09-10 四组对照实测,同一视频真时长 177.59s)**:浏览器 4x 抓取路径 score **35**(未通过),m3u8 直抽 score **62~92**(通过);逐词对比显示 4x 路径把 `国家统计局` 转成 `规判统计`、`PhantomJS` 转成 `翻腾架子`、`Beautiful Soup/LXML` 转成 `UFOSOS/MILO` —— **4x 抓取毁可懂度**。整条 pipeline 耗时 m3u8 直抽也更快(30s vs 87s,含抽取步骤)。**技术原因**:Chromium `preservesPitch` + ffmpeg `atempo` **双重时间拉伸**叠加 opus 重编码 + 16kHz 降采样,共振峰被抹平(音高 F0 实测未被抬高,比值 0.97 —— 不是音高问题)。**例外**:`extract_browser_audio` 仍**不删**(保留作 fallback,Chrome 未启 / m3u8 解密失败时仍有价值),`_BROWSER_CAPTURE_*` 常量一并保留。**注意**:异常驱动 fallback **抓不到质量回退**(浏览器路径不会因音质差抛错),所以顺序必须在**质量实测**基础上确定,不能靠运行时自动选择 | P0  |
-| FR-2.30.1 | **长视频抽音上限 30 分钟**(2026-09-10 新增):路径 ② 的两条抽音路径都受 `audio.max_extract_sec`(默认 **1800**)约束,**只保留视频前 30 分钟音频,超出部分直接丢弃**(用户 2026-09-10 裁定)。**实现**:`extract_m3u8_audio` 加 ffmpeg 输出侧 `-t <max_sec>`(置于 `-i` 之后;到点后 ffmpeg 停止拉取后续 HLS 切片,**顺带省带宽**);`extract_browser_audio` 沿用既有 `max_duration_sec` 参数(video-time,内部按 `playbackRate` 换算 wall-clock)。**为什么**:① 长视频转写文本超过 LLM 预算(30 分钟语音 ≈ 8700 字,已触及 `refine_max_chars` 与 max_tokens 边界);② 磁盘 / 时间友好(256GB 机器红线)。**范围**:**仅路径 ②**;路径 ③/④ 的 `extract_audio`(yt-dlp MP4)不加同款上限。**失败语义**:截断**不算失败**,不记 `transcribe_fail.csv` | P0  |
+| FR-2.30  | **内部站(bill-jc)音频获取 —— 仅 m3u8 直抽,失败即跳过**(2026-09-10 新增,**2026-09-14 修正删除 browser fallback**):`InternalSiteSpider` 拿到 m3u8 后,路径 ② **只走 `extract_m3u8_audio`**(ffmpeg HLS 流式,`-vn -ac 1 -ar 16000`);**失败 → `fetch_asset` 返回 None,跳过该视频**(用户决定是否重试 / 重抽,无任何兜底)。**为什么删除 browser fallback(2026-09-14 用户裁定)**:browser 路径维护成本(Chrome/CDP 启动 / `preservesPitch` + atempo 双重时间拉伸技术债 / opus 重编码 + 16kHz 降采样共振峰抹平等问题)> 覆盖收益(仅在 m3u8 签名过期 / BCE DRM token 失效时才有需求)。**历史(2026-09-10 四组对照实测,177.59s 视频,供回溯)**:`extract_browser_audio`(4x + atempo=0.5)→ score **35**(未通过);`extract_m3u8_audio` 直抽 → score **62~65**;m3u8 + Refiner → score **92**。逐词对比 4x 路径把 `国家统计局`→`规判统计`、`PhantomJS`→`翻腾架子`、`Beautiful Soup/LXML`→`UFOSOS/MILO`,**4x 抓取毁可懂度**;整条 pipeline 也更慢(87s vs 30s)。**保留物**:`extract_browser_audio` 函数本身**仍保留在代码**(供 spike / 1x + 最低 opus bitrate 耗时性能测试),但**生产路径不调用**;`_BROWSER_CAPTURE_*` 常量一并保留(默认已切到 1x playbackRate + 16kbps opus,见 CHANGELOG「2026-09-14 browser fallback 删除」)。**异常驱动 fallback 抓不到质量回退**这条历史结论依然成立(浏览器路径不会因音质差抛错),所以本设计**不再依赖运行时自动选路** —— 单一 m3u8 直抽,失败就丢 | P0  |
+| FR-2.30.1 | **长视频抽音上限 30 分钟**(2026-09-10 新增,**2026-09-14 删除 browser fallback 后范围收窄**):路径 ② 的 `extract_m3u8_audio` 受 `audio.max_extract_sec`(默认 **1800**)约束,**只保留视频前 30 分钟音频,超出部分直接丢弃**(用户 2026-09-10 裁定)。**实现**:`extract_m3u8_audio` 加 ffmpeg 输出侧 `-t <max_sec>`(置于 `-i` 之后;到点后 ffmpeg 停止拉取后续 HLS 切片,**顺带省带宽**)。**2026-09-14 范围调整**:browser fallback 已删除,本条约束仅作用于 m3u8 路径;`extract_browser_audio` 的 `max_duration_sec` 参数仍保留(spike / 性能测试可用),但生产不再调用。**为什么**:① 长视频转写文本超过 LLM 预算(30 分钟语音 ≈ 8700 字,已触及 `refine_max_chars` 与 max_tokens 边界);② 磁盘 / 时间友好(256GB 机器红线)。**范围**:**仅路径 ② 的 m3u8 直抽**;路径 ③/④ 的 `extract_audio`(yt-dlp MP4)不加同款上限。**失败语义**:截断**不算失败**,不记 `transcribe_fail.csv` | P0  |
 
 **架构图**:
 

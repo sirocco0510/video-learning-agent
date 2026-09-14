@@ -207,7 +207,27 @@ class VideoLearningAgent:
             stats["processed"] += 1
 
             # 2. 处理单条
-            passed = await self._process_one(task)
+            # 2026-09-14 批量容错:任何 video 任务抛异常不挂整 batch。
+            # 例:browser safety timeout RuntimeError(若有人重新启用 fallback)/
+            # m3u8 漏网异常 / LLM 网络错 / notifier API 失败 / scan 权限错 /
+            # fetch_asset / process_asset 内部未包死的异常。统一降级:
+            # log + 记 transcribe_fail + stats['failed'] +=1 + continue 下个 video。
+            # 配合 FR-6.6 FailureAlert 已有的"累计失败倍数边界检查"做通知分级。
+            try:
+                passed = await self._process_one(task)
+            except Exception as e:
+                logger.exception(
+                    "[BATCH-FAIL] %s (%s) 抛异常,跳下个视频: %s",
+                    task.id, task.title, e,
+                )
+                self.log.log_transcribe_fail(
+                    task.id, task.title, str(task.url),
+                    stage="batch_exception", error=str(e),
+                )
+                # FR-6.6:累计失败倍数边界检查
+                self.failure_alert.check_after_write()
+                stats["failed"] += 1
+                continue
 
             # 3. 通过 → 写 history + 累加配额
             if passed:

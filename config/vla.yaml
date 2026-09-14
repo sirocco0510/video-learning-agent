@@ -10,7 +10,7 @@ whisper:
   language: "zh"
   segment_seconds: 30
   compute_type: "int8"    # int8 / int8_float16 / float16
-  # 2026-09-02 Level 3 步骤 1:本地后处理(碎片合并 + 重复段去重)
+  # 本地后处理(碎片合并 + 重复段去重)
   postprocess_enabled: true
   postprocess_min_line_chars: 8      # 短于这个字符的行认为碎片
   postprocess_max_line_chars: 80     # 合并后单行上限
@@ -25,9 +25,6 @@ video_source:
 
 quality_check:
   enabled: true
-  # 2026-09-10 Phase 9.6.4 bill-jc spike 放宽:公司内部培训课程(命令行参数 /
-  # Java 基础)语速 0.5-1 cps + 大量 Whisper 术语错误("花扩号"→"花括号"等),
-  # LLM 给 55-68 分(因术语错误扣分),原阈值 70/1.0 全 fail。
   # 用户决策:语速 0.5 字/秒以上 + LLM ≥ 50 即可过(关注内容完整性,不卡术语准度)。
   # 后续若需要更严,可在 requirements.md FR-4 加版本号注释。
   min_score_to_pass: 50
@@ -48,11 +45,10 @@ summary:
   target_words_max: 800
   notes_file: "./notes/videos.md"
   cross_video_dedup: true
-  # FR-9 配额触发
   trigger_mode: "quota"           # quota(累计 6h) | per_video(每条)
   notes_section_header: "## {group_title}"  # 笔记里用什么标题分段
 
-quota:                              # FR-9 累计时长配额
+quota:                              # 累计时长配额
   summary_threshold_sec: 21600    # 6 小时 = 21600 秒
   on_exhausted: "stop_session"     # 达到阈值后行为:stop_session | continue
 

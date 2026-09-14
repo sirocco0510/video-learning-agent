@@ -148,11 +148,15 @@ async def test_fetch_asset_scan_not_called_when_strategy_text_hits():
 
 @pytest.mark.asyncio
 async def test_fetch_asset_internal_spider_uses_m3u8_direct_by_default(tmp_path):
-    """FR-2.30 (2026-09-10 反转):bill-jc 路径 ② 默认走 extract_m3u8_audio 直抽,
-    extract_browser_audio 降 fallback。
+    """FR-2.30 (2026-09-10 反转,2026-09-14 删除 fallback):bill-jc 路径 ② 默认走
+    extract_m3u8_audio 直抽。
 
-    反转依据:同视频四组对照,m3u8 直抽 score 92(通过)/ 浏览器 4x score 35
-    (未通过);4x 抓取把"国家统计局"转成"规判统计"、"PhantomJS"转成"翻腾架子"。"""
+    2026-09-14:browser 兜底路径已删除 —— m3u8 失败 → 该视频跳过,不再 fallback。
+    见 test_fetch_asset_internal_spider_skips_video_when_m3u8_fails。
+
+    历史反转依据(2026-09-10):同视频四组对照,m3u8 直抽 score 92(通过)/
+    浏览器 4x score 35(未通过);4x 抓取把"国家统计局"转成"规判统计"、
+    "PhantomJS"转成"翻腾架子"。"""
     p = RealTextProvider.__new__(RealTextProvider)
     p.cfg = MagicMock()
     p.cfg.audio.max_extract_sec = 1800
@@ -179,8 +183,10 @@ async def test_fetch_asset_internal_spider_uses_m3u8_direct_by_default(tmp_path)
         wav_path.parent.mkdir(parents=True, exist_ok=True)
         wav_path.write_bytes(b"RIFF")
 
-    with patch("vla.main_provider.extract_m3u8_audio", side_effect=fake_m3u8) as m_m3u8, \
-         patch("vla.main_provider.extract_browser_audio") as m_browser:
+    # 2026-09-14:不再 patch extract_browser_audio —— main_provider 已删除该 fallback,
+    # 模块里根本没有这个 import 名。回归保护:若有人重新引入 browser 路径,本测试会因
+    # 其他渠道(日志/资产来源)不一致而失败,届时再补 patch。
+    with patch("vla.main_provider.extract_m3u8_audio", side_effect=fake_m3u8) as m_m3u8:
         task = VideoTask(id="BV1xx", title="t", url="https://b-learning.bill-jc.com/x", expected_duration=3600)
         asset = await p.fetch_asset(task)
 
@@ -189,8 +195,6 @@ async def test_fetch_asset_internal_spider_uses_m3u8_direct_by_default(tmp_path)
     assert m_m3u8.call_args[0][0] == "https://video.bill-jc.com/foo.m3u8"
     # FR-2.30.1:audio.max_extract_sec 透传下去(1800 = 只抽前 30 分钟)
     assert m_m3u8.call_args[0][2] == 1800
-    # browser 不应被调(m3u8 已成功)
-    m_browser.assert_not_called()
     assert asset is not None
     assert asset.source == "whisper_internal_download"
     assert asset.audio_path == fake_wav
@@ -198,10 +202,18 @@ async def test_fetch_asset_internal_spider_uses_m3u8_direct_by_default(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_fetch_asset_internal_spider_falls_back_to_browser_when_m3u8_fails(tmp_path):
-    """FR-2.30 (2026-09-10 反转):m3u8 直抽失败(m3u8 过期签名 / 解密失败 / 网络)→
-    fallback 到 extract_browser_audio;成功 → fetch_asset 走 ② 返回
-    Asset(source='whisper_internal_download')。"""
+async def test_fetch_asset_internal_spider_skips_video_when_m3u8_fails(tmp_path):
+    """FR-2.30 (2026-09-14 修正):m3u8 直抽失败 → 该视频跳过,fetch_asset 返回 None。
+
+    之前(2026-09-10)有 browser 兜底路径,失败时 fallback 到 extract_browser_audio;
+    2026-09-14 用户裁定:browser 路径维护成本 > 覆盖收益,删除 fallback,
+    m3u8 失败直接跳过(用户决定是否重试 / 重抽)。
+
+    历史对比数据(2026-09-10 四组对照,177.59s 视频):
+      m3u8 直抽 + Refiner → score 92 (通过)
+      m3u8 直抽          → score 62~65
+      浏览器 4x + atempo  → score 35 (未通过,逐词对比 4x 毁可懂度)
+    """
     p = RealTextProvider.__new__(RealTextProvider)
     p.cfg = MagicMock()
     p.cfg.audio.max_extract_sec = 1800
@@ -222,34 +234,16 @@ async def test_fetch_asset_internal_spider_falls_back_to_browser_when_m3u8_fails
     ))
     p.source_factory.get = MagicMock(return_value=None)
 
-    fake_wav = tmp_path / "audio_raw" / "BV1xx.wav"
-
-    async def fake_browser(url, dst, max_duration_sec=None):
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_bytes(b"RIFF")
-
     with patch(
         "vla.main_provider.extract_m3u8_audio",
         side_effect=RuntimeError("m3u8 签名过期"),
-    ) as m_m3u8, patch(
-        "vla.main_provider.extract_browser_audio",
-        side_effect=fake_browser,
-    ) as m_browser:
+    ) as m_m3u8:
         task = VideoTask(id="BV1xx", title="t", url="https://b-learning.bill-jc.com/x", expected_duration=3600)
         asset = await p.fetch_asset(task)
 
-    # m3u8 先被试(默认路径),失败
+    # m3u8 被试一次,失败 → 不再尝试其他路径,直接跳过视频
     m_m3u8.assert_called_once()
-    # 然后 browser fallback 成功
-    m_browser.assert_called_once()
-    assert m_browser.call_args[0][0] == "https://video.bill-jc.com/foo.m3u8"
-    # FR-2.30.1:上限同样传给 browser 兜底路径
-    assert m_browser.call_args[1]["max_duration_sec"] == 1800
-    assert asset is not None
-    assert asset.source == "whisper_internal_download"
-    assert asset.audio_path == fake_wav
-    assert asset.deletable is True
-    assert asset.needs_transcribe is True
+    assert asset is None
 
 
 @pytest.mark.asyncio
@@ -322,37 +316,7 @@ async def test_fetch_asset_explicit_null_cap_disables_truncation(tmp_path):
     assert m_m3u8.call_args[0][2] is None
 
 
-@pytest.mark.asyncio
-async def test_fetch_asset_internal_spider_returns_none_when_both_extract_fail(tmp_path):
-    """FR-2.30:m3u8 直抽 + browser 双双失败 → 返回 None(用户决定)。"""
-    p = RealTextProvider.__new__(RealTextProvider)
-    p.cfg = MagicMock()
-    p.cfg.audio.max_extract_sec = 1800
-    p.strategy = MagicMock()
-    p.transcriber = MagicMock()
-    p.source_factory = MagicMock()
-    p.notifier = MagicMock()
-    p.plugin_status = MagicMock()
-    p._save_dir = tmp_path
-    p.log = MagicMock()
-    p.checker = MagicMock()
-    p.refiner = None
-    p._today_dir = tmp_path
-
-    p.strategy.get_subtitle = AsyncMock(return_value=SubtitleResult(
-        text=None, source="internal_spider",
-        metadata={"video_url": "https://video.bill-jc.com/foo.m3u8"},
-    ))
-    p.source_factory.get = MagicMock(return_value=None)
-
-    with patch(
-        "vla.main_provider.extract_browser_audio",
-        side_effect=RuntimeError("Chrome 9222 unreachable"),
-    ), patch(
-        "vla.main_provider.extract_m3u8_audio",
-        side_effect=RuntimeError("ffmpeg failed"),
-    ):
-        task = VideoTask(id="BV1xx", title="t", url="https://b-learning.bill-jc.com/x", expected_duration=3600)
-        asset = await p.fetch_asset(task)
-
-    assert asset is None
+# 2026-09-14:删除 test_fetch_asset_internal_spider_returns_none_when_both_extract_fail
+# 原行为是"m3u8 + browser 双双失败 → 返回 None",但 browser fallback 已删除,
+# 该用例与新的 test_fetch_asset_internal_spider_skips_video_when_m3u8_fails 完全重复。
+# 新行为下 m3u8 失败就直接 None,没有"双失败"语义。

@@ -13,8 +13,9 @@ description: Use when the user wants to transcribe video from b-learning.bill-jc
 |---|---|---|
 | **单视频**(默认) | 视频**详情页** URL(含 `kngId`) | `scripts/spike_bill_jc_full.py`(Step 3–6) |
 | **整课批量** | 课程**目录页** URL(含 `catalogId` + `cid`) | `uv run vla learn`(见下方「批量模式」) |
+| **watch**(2026-09-14 起) | 课程**目录页** URL(含 `catalogId` + `cid`) | `uv run vla watch`(见下方「watch 模式」) |
 
-两种都只支持 bill-jc 内部站。其他平台(B站 / YouTube / b23.tv 短链)请用 `vla process` 主命令,**不在本 skill 兜底**。
+三种都只支持 bill-jc 内部站。其他平台(B站 / YouTube / b23.tv 短链)请用 `vla process` 主命令,**不在本 skill 兜底**。
 
 ---
 
@@ -68,7 +69,7 @@ description: Use when the user wants to transcribe video from b-learning.bill-jc
 
 **必须先判断是哪一种**,再分别校验。
 
-#### 2a. 单视频(含 `kngId`)—— 两种形式任一
+#### 2a. 单视频(含 `kngId`)
 
 > **`kngId` 永远是查询参数,不在 path 里。** `/learn/<kng_id>` 这种 path 形式
 > **不存在**(它是 2026-09-09 设计文档里的凭空假设;2026-09-10 用户裁定真机没有这种
@@ -110,6 +111,56 @@ description: Use when the user wants to transcribe video from b-learning.bill-jc
 - ❌ `youtube.com/watch?v=...` → 同上
 - ❌ `b23.tv/xxx` → 同上
 - ❌ `b-learning.bill-jc.com`(既无 kng_id 也无 catalogId) → "URL 不含 kng_id 或 catalogId,请进入具体视频详情页 / 课程目录页后复制 URL"
+
+#### 2d. 批量模式分流:learn vs watch(2026-09-14 加)
+
+Step 2b 通过后,**默认走 `learn`**(完整转写链路)。但有些场景用户**明确**
+要的是 watch(开 tab + 不录 + 不调 process_asset)。需要靠**用户原话关键词**
+识别。**两者 URL 形式完全相同**,必须看用户的意图,不能看 URL。
+
+**走 watch 的关键词**(任一命中即走 watch):
+
+| 类别 | 关键词 / 短语 |
+|---|---|
+| **显式命令** | "跑 watch"、"用 watch"、"watch 模式"、"用 vla watch" |
+| **不要录屏** | "不录"、"不录音"、"不抓音"、"关闭录屏"、"不开录屏"、"skip 录屏" |
+| **不要转写** | "不转写"、"不调 process_asset"、"不产字幕"、"先不跑转写" |
+| **预览 / 检查** | "先看一下"、"先看看"、"预览"、"先列一下"、"列个清单"、"标个清单"、"扫一遍" |
+| **调试 nav** | "测 browser nav"、"测 browser 路径"、"调试 browser"、"只跑 nav"、"只看 nav 是否通" |
+| **capture 质量未达标** | "capture 有问题"、"先不开"、"capture 质量没解决"、"暂时关掉录屏" |
+| **预期产物提示** | "先看看哪些待转写"、"只标'待转写'"、"不要 transcripts/"、"不要 summaries/" |
+
+**走 learn 的关键词**(任一命中即走 learn,**优先级最高**):
+
+| 类别 | 关键词 / 短语 |
+|---|---|
+| **显式命令** | "跑 learn"、"用 learn"、"learn 模式"、"用 vla learn"、"全跑"、"跑完整" |
+| **明确要产物** | "产出字幕"、"写 transcripts/"、"写 summaries/"、"我要字幕"、"转出来" |
+| **跑端到端** | "端到端跑"、"端到端"、"e2e"、"完整跑" |
+| **结合历史** | "接着上次跑"、"把没转写的补上"、"补齐剩下的"、"跳过已转写" |
+
+**两难判定**(都没命中):
+
+```text
+⚠️ 课程目录页既能走 learn(完整转写)也能走 watch(只开 tab 不录)。
+   您 想要哪个?
+   - learn → 全跑,会产字幕+摘要(默认)
+   - watch → 只开浏览器 tab 跑 nav,确认能播放,不录、不转写
+```
+
+把选项抛回去,**不要猜**。
+
+**已知陷阱**(2026-09-14 实际跑出来的):
+
+| 用户原话 | 期望意图 | skill 不要走错 |
+|---|---|---|
+| "先开 tab 看下" | watch(开 tab,看是否能跑通) | ❌ 不要走 learn(会转写整个目录) |
+| "看一下课程有几条" | watch(列清单) | ❌ 不要走 learn(用户没要转写) |
+| "跑完整转写" | learn | ❌ 不要走 watch(用户明确要转写) |
+| "先用 watch 看一下能不能跑" | watch(试探 nav) | ❌ 不要走 learn(试探不转写) |
+
+> ⚠️ **不要用 URL 形式区分**:`learn` 和 `watch` 都吃 `catalogId` + `cid`。
+> 区分**唯一依据**是用户的意图关键词。
 
 ### 3. (单视频路径)默认走 `--parse-only`(2026-09-10 设计:让用户先看参数,再决定跑不跑)
 
@@ -353,6 +404,94 @@ FR-4.2 放宽后,质量门控只判**能不能用**:
 
 > ⚠️ **不要用 `vla batch` 做这件事** —— `vla batch` 吃的是手写任务列表文件(YAML/JSON),
 > 需要用户自己提供每条 URL。课程目录页批量走 `vla learn`(它自己翻页取任务)。
+
+---
+
+## watch 模式(2026-09-14 新增)
+
+**触发**:用户说"先看一下课程"、"只跑浏览器 nav 不转写"、"先开 tab 不录"、
+"跑 watch"等。**Step 2b 通过**(catalogId + cid)后,**用户主动选择**走 watch
+而非 learn 时进入本节。
+
+> ⚠️ watch 与 learn 的核心区别:**不开录屏 + 不调 process_asset**。Capture
+> 质量未达标(2026-09-14 决议)前,跑 watch 只是为了验证**浏览器 nav 路径**
+> 能跑通,不要把 watch 当作"轻量版 learn"——它**不产字幕、不写笔记**。
+
+### W1. 直接跑(没有 `--dry-run`,单一模式)
+
+```bash
+uv run vla watch \
+  --college-id "<cid>" \
+  --catalog-id "<catalogId>" \
+  --max-sec 30
+```
+
+- `--max-sec` 默认 **1800**(30 分钟,JS 侧 setTimeout 兜底)
+  - 推荐先 `--max-sec 30` 快速验证 nav 路径(每个 video ~38s,3 个 video ~2min)
+  - 验证 OK 后再改 `--max-sec 1800` 跑完整 30 min 兜底
+- **不要**加 `--config` / `--cdp-url`(用默认值)
+- 已转写过的视频按 `logs/transcribed_history.jsonl` **自动跳过**(同 learn)
+- **全程静音播放**(`video.muted=true`,2026-09-14 加):不打扰用户 +
+  muted autoplay 更稳(浏览器无需 user gesture)
+
+### W2. 实际行为(每个未转写 video)
+
+1. `extract_browser_audio(video_url=..., disable_capture=True, mute=True,
+   max_duration_sec=...)`
+2. 打开**新 Chrome tab**(借已登录的 cookie,JWT 自动可用)
+3. 双 `page.goto`:先 bill-jc 根 URL 让 SPA 初始化,再 video URL
+4. `wait_for_selector("button.yxtf-button--primary")` → click "开始/继续/重新学习"
+5. `wait_for_function("video.readyState >= 2")` → `<video>` ready
+6. JS evaluate 跑 capture JS,`disableCapture=true` 跳过 MediaRecorder,
+   `mute=true` 把 `video.muted=true`,**只等 video.ended 或 setTimeout** → 关闭
+7. **不调 process_asset** → 不转写 / 不落盘 / 不打分 / 不摘要 / 不写 history
+
+### W3. 异常处理(2026-09-14 batch 容错)
+
+每个 video 自己 try/except,异常**只 log + 继续下个 video**(不中断整 batch):
+
+- `<video>` 没 ready / button 没渲染 / Chrome tab 被关 → RuntimeError → log + 跳过
+- asyncio.wait_for 30 min 安全超时触发 → RuntimeError → log + 跳过
+- 任何未知异常 → 同上
+
+### W4. 报告
+
+`vla watch` 收尾**只打一行**统计:
+
+```text
+👀 watch 模式(开 tab + 不录 + 不调 process_asset):目录共 <total> 条 / 已转写 <done> 条 / 待转写 <total-done> 条
+```
+
+⚠️ **没有产物**:`transcripts/` / `summaries/` 不会有任何新文件(watch 不调
+转写链路)。如果用户期望"跑完应该有字幕",那是 `vla learn` 不是 `vla watch`。
+**主动说明**,不要让用户误以为字幕在跑。
+
+### W5. 与 learn 的对比
+
+| 维度 | `learn` | `watch` |
+|---|---|---|
+| 翻页取任务 | ✅ | ✅ |
+| 借 cookie 调 list_tasks API | ✅ | ✅ |
+| 走 m3u8 直抽(FR-2.30) | ✅ | ❌ |
+| 浏览器 MediaRecorder 抓音 | ❌(已删 fallback) | ❌(关录屏) |
+| 静音播放(`video.muted=true`) | n/a | ✅(默认) |
+| 转写 + 质量门控 | ✅ | ❌ |
+| 落盘 transcripts/ summaries/ | ✅ | ❌ |
+| 写 history.jsonl | ✅ | ❌ |
+| 触发 6h 总结 | ✅ | ❌ |
+
+**何时用 watch**:
+- ✅ 验证浏览器 nav 路径(检查 button click / video ready / SPA 重置)
+- ✅ 测 JS 侧 setTimeout 兜底行为
+- ✅ 调试 capture JS(用 `disable_capture=True` 跳过录屏)
+- ❌ 不要拿 watch 当"轻量 learn"——它**不产字幕**,用户会误以为在跑转写
+
+### W6. 重新启用 capture 时(后续)
+
+1. 在 cli.py 的 `_iterate` 函数里,把 `disable_capture=True` 改 `False`
+2. 重新装配 `_build_watch_provider`(git 2026-09-14 当天版本里有)+ VideoLearningAgent +
+   `run_course_batch` 完整链路
+3. 移除 try/except,改用 `main.py:run()` 自带的 batch 容错
 
 ---
 

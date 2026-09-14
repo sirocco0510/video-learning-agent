@@ -31,9 +31,7 @@ from vla.log.transcription_log import TranscriptionLog
 from vla.models import Asset, ProcessResult, VideoTask
 from vla.subtitle import audio_scan
 from vla.transcribe.extract import (
-    _BROWSER_CAPTURE_MAX_DURATION_SEC,
     extract_audio,
-    extract_browser_audio,
     extract_m3u8_audio,
 )
 
@@ -132,27 +130,19 @@ class RealTextProvider:
                 return None
             wav_path = self._save_dir / "audio_raw" / f"{task.id}.wav"
             wav_path.parent.mkdir(parents=True, exist_ok=True)
-            # FR-2.30.1:audio 块在 VLAConfig 里是 Optional,缺省时退回常量默认值
-            # (1800),否则这里会 AttributeError。显式配成 null 才表示"不截断"。
+            # FR-2.30.1:audio 块在 VLAConfig 里是 Optional,缺省时退回 1800s,
+            # 否则这里会 AttributeError。显式配成 null 才表示"不截断"。
+            # 原 `_BROWSER_CAPTURE_MAX_DURATION_SEC` 常量已随浏览器 fallback 删除
+            # (2026-09-14);此处直接写默认值,后续如要恢复浏览器路径再抽常量。
             audio_cfg = self.cfg.audio
-            max_sec = (
-                audio_cfg.max_extract_sec if audio_cfg is not None
-                else _BROWSER_CAPTURE_MAX_DURATION_SEC
-            )
-            # FR-2.30 (2026-09-10 反转):m3u8 直抽优先,浏览器 4x MediaRecorder 降兜底。
-            #
-            # 为什么反转 —— 同视频(177.59s)四组对照实测:
-            #   m3u8 直抽 + Refiner   → score 92 (通过)
-            #   m3u8 直抽             → score 62~65
-            #   浏览器 4x + atempo    → score 35 (未通过)
-            # 逐词对比显示 4x 抓取毁可懂度:国家统计局 → 规判统计、
-            # PhantomJS → 翻腾架子、Beautiful Soup/LXML → UFOSOS/MILO。
-            # 成因是 preservesPitch + atempo 双重时间拉伸叠加 opus 重编码
-            # (音高 F0 实测比值 0.97,不是音高问题)。整条 pipeline 也更快:
-            # 30s vs 87s(含抽取步骤)。
-            #
-            # 注意:这个 fallback 是**异常驱动**的,抓不到"音质差但没报错"的
-            # 回退场景 —— 所以主次必须由质量实测决定,不能指望运行时自动选。
+            max_sec = audio_cfg.max_extract_sec if audio_cfg is not None else 1800
+            # FR-2.30(2026-09-14 修正):**只走 m3u8 直抽,失败即跳过视频**。
+            # 历史:2026-09-10 引入 m3u8 优先 + browser 4x fallback,四组对照
+            # 实测 m3u8 直抽 score 92、browser 4x score 35,逐词对比 4x 毁
+            # 可懂度(国家统计局→规判统计 等)。2026-09-14 用户裁定:browser
+            # 路径维护成本(Chrome/CDP/preservesPitch + atempo 双重时间拉伸
+            # 等技术债)> 覆盖收益,**删除整条 browser fallback**,m3u8 失败
+            # 直接跳过。
             try:
                 # ffmpeg 是 sync 阻塞调用;包 to_thread 不阻塞 event loop。
                 await asyncio.to_thread(
@@ -160,17 +150,9 @@ class RealTextProvider:
                 )
             except Exception as e1:
                 logger.warning(
-                    "extract_m3u8_audio failed (%s), fallback browser 4x capture", e1,
+                    "extract_m3u8_audio failed (%s), no browser fallback — skip video", e1,
                 )
-                try:
-                    await extract_browser_audio(
-                        video_url, wav_path, max_duration_sec=max_sec or _BROWSER_CAPTURE_MAX_DURATION_SEC,
-                    )
-                except Exception as e2:
-                    logger.warning(
-                        "extract_browser_audio fallback also failed: %s", e2,
-                    )
-                    return None
+                return None
             return Asset(text=None, source="whisper_internal_download", audio_path=wav_path, deletable=True)
 
         # 3. VideoSourceFactory
