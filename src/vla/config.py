@@ -134,6 +134,14 @@ class LLMClientConfig(BaseModel):
     #   "minimal" / "low" / "high" → 保留但不放开来
     #   None    → 不传该参数,走端点默认(有推理,需调用方自己把 max_tokens 拉够)
     reasoning_effort: str | None = None
+    # 2026-09-14:MiniMax-M3 hybrid thinking 模式(走 Chat Completions API)。
+    # 端点用私有字段 `thinking: {"type": "..."}` 而不是 OpenAI 标准的
+    # `reasoning_effort`(后者对 MiniMax 端点无效)—— 走 OpenAI SDK 的
+    # extra_body 通道透传:
+    #   "disabled" → 关掉 <think> 块,Refiner / QualityChecker 不会被 max_tokens 截断
+    #   "adaptive" → 端点自己决定是否思考
+    #   None       → 不传该参数,走端点默认(M2 系列纯 thinking,无字段也输出 <think>)
+    thinking_mode: str | None = None
 
 
 class LLMConfig(BaseModel):

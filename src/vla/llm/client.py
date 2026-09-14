@@ -66,6 +66,7 @@ class LLMClientLike(Protocol):
         max_tokens: int = 1000,
         temperature: float = 0.3,
         reasoning_effort: str | None = None,
+        thinking_mode: str | None = None,
     ) -> str: ...
 
 
@@ -102,6 +103,7 @@ class LLMClient:
         max_tokens: int = 1000,
         temperature: float = 0.3,
         reasoning_effort: str | None = None,
+        thinking_mode: str | None = None,
     ) -> str:
         """chat completion,返回字符串响应。
 
@@ -114,6 +116,9 @@ class LLMClient:
             reasoning_effort: 覆盖 config 的 reasoning_effort。
                 "none" 实测可完全关闭 deepseek-flash 的推理;
                 None → 用 self._config.reasoning_effort(未配置则不传该参数)。
+            thinking_mode: 覆盖 config 的 thinking_mode(MiniMax-M3 hybrid 模式)。
+                "disabled" → 关掉 <think> 块(走 extra_body 通道);
+                None → 用 self._config.thinking_mode(未配置则不传该参数)。
 
         Returns:
             模型返回的 message.content(保证非空白)
@@ -127,10 +132,19 @@ class LLMClient:
             if reasoning_effort is not None
             else self._config.reasoning_effort
         )
-        # 只在显式配置时带上,避免给不认识该参数的端点/模型传未知字段
+        mode = (
+            thinking_mode
+            if thinking_mode is not None
+            else self._config.thinking_mode
+        )
+        # 只在显式配置时带上,避免给不认识该参数的端点/模型传未知字段。
+        # reasoning_effort:OpenAI / DeepSeek R1 等标准字段。
+        # extra_body.thinking:MiniMax-M3 hybrid 模式(端点不读 reasoning_effort)。
         extra: dict[str, Any] = {}
         if effort is not None:
             extra["reasoning_effort"] = effort
+        if mode is not None:
+            extra["extra_body"] = {"thinking": {"type": mode}}
 
         resp = self._client.chat.completions.create(
             model=self.model,

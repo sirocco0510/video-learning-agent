@@ -75,18 +75,16 @@ audio:
   max_extract_sec: 1800
 
 llm_client:
-  provider: "deepseek"    # openai | qwen | deepseek | minimax
+  provider: "minimax"     # openai | qwen | deepseek | minimax
   api_key_env: "OPENAI_API_KEY"
   base_url_env: "OPENAI_BASE_URL"
-  # 2026-09-10:关掉 reasoning model 的推理链。
-  # deepseek-flash 默认推理极啰嗦 —— 实测一个 2507 字的 refiner 任务烧掉
-  # 16232 reasoning tokens,而这些 token **计入 max_tokens**,把 refiner 的
-  # 4000 预算吃光 → content 返回空 → Refiner 静默回退原文。
-  # 本项目三个云端 LLM 用途(质量检查 / 字幕清理 / 批量总结)都是机械任务,
-  # 不需要推理链。实测 "none" 让 reasoning_tokens 归零,refiner 12.4s 跑通,
-  # 输出 2617 字(与开着推理的 deepseek-chat 的 2619 字基本一致)。
-  # 可选值:"none"(关)| "minimal" | "low" | "high" | 删掉本行(走端点默认,需自行拉大 max_tokens)
-  reasoning_effort: "none"
+  # 2026-09-14:切到 MiniMax-M3(hybrid thinking model)后,关掉 <think> 块。
+  # 之前 deepseek-flash 用 reasoning_effort="none" 控推理;MiniMax M3 端点
+  # **不读** reasoning_effort(用私有 thinking 字段),改用 thinking_mode。
+  # 关掉 thinking 后 Refiner / QualityChecker / Summarizer 拿到的 content
+  # 不再被 thinking 块膨胀,不会 max_tokens 截断。
+  # 可选值:"disabled"(关)| "adaptive"(端点自定)| 删掉(M2 系列纯 thinking)
+  thinking_mode: "disabled"
 
 # R-10(2026-09-03):LLM 模型选择统一在这里 — 旧 quality_check.model / refine_model /
 # summary.model 字段已删除,通过 VLAConfig._migrate_legacy_llm_keys 自动迁移。
@@ -104,9 +102,9 @@ llm_client:
 #       而 LLMClient 的 `content or ""` 会把空串静默吞掉(不抛错)。
 #       轻量任务实测推理只吃 ~134 tokens,4000 余量充足。
 llm:
-  refine_model: "deepseek-flash"
-  quality_model: "deepseek-flash"
-  summary_model: "deepseek-flash"
+  refine_model: "MiniMax-M3"
+  quality_model: "MiniMax-M3"
+  summary_model: "MiniMax-M3"
 
 puppeteer:                                 # Phase 3.1+ Puppeteer CDP 配置
   debugging_port: 9222                    # Chrome --remote-debugging-port

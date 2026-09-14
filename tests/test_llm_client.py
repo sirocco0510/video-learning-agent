@@ -177,6 +177,80 @@ class TestReasoningEffort:
                 assert kwargs["reasoning_effort"] == "high"
 
 
+class TestThinkingMode:
+    """thinking 字段透传(2026-09-14)。
+
+    背景:MiniMax-M3 是 hybrid 模式,默认输出 `` 块把
+    max_tokens 吃光,Refiner / QualityChecker 因此 JSON 解析失败。
+    MiniMax 私有字段 `thinking: {"type": "disabled"}` 走 OpenAI SDK 的
+    extra_body 通道传给 Chat Completions API(标准字段 `reasoning_effort`
+    对 MiniMax 端点无效 —— M3 不读它)。
+    """
+
+    def _client(self, mock_openai_cls, content="ok"):
+        mock_instance = MagicMock()
+        mock_instance.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content=content), finish_reason="stop")]
+        )
+        mock_openai_cls.return_value = mock_instance
+        return mock_instance
+
+    def test_passes_thinking_disabled_via_extra_body(self):
+        """LLMClientConfig.thinking_mode='disabled' → extra_body={thinking: {type: 'disabled'}}。"""
+        cfg = LLMClientConfig(
+            provider="minimax", api_key_env="OPENAI_API_KEY",
+            base_url_env="OPENAI_BASE_URL", thinking_mode="disabled",
+        )
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-x", "OPENAI_BASE_URL": "https://x/v1"}):
+            with patch("vla.llm.client.openai.OpenAI") as mock_openai_cls:
+                mock_instance = self._client(mock_openai_cls)
+                LLMClient(cfg, model="MiniMax-M3").complete("ping")
+
+                kwargs = mock_instance.chat.completions.create.call_args.kwargs
+                assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+
+    def test_omits_thinking_when_unset(self, llm_cfg):
+        """config 未设 thinking_mode(default None)→ 不传 extra_body。"""
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-x", "OPENAI_BASE_URL": "https://x/v1"}):
+            with patch("vla.llm.client.openai.OpenAI") as mock_openai_cls:
+                mock_instance = self._client(mock_openai_cls)
+                LLMClient(llm_cfg, model="gpt-4o-mini").complete("ping")
+
+                kwargs = mock_instance.chat.completions.create.call_args.kwargs
+                assert "extra_body" not in kwargs
+
+    def test_per_call_thinking_override(self):
+        """per-call thinking_mode 覆盖 config。"""
+        cfg = LLMClientConfig(
+            provider="minimax", api_key_env="OPENAI_API_KEY",
+            base_url_env="OPENAI_BASE_URL", thinking_mode="disabled",
+        )
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-x", "OPENAI_BASE_URL": "https://x/v1"}):
+            with patch("vla.llm.client.openai.OpenAI") as mock_openai_cls:
+                mock_instance = self._client(mock_openai_cls)
+                LLMClient(cfg, model="MiniMax-M3").complete(
+                    "ping", thinking_mode="adaptive"
+                )
+
+                kwargs = mock_instance.chat.completions.create.call_args.kwargs
+                assert kwargs["extra_body"] == {"thinking": {"type": "adaptive"}}
+
+    def test_does_not_set_reasoning_effort_for_minimax(self):
+        """MiniMax 端点不读 reasoning_effort(M3 用 thinking 字段)→ 不传该字段。"""
+        cfg = LLMClientConfig(
+            provider="minimax", api_key_env="OPENAI_API_KEY",
+            base_url_env="OPENAI_BASE_URL", thinking_mode="disabled",
+            # 注意:不设 reasoning_effort — MiniMax M3 端点忽略它,徒增日志噪音
+        )
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-x", "OPENAI_BASE_URL": "https://x/v1"}):
+            with patch("vla.llm.client.openai.OpenAI") as mock_openai_cls:
+                mock_instance = self._client(mock_openai_cls)
+                LLMClient(cfg, model="MiniMax-M3").complete("ping")
+
+                kwargs = mock_instance.chat.completions.create.call_args.kwargs
+                assert "reasoning_effort" not in kwargs
+
+
 class TestEmptyResponseIsNotSilent:
     """空 content 必须显式报错(2026-09-10)。
 
